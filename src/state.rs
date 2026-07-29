@@ -1,0 +1,197 @@
+use crate::{
+    library::EntryName,
+    model::{LeadHour, MercatorPoint, Overlay, Product, RunId, RunSelection, Viewport},
+    persist::{load_toml, save_toml},
+};
+use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, path::Path};
+
+const SCHEMA: u16 = 1;
+
+#[derive(Clone, Debug)]
+pub struct Slate {
+    pub overlay: Overlay,
+    pub cycle: RunSelection,
+    pub lead: LeadHour,
+    pub active_view: Option<EntryName>,
+    pub closed_folders: BTreeSet<String>,
+}
+
+impl Default for Slate {
+    fn default() -> Self {
+        Self {
+            overlay: Product::default().into(),
+            cycle: RunSelection::default(),
+            lead: LeadHour::ZERO,
+            active_view: None,
+            closed_folders: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CycleMode {
+    #[default]
+    Latest,
+    LatestLong,
+    Fixed,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SlateWire {
+    V1(SlateV1),
+    Legacy(LegacySlate),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SlateV1 {
+    schema: u16,
+    #[serde(alias = "product")]
+    overlay: Overlay,
+    cycle: CycleMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixed_run: Option<RunId>,
+    lead: LeadHour,
+    active_view: Option<EntryName>,
+    closed_folders: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacySlate {
+    #[serde(alias = "product")]
+    overlay: Overlay,
+    cycle_tether: CycleMode,
+    run: Option<RunId>,
+    lead: LeadHour,
+    viewport: Viewport,
+    #[serde(alias = "probes")]
+    pins: Vec<MercatorPoint>,
+    active_view: Option<EntryName>,
+    closed_folders: BTreeSet<String>,
+}
+
+impl Default for LegacySlate {
+    fn default() -> Self {
+        Self {
+            overlay: Product::default().into(),
+            cycle_tether: CycleMode::Latest,
+            run: None,
+            lead: LeadHour::ZERO,
+            viewport: Viewport::default(),
+            pins: Vec::new(),
+            active_view: None,
+            closed_folders: BTreeSet::new(),
+        }
+    }
+}
+
+impl Slate {
+    pub fn load(path: &Path) -> Result<(Self, bool)> {
+        let Some(wire) = load_toml(path, "session state")? else {
+            return Ok((Self::default(), false));
+        };
+        match wire {
+            SlateWire::V1(wire) => Ok((Self::from_v1(wire)?, false)),
+            SlateWire::Legacy(wire) => Ok((Self::from_legacy(wire)?, true)),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let (cycle, fixed_run) = match self.cycle {
+            RunSelection::Latest => (CycleMode::Latest, None),
+            RunSelection::LatestLong => (CycleMode::LatestLong, None),
+            RunSelection::Fixed(run) => (CycleMode::Fixed, Some(run)),
+        };
+        save_toml(
+            &SlateV1 {
+                schema: SCHEMA,
+                overlay: self.overlay,
+                cycle,
+                fixed_run,
+                lead: self.lead,
+                active_view: self.active_view.clone(),
+                closed_folders: self.closed_folders.clone(),
+            },
+            path,
+            "serialize session state",
+        )
+    }
+
+    fn from_v1(wire: SlateV1) -> Result<Self> {
+        if wire.schema != SCHEMA {
+            bail!("unsupported session-state schema {}", wire.schema);
+        }
+        let cycle = refine_cycle(wire.cycle, wire.fixed_run)?;
+        Ok(Self {
+            overlay: wire.overlay,
+            cycle,
+            lead: wire.lead,
+            active_view: wire.active_view,
+            closed_folders: wire.closed_folders,
+        })
+    }
+
+    fn from_legacy(mut wire: LegacySlate) -> Result<Self> {
+        wire.viewport.normalize();
+        let _legacy_pins = wire
+            .pins
+            .drain(..)
+            .filter_map(MercatorPoint::normalize)
+            .collect::<Vec<_>>();
+        let cycle = refine_cycle(wire.cycle_tether, wire.run)?;
+        Ok(Self {
+            overlay: wire.overlay,
+            cycle,
+            lead: wire.lead,
+            active_view: wire.active_view,
+            closed_folders: wire.closed_folders,
+        })
+    }
+}
+
+fn refine_cycle(mode: CycleMode, fixed: Option<RunId>) -> Result<RunSelection> {
+    match (mode, fixed) {
+        (CycleMode::Latest, _) => Ok(RunSelection::Latest),
+        (CycleMode::LatestLong, _) => Ok(RunSelection::LatestLong),
+        (CycleMode::Fixed, Some(run)) => Ok(RunSelection::Fixed(run)),
+        (CycleMode::Fixed, None) => bail!("fixed cycle selection has no cycle"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_qpf_state_rectifies_to_run_accumulation() -> Result<()> {
+        let wire = toml::from_str::<SlateWire>("product = \"qpf\"")?;
+        let SlateWire::Legacy(wire) = wire else {
+            bail!("legacy state parsed as current state");
+        };
+        let slate = Slate::from_legacy(wire)?;
+        assert_eq!(slate.overlay.active(), Some(Product::QpfRun));
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_selection_cannot_exist_without_a_cycle() {
+        assert!(refine_cycle(CycleMode::Fixed, None).is_err());
+    }
+
+    #[test]
+    fn illegal_persisted_leads_are_rejected() {
+        let text = "\
+schema = 1
+overlay = \"smoke\"
+cycle = \"latest\"
+lead = 49
+closed_folders = []
+";
+        assert!(toml::from_str::<SlateWire>(text).is_err());
+    }
+}

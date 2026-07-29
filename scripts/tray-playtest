@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+binary=${1:?usage: scripts/tray-playtest BINARY OUT CONFIG}
+out=${2:?usage: scripts/tray-playtest BINARY OUT CONFIG}
+config=${3:?usage: scripts/tray-playtest BINARY OUT CONFIG}
+app=
+wm=
+
+mkdir -p "$out"
+trace=$out/tray-driver.log
+: >"$trace"
+
+mark() {
+    printf '%s\n' "$1" >>"$trace"
+}
+
+cleanup() {
+    if [ -n "$app" ]; then
+        kill "$app" 2>/dev/null || true
+    fi
+    if [ -n "$wm" ]; then
+        kill "$wm" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+i3 -c "$config" >"$out/tray-i3.log" 2>&1 &
+wm=$!
+timeout 10 sh -c 'until i3-msg -t get_version >/dev/null 2>&1; do sleep 0.05; done'
+mark wm-ready
+sleep 0.5
+"$binary" >"$out/tray-app.log" 2>&1 &
+app=$!
+window=$(timeout 20 xdotool search --sync --onlyvisible --pid "$app" \
+    --name '^HRRR · native forecast fields$' | sed -n '1p')
+mark "window-ready $window"
+tray=$(timeout 10 xdotool search --sync --onlyvisible --name '^HRRR tray$' | sed -n '1p')
+mark "tray-ready $tray"
+sleep 1
+
+xdotool windowquit "$window"
+timeout 10 sh -c 'until xwininfo -id "$1" | rg -q "Map State: IsUnMapped"; do sleep 0.05; done' sh "$window"
+kill -0 "$app"
+mark hidden
+import -window root "$out/tray-hidden.png"
+test -s "$XDG_STATE_HOME/hrrr/slate.toml"
+
+xdotool mousemove --window "$tray" 9 9 click 1
+timeout 10 sh -c 'until xwininfo -id "$1" | rg -q "Map State: IsViewable"; do sleep 0.05; done' sh "$window"
+timeout 10 sh -c 'until test "$(xdotool getwindowfocus)" = "$1"; do sleep 0.05; done' sh "$window"
+mark restored
+sleep 1
+import -window root "$out/tray-restored.png"
+
+xdotool windowquit "$window"
+timeout 10 sh -c 'until xwininfo -id "$1" | rg -q "Map State: IsUnMapped"; do sleep 0.05; done' sh "$window"
+xdotool mousemove --window "$tray" 9 9 click 3
+menu=$(timeout 10 xdotool search --sync --onlyvisible --name '^HRRR tray menu$' | sed -n '1p')
+mark menu-ready
+xwininfo -id "$tray" >"$out/tray-icon.info"
+xwininfo -id "$menu" >"$out/tray-menu.info"
+xrandr --listmonitors >"$out/tray-monitors.info"
+python3 -c 'import re, sys
+
+def window(path):
+    text = open(path, encoding="utf-8").read()
+    value = lambda name: int(re.search(rf"{name}:\s+(-?\d+)", text).group(1))
+    return value("Absolute upper-left X"), value("Absolute upper-left Y"), value("Width"), value("Height"), value("Border width")
+
+icon = window(sys.argv[1])
+menu = window(sys.argv[2])
+monitors = []
+for line in open(sys.argv[3], encoding="utf-8"):
+    match = re.search(r"(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)", line)
+    if match:
+        width, height, x, y = map(int, match.groups())
+        monitors.append((x, y, width, height))
+assert monitors
+point = icon[0] + icon[2] // 2, icon[1] + icon[3] // 2
+distance = lambda rect: (point[0] - min(max(point[0], rect[0]), rect[0] + rect[2] - 1)) ** 2 + (point[1] - min(max(point[1], rect[1]), rect[1] + rect[3] - 1)) ** 2
+monitor = min(monitors, key=distance)
+assert monitor[0] <= menu[0] and menu[0] + menu[2] + 2 * menu[4] <= monitor[0] + monitor[2]
+assert monitor[1] <= menu[1] and menu[1] + menu[3] + 2 * menu[4] <= monitor[1] + monitor[3]
+' "$out/tray-icon.info" "$out/tray-menu.info" "$out/tray-monitors.info"
+import -window root "$out/tray-menu.png"
+xdotool mousemove --window "$menu" 52 15 click 1
+timeout 10 sh -c 'while kill -0 "$1" 2>/dev/null; do sleep 0.05; done' sh "$app"
+wait "$app"
+app=
+mark quit
+
+for image in tray-hidden tray-restored tray-menu; do
+    test -s "$out/$image.png"
+done
+if rg -i 'panicked|validation error|surface texture validation failure|X11 tray failed' \
+    "$out/tray-app.log"; then
+    exit 1
+fi

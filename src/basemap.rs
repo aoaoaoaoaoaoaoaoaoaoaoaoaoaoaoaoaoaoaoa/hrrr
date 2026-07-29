@@ -1,0 +1,1221 @@
+use crate::{basemap_artifact::MAX_ZOOM as MAX_SOURCE_ZOOM, map, model::Viewport};
+use anyhow::{Context as _, Result};
+use bytemuck::{Pod, Zeroable};
+use crossbeam_channel::{Receiver, Sender, bounded};
+use egui::Context;
+use fast_mvt::{MvtFeatureRef, MvtGeometry, MvtReaderRef, MvtValueRef};
+use geo_types::{Coord, LineString, Point, Polygon};
+use lyon_tessellation::{
+    BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers, math::point,
+    path::Path,
+};
+use pmtiles::{AsyncPmTilesReader, HashMapCache, MmapBackend, TileCoord};
+use std::{
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant, SystemTime},
+};
+
+pub const PAPER_SRGB: [u8; 3] = [229; 3];
+pub const APPARITION_SPAN: f32 = 1.35;
+const RETAINED_DEPTH: u8 = 4;
+
+pub fn apparition(view_zoom: f32, onset_zoom: f32) -> f32 {
+    let phase = ((view_zoom - onset_zoom) / APPARITION_SPAN).clamp(0.0, 1.0);
+    phase * phase * (3.0 - 2.0 * phase)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TileKey {
+    pub zoom: u8,
+    pub x: u32,
+    pub y: u32,
+}
+
+impl TileKey {
+    fn coordinate(self) -> Result<TileCoord> {
+        TileCoord::new(self.zoom, self.x, self.y).context("invalid PMTiles coordinate")
+    }
+}
+
+#[derive(Debug)]
+pub struct Cover {
+    pub strata: Vec<Stratum>,
+}
+
+impl Cover {
+    pub fn finest_ready(&self, mut resident: impl FnMut(TileKey) -> bool) -> Option<&Stratum> {
+        self.strata.iter().rev().find(|stratum| {
+            stratum.intent.presents() && stratum.keys.iter().all(|key| resident(*key))
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct Stratum {
+    pub intent: Intent,
+    pub keys: Vec<TileKey>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Intent {
+    Retained,
+    Required,
+    Prefetch,
+}
+
+impl Intent {
+    pub const fn demands(self) -> bool {
+        matches!(self, Self::Required | Self::Prefetch)
+    }
+
+    pub const fn presents(self) -> bool {
+        !matches!(self, Self::Prefetch)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct FillPoint {
+    pub local: [f32; 2],
+    pub material: u32,
+    pub onset_zoom: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct StrokePoint {
+    pub local: [f32; 2],
+    pub extrusion: [f32; 2],
+    pub srgb: [u8; 4],
+    pub radius_points: f32,
+    /// Magnitude is `onset_zoom + 1`; sign selects the extrusion bank.
+    pub onset_side: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Label {
+    pub world: [f64; 2],
+    pub text: Arc<str>,
+    pub rank: u16,
+    pub size: f32,
+    pub onset_zoom: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Mesh<V> {
+    pub vertices: Arc<[V]>,
+    pub indices: Arc<[u32]>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CutTiming {
+    pub archive_us: u64,
+    pub decode_us: u64,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct VectorTile {
+    pub key: TileKey,
+    pub fills: Mesh<FillPoint>,
+    pub strokes: Mesh<StrokePoint>,
+    pub labels: Arc<[Label]>,
+    pub timing: CutTiming,
+}
+
+impl VectorTile {
+    pub fn resident_bytes(&self) -> usize {
+        self.fills
+            .vertices
+            .len()
+            .saturating_mul(size_of::<FillPoint>())
+            .saturating_add(self.fills.indices.len().saturating_mul(size_of::<u32>()))
+            .saturating_add(
+                self.strokes
+                    .vertices
+                    .len()
+                    .saturating_mul(size_of::<StrokePoint>()),
+            )
+            .saturating_add(self.strokes.indices.len().saturating_mul(size_of::<u32>()))
+            .saturating_add(self.labels.len().saturating_mul(size_of::<Label>()))
+            .saturating_add(
+                self.labels
+                    .iter()
+                    .map(|label| label.text.len())
+                    .sum::<usize>(),
+            )
+    }
+}
+
+#[derive(Debug)]
+pub enum Event {
+    Ready,
+    Loaded(Arc<VectorTile>),
+    Missing(TileKey),
+    Fault {
+        key: Option<TileKey>,
+        message: String,
+    },
+}
+
+pub struct Basemap {
+    commands: Sender<TileKey>,
+    pub events: Receiver<Event>,
+    _thread: thread::JoinHandle<()>,
+}
+
+impl Basemap {
+    pub fn spawn(ctx: Context, archive: PathBuf) -> Result<Self> {
+        if !archive.is_file() {
+            anyhow::bail!(
+                "no basemap archive at {}; run `hrrr basemap install`",
+                archive.display()
+            );
+        }
+        let workers = thread::available_parallelism()
+            .map_or(4, std::num::NonZeroUsize::get)
+            .clamp(2, 8);
+        Self::spawn_with_workers(ctx, archive, workers)
+    }
+
+    fn spawn_with_workers(ctx: Context, archive: PathBuf, workers: usize) -> Result<Self> {
+        if let Some(directory) = archive.parent() {
+            purge_partials(directory)?;
+        }
+        let (commands, command_rx) = bounded(256);
+        let (event_tx, events) = bounded(256);
+        let thread = thread::Builder::new()
+            .name("vector-armory".to_owned())
+            .spawn(move || armory(ctx, archive, command_rx, event_tx, workers))
+            .context("spawn vector basemap armory")?;
+        Ok(Self {
+            commands,
+            events,
+            _thread: thread,
+        })
+    }
+
+    pub fn request(&self, key: TileKey) -> bool {
+        self.commands.try_send(key).is_ok()
+    }
+}
+
+pub fn cover(view: Viewport, rect: egui::Rect) -> Cover {
+    let zoom = view.zoom.floor().clamp(0.0, f64::from(MAX_SOURCE_ZOOM)) as u8;
+    let ceiling = zoom.saturating_add(1).min(MAX_SOURCE_ZOOM);
+    let strata = (zoom.saturating_sub(RETAINED_DEPTH)..=ceiling)
+        .map(|level| Stratum {
+            intent: match level.cmp(&zoom) {
+                std::cmp::Ordering::Less => Intent::Retained,
+                std::cmp::Ordering::Equal => Intent::Required,
+                std::cmp::Ordering::Greater => Intent::Prefetch,
+            },
+            keys: keys_at(view, rect, level),
+        })
+        .collect();
+    Cover { strata }
+}
+
+fn keys_at(view: Viewport, rect: egui::Rect, zoom: u8) -> Vec<TileKey> {
+    let divisions = 1_u32 << zoom;
+    let bounds = map::world_bounds(view, rect);
+    let scale = f64::from(divisions);
+    let left = (bounds[0] * scale).floor() as i64;
+    let right = (bounds[2] * scale).floor() as i64;
+    let top = (bounds[1] * scale).floor().max(0.0) as i64;
+    let bottom = (bounds[3] * scale)
+        .floor()
+        .min(f64::from(divisions.saturating_sub(1))) as i64;
+    let mut keys = Vec::new();
+    for raw_y in top..=bottom {
+        for raw_x in left..=right {
+            keys.push(TileKey {
+                zoom,
+                x: raw_x.rem_euclid(i64::from(divisions)) as u32,
+                y: raw_y as u32,
+            });
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys.sort_unstable_by(|left, right| {
+        tile_distance(*left, view.center_mercator)
+            .total_cmp(&tile_distance(*right, view.center_mercator))
+    });
+    keys
+}
+
+fn tile_distance(key: TileKey, center: [f64; 2]) -> f64 {
+    let scale = f64::from(1_u32 << key.zoom);
+    let x = (f64::from(key.x) + 0.5) / scale;
+    let y = (f64::from(key.y) + 0.5) / scale;
+    (x - center[0]).mul_add(x - center[0], (y - center[1]).powi(2))
+}
+
+type Archive = AsyncPmTilesReader<MmapBackend, HashMapCache>;
+
+fn armory(
+    ctx: Context,
+    archive: PathBuf,
+    commands: Receiver<TileKey>,
+    events: Sender<Event>,
+    worker_count: usize,
+) {
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            send_fault(&ctx, &events, None, &err);
+            return;
+        }
+    };
+    let reader = match runtime.block_on(Archive::new_with_cached_path(
+        HashMapCache::default(),
+        &archive,
+    )) {
+        Ok(reader) => Arc::new(reader),
+        Err(err) => {
+            send_fault(
+                &ctx,
+                &events,
+                None,
+                &anyhow::Error::new(err).context(format!("open {}", archive.display())),
+            );
+            return;
+        }
+    };
+    if events.send(Event::Ready).is_err() {
+        return;
+    }
+    ctx.request_repaint();
+    let mut workers = Vec::with_capacity(worker_count);
+    for slot in 0..worker_count {
+        let worker_ctx = ctx.clone();
+        let reader = reader.clone();
+        let commands = commands.clone();
+        let worker_events = events.clone();
+        let worker = thread::Builder::new()
+            .name(format!("vector-quarry-{slot}"))
+            .spawn(move || quarry(worker_ctx, reader, commands, worker_events));
+        match worker {
+            Ok(worker) => workers.push(worker),
+            Err(err) => {
+                send_fault(
+                    &ctx,
+                    &events,
+                    None,
+                    &anyhow::Error::new(err).context("spawn vector quarry"),
+                );
+                break;
+            }
+        }
+    }
+    drop(commands);
+    drop(events);
+    for worker in workers {
+        let _joined = worker.join();
+    }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .context("build basemap runtime")
+}
+
+fn quarry(ctx: Context, archive: Arc<Archive>, commands: Receiver<TileKey>, events: Sender<Event>) {
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            send_fault(&ctx, &events, None, &err);
+            return;
+        }
+    };
+    while let Ok(key) = commands.recv() {
+        let begun = Instant::now();
+        let bytes = match key.coordinate().and_then(|coordinate| {
+            runtime
+                .block_on(archive.get_tile_decompressed(coordinate))
+                .map_err(anyhow::Error::new)
+        }) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                if events.send(Event::Missing(key)).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+                continue;
+            }
+            Err(err) => {
+                send_fault(&ctx, &events, Some(key), &err);
+                continue;
+            }
+        };
+        let archive_us = micros(begun.elapsed());
+        let decode_begun = Instant::now();
+        let event = match decode_tile(key, &bytes) {
+            Ok(mut tile) => {
+                tile.timing = CutTiming {
+                    archive_us,
+                    decode_us: micros(decode_begun.elapsed()),
+                    bytes: bytes.len(),
+                };
+                Event::Loaded(Arc::new(tile))
+            }
+            Err(err) => Event::Fault {
+                key: Some(key),
+                message: format!("decode vector tile {key:?}: {err:#}"),
+            },
+        };
+        if events.send(event).is_err() {
+            break;
+        }
+        ctx.request_repaint();
+    }
+}
+
+fn send_fault(ctx: &Context, events: &Sender<Event>, key: Option<TileKey>, err: &anyhow::Error) {
+    let _sent = events.try_send(Event::Fault {
+        key,
+        message: format!("{err:#}"),
+    });
+    ctx.request_repaint();
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn decode_tile(key: TileKey, bytes: &[u8]) -> Result<VectorTile> {
+    let reader = MvtReaderRef::new(bytes).context("parse MVT")?;
+    let mut forge = Forge::new(key);
+    for layer in reader.layers() {
+        match layer.name() {
+            "earth" => forge.fill_layer(layer, FillKind::Earth)?,
+            "landcover" => forge.fill_layer(layer, FillKind::Landcover)?,
+            "landuse" => forge.fill_layer(layer, FillKind::Landuse)?,
+            "water" => forge.water_layer(layer)?,
+            "boundaries" => forge.stroke_layer(layer, StrokeKind::Boundary)?,
+            "roads" => forge.stroke_layer(layer, StrokeKind::Road)?,
+            "places" => forge.label_layer(layer)?,
+            _ => {}
+        }
+    }
+    Ok(forge.finish())
+}
+
+#[derive(Clone, Copy)]
+enum FillKind {
+    Earth,
+    Landcover,
+    Landuse,
+}
+
+impl FillKind {
+    fn material(self, kind: Option<&str>) -> Option<FillMaterial> {
+        match self {
+            Self::Earth => Some(FillMaterial::Earth),
+            Self::Landcover => match kind {
+                Some("forest" | "wood") => Some(FillMaterial::Forest),
+                Some("grass" | "grassland" | "scrub") => Some(FillMaterial::Grassland),
+                _ => None,
+            },
+            Self::Landuse => match kind {
+                Some("forest" | "wood" | "nature_reserve") => Some(FillMaterial::Forest),
+                Some("park" | "garden" | "grass" | "grassland" | "meadow") => {
+                    Some(FillMaterial::Grassland)
+                }
+                Some("wetland") => Some(FillMaterial::Wetland),
+                Some("farmland") => Some(FillMaterial::Farmland),
+                Some("beach" | "sand") => Some(FillMaterial::Sand),
+                Some("industrial" | "commercial" | "retail" | "railway") => {
+                    Some(FillMaterial::Industry)
+                }
+                Some("school" | "college" | "university" | "hospital") => Some(FillMaterial::Civic),
+                Some("residential") => Some(FillMaterial::Residential),
+                _ => None,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+enum FillMaterial {
+    Earth,
+    Forest,
+    Grassland,
+    Wetland,
+    Farmland,
+    Sand,
+    Industry,
+    Civic,
+    Residential,
+    Water,
+}
+
+#[derive(Clone, Copy)]
+enum StrokeKind {
+    Boundary,
+    Road,
+}
+
+#[derive(Clone, Copy)]
+struct StrokeStyle {
+    color: [u8; 4],
+    radius_points: f32,
+    onset_zoom: f32,
+}
+
+const WATER_STROKE: StrokeStyle = StrokeStyle {
+    color: [91, 91, 91, 112],
+    radius_points: 0.36,
+    onset_zoom: 0.0,
+};
+
+struct Forge {
+    key: TileKey,
+    fills: VertexBuffers<FillPoint, u32>,
+    strokes: VertexBuffers<StrokePoint, u32>,
+    labels: Vec<Label>,
+    tessellator: FillTessellator,
+}
+
+impl Forge {
+    fn new(key: TileKey) -> Self {
+        Self {
+            key,
+            fills: VertexBuffers::new(),
+            strokes: VertexBuffers::new(),
+            labels: Vec::new(),
+            tessellator: FillTessellator::new(),
+        }
+    }
+
+    fn fill_layer(&mut self, layer: fast_mvt::MvtLayerRef<'_>, fill: FillKind) -> Result<()> {
+        let extent = layer.extent();
+        for feature in layer.features() {
+            let tags = FeatureTags::read(feature)?;
+            let Some(material) = fill.material(tags.kind) else {
+                continue;
+            };
+            self.fill_geometry(
+                &feature.geometry()?,
+                extent,
+                material,
+                tags.min_zoom.unwrap_or(0.0) as f32,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn water_layer(&mut self, layer: fast_mvt::MvtLayerRef<'_>) -> Result<()> {
+        let extent = layer.extent();
+        for feature in layer.features() {
+            let tags = FeatureTags::read(feature)?;
+            let onset_zoom = tags.min_zoom.unwrap_or(0.0) as f32;
+            let geometry = feature.geometry()?;
+            match geometry {
+                MvtGeometry::Polygon(_) | MvtGeometry::MultiPolygon(_) => {
+                    self.fill_geometry(&geometry, extent, FillMaterial::Water, onset_zoom)?;
+                }
+                MvtGeometry::LineString(_) | MvtGeometry::MultiLineString(_) => {
+                    self.stroke_geometry(
+                        &geometry,
+                        extent,
+                        StrokeStyle {
+                            onset_zoom,
+                            ..WATER_STROKE
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn stroke_layer(&mut self, layer: fast_mvt::MvtLayerRef<'_>, stroke: StrokeKind) -> Result<()> {
+        let extent = layer.extent();
+        for feature in layer.features() {
+            let style = match stroke {
+                StrokeKind::Boundary => Some(boundary_style(
+                    integer_property(feature, "kind_detail")?,
+                    numeric_property(feature, "min_zoom")?,
+                )),
+                StrokeKind::Road => {
+                    let tags = FeatureTags::read(feature)?;
+                    road_style(tags.kind, tags.detail, tags.min_zoom, self.key.zoom)
+                }
+            };
+            let Some(style) = style else {
+                continue;
+            };
+            self.stroke_geometry(&feature.geometry()?, extent, style);
+        }
+        Ok(())
+    }
+
+    fn label_layer(&mut self, layer: fast_mvt::MvtLayerRef<'_>) -> Result<()> {
+        let extent = layer.extent();
+        for feature in layer.features() {
+            let tags = FeatureTags::read(feature)?;
+            let Some(name) = tags.name else { continue };
+            let Some(style) =
+                label_style(tags.kind, tags.detail, tags.population_rank, tags.min_zoom)
+            else {
+                continue;
+            };
+            let geometry = feature.geometry()?;
+            match geometry {
+                MvtGeometry::Point(point) => self.push_label(point, extent, name, style),
+                MvtGeometry::MultiPoint(points) => {
+                    for point in points {
+                        self.push_label(point, extent, name, style);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn push_label(&mut self, point: Point<i32>, extent: u32, text: &str, style: LabelStyle) {
+        self.labels.push(Label {
+            world: world64(self.key, extent, point.0),
+            text: Arc::from(text),
+            rank: style.rank,
+            size: style.size,
+            onset_zoom: style.onset_zoom,
+        });
+    }
+
+    fn fill_geometry(
+        &mut self,
+        geometry: &MvtGeometry,
+        extent: u32,
+        material: FillMaterial,
+        onset_zoom: f32,
+    ) -> Result<()> {
+        match geometry {
+            MvtGeometry::Polygon(polygon) => {
+                self.fill_polygon(polygon, extent, material, onset_zoom)?;
+            }
+            MvtGeometry::MultiPolygon(polygons) => {
+                for polygon in polygons {
+                    self.fill_polygon(polygon, extent, material, onset_zoom)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn fill_polygon(
+        &mut self,
+        polygon: &Polygon<i32>,
+        extent: u32,
+        material: FillMaterial,
+        onset_zoom: f32,
+    ) -> Result<()> {
+        let mut path = Path::builder();
+        push_ring(&mut path, extent, polygon.exterior());
+        for ring in polygon.interiors() {
+            push_ring(&mut path, extent, ring);
+        }
+        let path = path.build();
+        self.tessellator
+            .tessellate_path(
+                &path,
+                &FillOptions::default().with_fill_rule(FillRule::EvenOdd),
+                &mut BuffersBuilder::new(&mut self.fills, |vertex: FillVertex<'_>| FillPoint {
+                    local: vertex.position().to_array(),
+                    material: material as u32,
+                    onset_zoom,
+                }),
+            )
+            .context("tessellate vector polygon")?;
+        Ok(())
+    }
+
+    fn stroke_geometry(&mut self, geometry: &MvtGeometry, extent: u32, style: StrokeStyle) {
+        match geometry {
+            MvtGeometry::LineString(line) => self.stroke_line(line, extent, style),
+            MvtGeometry::MultiLineString(lines) => {
+                for line in lines {
+                    self.stroke_line(line, extent, style);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn stroke_line(&mut self, line: &LineString<i32>, extent: u32, style: StrokeStyle) {
+        let mut points = Vec::with_capacity(line.0.len());
+        for &coordinate in &line.0 {
+            let point = local32(extent, coordinate);
+            if points.last().is_none_or(|prior| *prior != point) {
+                points.push(point);
+            }
+        }
+        if points.len() < 2 {
+            return;
+        }
+        let Ok(base) = u32::try_from(self.strokes.vertices.len()) else {
+            return;
+        };
+        for slot in 0..points.len() {
+            let extrusion = join_normal(&points, slot);
+            self.strokes.vertices.extend([
+                StrokePoint {
+                    local: points[slot],
+                    extrusion: [-extrusion[0], -extrusion[1]],
+                    srgb: style.color,
+                    radius_points: style.radius_points,
+                    onset_side: -(style.onset_zoom.max(0.0) + 1.0),
+                },
+                StrokePoint {
+                    local: points[slot],
+                    extrusion,
+                    srgb: style.color,
+                    radius_points: style.radius_points,
+                    onset_side: style.onset_zoom.max(0.0) + 1.0,
+                },
+            ]);
+        }
+        for slot in 0..points.len() - 1 {
+            let Some(offset) = u32::try_from(slot)
+                .ok()
+                .and_then(|slot| slot.checked_mul(2))
+            else {
+                return;
+            };
+            let a = base + offset;
+            self.strokes
+                .indices
+                .extend([a, a + 1, a + 2, a + 1, a + 3, a + 2]);
+        }
+    }
+
+    fn finish(mut self) -> VectorTile {
+        self.labels.sort_unstable_by_key(|label| label.rank);
+        VectorTile {
+            key: self.key,
+            fills: Mesh {
+                vertices: self.fills.vertices.into(),
+                indices: self.fills.indices.into(),
+            },
+            strokes: Mesh {
+                vertices: self.strokes.vertices.into(),
+                indices: self.strokes.indices.into(),
+            },
+            labels: self.labels.into(),
+            timing: CutTiming::default(),
+        }
+    }
+}
+
+fn boundary_style(detail: Option<i64>, min_zoom: Option<f64>) -> StrokeStyle {
+    let (color, radius, fallback_onset) = match detail {
+        Some(2 | 3) => ([68, 68, 68, 170], 0.58, 0.0),
+        Some(4 | 5) => ([82, 82, 82, 128], 0.38, 3.0),
+        Some(6 | 7) => ([96, 96, 96, 88], 0.24, 6.0),
+        _ => ([104, 104, 104, 58], 0.18, 8.0),
+    };
+    StrokeStyle {
+        color,
+        radius_points: radius,
+        onset_zoom: min_zoom.unwrap_or(fallback_onset) as f32,
+    }
+}
+
+fn road_style(
+    kind: Option<&str>,
+    detail: Option<&str>,
+    min_zoom: Option<f64>,
+    source_zoom: u8,
+) -> Option<StrokeStyle> {
+    let (color, radius, fallback_onset) = match (kind, detail) {
+        (Some("highway"), Some("motorway")) => ([70, 70, 70, 158], 0.52, 4.0),
+        (Some("highway"), Some("motorway_link")) => ([74, 74, 74, 125], 0.34, 7.0),
+        (Some("major_road"), Some("trunk" | "trunk_link")) => ([73, 73, 73, 140], 0.44, 5.0),
+        (Some("major_road"), Some("primary" | "primary_link")) => ([76, 76, 76, 124], 0.37, 7.0),
+        (Some("major_road"), Some("secondary" | "secondary_link")) => {
+            ([82, 82, 82, 102], 0.29, 8.0)
+        }
+        (Some("major_road"), Some("tertiary" | "tertiary_link")) => ([88, 88, 88, 82], 0.22, 9.0),
+        (Some("minor_road"), Some("residential" | "unclassified" | "road")) => {
+            ([96, 96, 96, 58], 0.15, 10.5)
+        }
+        (Some("minor_road"), Some("service" | "alley" | "parking_aisle" | "driveway")) => {
+            ([104, 104, 104, 42], 0.11, 11.5)
+        }
+        (Some("path"), Some("pedestrian" | "cycleway" | "track" | "path" | "footway")) => {
+            ([92, 92, 92, 34], 0.09, 11.5)
+        }
+        (Some("rail"), _) | (_, Some("rail" | "light_rail" | "tram" | "subway")) => {
+            ([48, 48, 48, 62], 0.13, 9.0)
+        }
+        (Some("ferry" | "ferryway"), _) => ([96, 96, 96, 48], 0.11, 8.0),
+        (Some("aeroway" | "aerialway"), _) => return None,
+        (Some("highway"), _) => ([70, 70, 70, 145], 0.46, 5.0),
+        (Some("major_road"), _) => ([82, 82, 82, 102], 0.31, 8.0),
+        (Some("minor_road"), _) => ([98, 98, 98, 54], 0.14, 10.5),
+        (Some("path"), _) => ([94, 94, 94, 30], 0.08, 11.5),
+        _ => return None,
+    };
+    let onset_zoom = min_zoom.unwrap_or(fallback_onset) as f32;
+    (f32::from(source_zoom) + 1.0 >= onset_zoom).then_some(StrokeStyle {
+        color,
+        radius_points: radius,
+        onset_zoom,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct LabelStyle {
+    rank: u16,
+    size: f32,
+    onset_zoom: f32,
+}
+
+fn label_style(
+    kind: Option<&str>,
+    detail: Option<&str>,
+    population_rank: Option<f64>,
+    min_zoom: Option<f64>,
+) -> Option<LabelStyle> {
+    let population = population_rank.unwrap_or(0.0).clamp(0.0, 18.0);
+    let scarcity = (18.0 - population).round() as u16;
+    let (base, size, fallback_onset) = match (kind, detail) {
+        (Some("country"), _) => (0, 15.0, 1.0),
+        (Some("region"), Some("state" | "province")) => (40, 13.0, 3.0),
+        (Some("region"), _) => (50, 12.5, 4.0),
+        (Some("locality"), Some("city")) => (
+            100,
+            10.4 + population * 0.22,
+            (11.5 - population * 0.48).clamp(3.0, 10.0),
+        ),
+        (Some("locality"), Some("town")) => (
+            220,
+            9.6 + population * 0.16,
+            (13.0 - population * 0.34).clamp(7.0, 11.5),
+        ),
+        (Some("locality"), Some("village")) => (
+            340,
+            9.2 + population * 0.11,
+            (13.5 - population * 0.25).clamp(9.0, 12.0),
+        ),
+        (Some("locality"), Some("hamlet" | "locality")) => (
+            460,
+            8.7 + population * 0.07,
+            (14.0 - population * 0.20).clamp(10.5, 12.0),
+        ),
+        (Some("macrohood"), _) => (560, 9.5, 10.0),
+        (Some("neighbourhood"), Some("suburb")) => (620, 9.2, 10.5),
+        (Some("neighbourhood"), _) => (700, 8.8, 11.5),
+        _ => return None,
+    };
+    Some(LabelStyle {
+        rank: base + scarcity.saturating_mul(4),
+        size: size as f32,
+        onset_zoom: min_zoom.unwrap_or(fallback_onset) as f32,
+    })
+}
+
+#[derive(Default)]
+struct FeatureTags<'a> {
+    kind: Option<&'a str>,
+    detail: Option<&'a str>,
+    name: Option<&'a str>,
+    population_rank: Option<f64>,
+    min_zoom: Option<f64>,
+}
+
+impl<'a> FeatureTags<'a> {
+    fn read(feature: MvtFeatureRef<'a>) -> Result<Self> {
+        let mut tags = Self::default();
+        for property in feature.properties() {
+            let (key, value) = property?;
+            match (key, value) {
+                ("kind", MvtValueRef::String(value)) => tags.kind = Some(value),
+                ("kind_detail", MvtValueRef::String(value)) => tags.detail = Some(value),
+                ("name:en", MvtValueRef::String(value)) => tags.name = Some(value),
+                ("name", MvtValueRef::String(value)) if tags.name.is_none() => {
+                    tags.name = Some(value);
+                }
+                ("population_rank", value) => tags.population_rank = numeric(value),
+                ("min_zoom", value) => tags.min_zoom = numeric(value),
+                _ => {}
+            }
+        }
+        Ok(tags)
+    }
+}
+
+fn integer_property(feature: MvtFeatureRef<'_>, needle: &str) -> Result<Option<i64>> {
+    for property in feature.properties() {
+        let (key, value) = property?;
+        if key == needle {
+            return Ok(integer(value));
+        }
+    }
+    Ok(None)
+}
+
+fn numeric_property(feature: MvtFeatureRef<'_>, needle: &str) -> Result<Option<f64>> {
+    for property in feature.properties() {
+        let (key, value) = property?;
+        if key == needle {
+            return Ok(numeric(value));
+        }
+    }
+    Ok(None)
+}
+
+fn numeric(value: MvtValueRef<'_>) -> Option<f64> {
+    match value {
+        MvtValueRef::Float(value) => Some(f64::from(value)),
+        MvtValueRef::Double(value) => Some(value),
+        MvtValueRef::Int(value) | MvtValueRef::SInt(value) => Some(value as f64),
+        MvtValueRef::UInt(value) => Some(value as f64),
+        _ => None,
+    }
+}
+
+fn integer(value: MvtValueRef<'_>) -> Option<i64> {
+    match value {
+        MvtValueRef::Int(value) | MvtValueRef::SInt(value) => Some(value),
+        MvtValueRef::UInt(value) => i64::try_from(value).ok(),
+        _ => None,
+    }
+}
+
+fn push_ring(
+    path: &mut lyon_tessellation::path::path::Builder,
+    extent: u32,
+    ring: &LineString<i32>,
+) {
+    let Some((first, rest)) = ring.0.split_first() else {
+        return;
+    };
+    let first = local32(extent, *first);
+    let _first = path.begin(point(first[0], first[1]));
+    for coord in rest {
+        let next = local32(extent, *coord);
+        let _next = path.line_to(point(next[0], next[1]));
+    }
+    path.end(true);
+}
+
+fn local32(extent: u32, coordinate: Coord<i32>) -> [f32; 2] {
+    let extent = extent as f32;
+    [coordinate.x as f32 / extent, coordinate.y as f32 / extent]
+}
+
+fn world64(key: TileKey, extent: u32, coordinate: Coord<i32>) -> [f64; 2] {
+    let scale = f64::from(1_u32 << key.zoom);
+    let extent = f64::from(extent);
+    [
+        (f64::from(key.x) + f64::from(coordinate.x) / extent) / scale,
+        (f64::from(key.y) + f64::from(coordinate.y) / extent) / scale,
+    ]
+}
+
+fn join_normal(points: &[[f32; 2]], slot: usize) -> [f32; 2] {
+    let prior = slot.saturating_sub(1);
+    let next = (slot + 1).min(points.len() - 1);
+    let incoming = direction(points[prior], points[slot]);
+    let outgoing = direction(points[slot], points[next]);
+    let first = if slot == 0 { outgoing } else { incoming };
+    let second = if slot + 1 == points.len() {
+        incoming
+    } else {
+        outgoing
+    };
+    let normal_a = [-first[1], first[0]];
+    let normal_b = [-second[1], second[0]];
+    let sum = [normal_a[0] + normal_b[0], normal_a[1] + normal_b[1]];
+    let length = sum[0].hypot(sum[1]);
+    if length <= f32::EPSILON {
+        return normal_b;
+    }
+    let miter = [sum[0] / length, sum[1] / length];
+    let divisor = miter[0].mul_add(normal_b[0], miter[1] * normal_b[1]);
+    let reach = if divisor.abs() <= 0.25 {
+        1.0
+    } else {
+        (1.0 / divisor).clamp(-3.0, 3.0)
+    };
+    [miter[0] * reach, miter[1] * reach]
+}
+
+fn direction(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    let delta = [b[0] - a[0], b[1] - a[1]];
+    let length = delta[0].hypot(delta[1]);
+    if length <= f32::EPSILON {
+        [1.0, 0.0]
+    } else {
+        [delta[0] / length, delta[1] / length]
+    }
+}
+
+fn purge_partials(directory: &FsPath) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let stale = path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= Duration::from_hours(24));
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "partial")
+            && stale
+        {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("remove stale basemap {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pmtiles::DirectoryCache;
+    use std::time::Duration;
+
+    #[test]
+    fn vector_cover_prefetches_without_presenting() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let cover = cover(Viewport::default(), rect);
+        assert_eq!(cover.strata.len(), 6);
+        assert_eq!(cover.strata[4].intent, Intent::Required);
+        assert_eq!(cover.strata[5].intent, Intent::Prefetch);
+        assert_eq!(
+            cover.finest_ready(|_| true).map(|stratum| stratum.intent),
+            Some(Intent::Required)
+        );
+    }
+
+    #[test]
+    fn world_wrap_never_duplicates_archive_demand() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0));
+        let cover = cover(
+            Viewport {
+                zoom: Viewport::MIN_ZOOM,
+                ..Viewport::default()
+            },
+            rect,
+        );
+        for stratum in cover.strata {
+            let distinct = stratum
+                .keys
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(distinct.len(), stratum.keys.len());
+        }
+    }
+
+    #[test]
+    fn source_zoom_stops_while_field_zoom_continues() -> Result<()> {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let view = Viewport {
+            zoom: Viewport::MAX_ZOOM,
+            ..Viewport::default()
+        };
+        let cover = cover(view, rect);
+        let crown = cover.strata.last().context("top stratum")?;
+        assert_eq!(crown.intent, Intent::Required);
+        assert!(crown.keys.iter().all(|tile| tile.zoom == MAX_SOURCE_ZOOM));
+        Ok(())
+    }
+
+    #[test]
+    fn line_join_stays_finite_at_reversals() {
+        let points = [[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]];
+        assert!(
+            join_normal(&points, 1)
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+
+    #[test]
+    fn population_controls_locality_prominence_continuously() -> Result<()> {
+        let metropolis = label_style(Some("locality"), Some("city"), Some(18.0), None)
+            .context("metropolis style")?;
+        let small_city = label_style(Some("locality"), Some("city"), Some(3.0), None)
+            .context("small-city style")?;
+        assert!(metropolis.rank < small_city.rank);
+        assert!(metropolis.size > small_city.size);
+        assert!(metropolis.onset_zoom < small_city.onset_zoom);
+        Ok(())
+    }
+
+    #[test]
+    fn source_min_zoom_overrides_cartographic_fallback() -> Result<()> {
+        let style = road_style(Some("minor_road"), Some("residential"), Some(11.25), 11)
+            .context("residential road style")?;
+        assert_eq!(style.onset_zoom, 11.25);
+        Ok(())
+    }
+
+    #[test]
+    fn apparition_is_quiet_monotone_and_bounded() {
+        let onset = 11.0;
+        let samples = [
+            apparition(10.9, onset),
+            apparition(11.0, onset),
+            apparition(11.3, onset),
+            apparition(11.8, onset),
+            apparition(12.35, onset),
+            apparition(13.0, onset),
+        ];
+        assert_eq!(samples[0], 0.0);
+        assert_eq!(samples[1], 0.0);
+        assert_eq!(samples[4], 1.0);
+        assert_eq!(samples[5], 1.0);
+        assert!(samples.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    #[ignore = "requires HRRR_BASEMAP_ARCHIVE and is a release-mode instrument"]
+    fn profile_local_archive() -> Result<()> {
+        let path = std::env::var_os("HRRR_BASEMAP_ARCHIVE")
+            .map(PathBuf::from)
+            .context("HRRR_BASEMAP_ARCHIVE is unset")?;
+        let runtime = runtime()?;
+        let uncached = runtime.block_on(AsyncPmTilesReader::new_with_path(&path))?;
+        let cached =
+            runtime.block_on(Archive::new_with_cached_path(HashMapCache::default(), path))?;
+        for (scene, view) in [
+            ("plains-z10", profile_view(-97.5, 38.5, 10.0)),
+            ("plains-z12", profile_view(-97.5, 38.5, 12.0)),
+            ("new-york-z12", profile_view(-74.006, 40.7128, 12.0)),
+        ] {
+            let keys = profile_keys(view);
+            profile_reader(&runtime, &uncached, "none", scene, &keys, 2)?;
+            profile_reader(&runtime, &cached, "resident", scene, &keys, 5)?;
+        }
+        let urban = profile_keys(profile_view(-74.006, 40.7128, 12.0));
+        for workers in [4, 6, 8, 12] {
+            for pass in 0..5 {
+                profile_quarries(path_from_environment()?, &urban, workers, pass)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn profile_quarries(
+        path: PathBuf,
+        keys: &[TileKey],
+        workers: usize,
+        pass: usize,
+    ) -> Result<()> {
+        let basemap = Basemap::spawn_with_workers(Context::default(), path, workers)?;
+        match basemap.events.recv_timeout(Duration::from_secs(5))? {
+            Event::Ready => {}
+            event => anyhow::bail!("basemap opened with {event:?}"),
+        }
+        let begun = Instant::now();
+        for &key in keys {
+            if !basemap.request(key) {
+                anyhow::bail!("quarry queue rejected {key:?}");
+            }
+        }
+        let mut loaded = 0_usize;
+        let mut archive_us = 0_u64;
+        let mut decode_us = 0_u64;
+        while loaded < keys.len() {
+            match basemap.events.recv_timeout(Duration::from_secs(5))? {
+                Event::Loaded(tile) => {
+                    loaded += 1;
+                    archive_us = archive_us.saturating_add(tile.timing.archive_us);
+                    decode_us = decode_us.saturating_add(tile.timing.decode_us);
+                }
+                Event::Ready => {}
+                event => anyhow::bail!("quarry profile failed with {event:?}"),
+            }
+        }
+        eprintln!(
+            "scene=new-york-z12 workers={workers} pass={pass} tiles={loaded} wall_us={} summed_archive_us={archive_us} summed_decode_us={decode_us}",
+            begun.elapsed().as_micros()
+        );
+        Ok(())
+    }
+
+    fn path_from_environment() -> Result<PathBuf> {
+        std::env::var_os("HRRR_BASEMAP_ARCHIVE")
+            .map(PathBuf::from)
+            .context("HRRR_BASEMAP_ARCHIVE is unset")
+    }
+
+    fn profile_reader<C: DirectoryCache + Send + Sync>(
+        runtime: &tokio::runtime::Runtime,
+        archive: &AsyncPmTilesReader<MmapBackend, C>,
+        cache: &str,
+        scene: &str,
+        keys: &[TileKey],
+        passes: usize,
+    ) -> Result<()> {
+        for pass in 0..passes {
+            let begun = Instant::now();
+            let mut archive_time = Duration::ZERO;
+            let mut decode_time = Duration::ZERO;
+            let mut bytes = 0_usize;
+            let mut vertices = 0_usize;
+            let mut resident = 0_usize;
+            for key in keys {
+                let cut = Instant::now();
+                let tile = runtime
+                    .block_on(archive.get_tile_decompressed(key.coordinate()?))?
+                    .context("profile tile absent")?;
+                archive_time += cut.elapsed();
+                bytes = bytes.saturating_add(tile.len());
+                let cut = Instant::now();
+                let tile = decode_tile(*key, &tile)?;
+                decode_time += cut.elapsed();
+                vertices = vertices
+                    .saturating_add(tile.fills.vertices.len())
+                    .saturating_add(tile.strokes.vertices.len());
+                resident = resident.saturating_add(tile.resident_bytes());
+            }
+            eprintln!(
+                "scene={scene} cache={cache} pass={pass} tiles={} wall_us={} archive_us={} decode_us={} mvt_bytes={} mesh_bytes={resident} vertices={vertices}",
+                keys.len(),
+                begun.elapsed().as_micros(),
+                archive_time.as_micros(),
+                decode_time.as_micros(),
+                bytes,
+            );
+        }
+        Ok(())
+    }
+
+    fn profile_keys(view: Viewport) -> Vec<TileKey> {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0));
+        cover(view, rect)
+            .strata
+            .into_iter()
+            .find(|stratum| stratum.intent == Intent::Required)
+            .map_or_else(Vec::new, |stratum| stratum.keys)
+    }
+
+    fn profile_view(longitude: f64, latitude: f64, zoom: f64) -> Viewport {
+        let x = (longitude + 180.0) / 360.0;
+        let y = (1.0 - (latitude.to_radians().tan().asinh() / std::f64::consts::PI)) * 0.5;
+        Viewport {
+            center_mercator: [x, y],
+            zoom,
+        }
+    }
+}

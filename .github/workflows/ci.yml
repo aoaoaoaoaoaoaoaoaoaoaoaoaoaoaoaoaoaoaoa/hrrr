@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  platform:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+          - name: macOS arm64
+            os: macos-15
+          - name: macOS x86_64
+            os: macos-15-intel
+          - name: Windows x86_64
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Check
+        run: cargo +1.96.0 check --locked --all-targets --all-features
+      - name: Test
+        run: cargo +1.96.0 test --locked --all-targets --all-features
+
+  quality:
+    name: Release gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo +1.96.0 fmt --all --check
+      - name: Clippy
+        run: cargo +1.96.0 clippy --locked --all-targets --all-features
+      - name: Documentation
+        run: cargo +1.96.0 doc --locked --all-features --no-deps
+      - name: Package
+        run: cargo +1.96.0 package --locked
