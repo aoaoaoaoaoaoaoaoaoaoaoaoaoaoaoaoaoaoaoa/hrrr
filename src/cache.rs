@@ -3,7 +3,7 @@ use atomic_write_file::AtomicWriteFile;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use egui::Context;
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
@@ -93,7 +93,10 @@ impl CacheStore {
         let mut file = File::open(&path)?;
         let mut bytes = Vec::new();
         let _read = file.read_to_end(&mut bytes)?;
-        let _renewed = file.set_modified(SystemTime::now());
+        let _renewed = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(SystemTime::now()));
         Ok(bytes)
     }
 
@@ -342,7 +345,10 @@ mod tests {
         let store = manager.store(CacheClass::Field);
         let blade = Path::new("run/f00/qpf.grib2");
         store.write(blade, b"GRIB7777")?;
-        File::open(store.root.join(blade))?.set_modified(UNIX_EPOCH)?;
+        OpenOptions::new()
+            .write(true)
+            .open(store.root.join(blade))?
+            .set_modified(UNIX_EPOCH)?;
         let tally = manager.purge()?;
         assert_eq!(tally, PurgeTally { files: 1, bytes: 8 });
         assert!(!manager.store(CacheClass::Field).root.join("run").exists());
@@ -381,7 +387,10 @@ mod tests {
         let store = manager.store(CacheClass::Field);
         let blade = Path::new("still-warm");
         store.write(blade, b"warm")?;
-        File::open(store.root.join(blade))?.set_modified(UNIX_EPOCH)?;
+        OpenOptions::new()
+            .write(true)
+            .open(store.root.join(blade))?
+            .set_modified(UNIX_EPOCH)?;
         assert_eq!(store.read(blade)?, b"warm");
         assert_eq!(manager.purge()?, PurgeTally::default());
         assert!(store.root.join(blade).exists());
