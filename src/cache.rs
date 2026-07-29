@@ -1,21 +1,18 @@
 use anyhow::{Context as _, Result, bail};
+use atomic_write_file::AtomicWriteFile;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use egui::Context;
 use std::{
     fs::File,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::{
-        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MEBIBYTE: u64 = 1_048_576;
 const REAP_INTERVAL: Duration = Duration::from_hours(6);
-static BLADE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheClass {
@@ -113,27 +110,12 @@ impl CacheStore {
         };
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create cache chamber {}", parent.display()))?;
-        let nonce = BLADE_NONCE.fetch_add(1, Ordering::Relaxed);
-        let temporary = path.with_extension(format!("tmp.{}.{nonce}", std::process::id()));
-        {
-            let mut file = File::create(&temporary)
-                .with_context(|| format!("create cache blade {}", temporary.display()))?;
-            file.write_all(bytes)
-                .with_context(|| format!("write cache blade {}", temporary.display()))?;
-            file.sync_all()
-                .with_context(|| format!("sync cache blade {}", temporary.display()))?;
-        }
-        std::fs::rename(&temporary, &path).with_context(|| {
-            format!(
-                "replace cache blade {} with {}",
-                temporary.display(),
-                path.display()
-            )
-        })?;
-        File::open(parent)
-            .with_context(|| format!("open cache chamber {}", parent.display()))?
-            .sync_all()
-            .with_context(|| format!("sync cache chamber {}", parent.display()))
+        let mut file = AtomicWriteFile::open(&path)
+            .with_context(|| format!("stage cache blade {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write cache blade {}", path.display()))?;
+        file.commit()
+            .with_context(|| format!("commit cache blade {}", path.display()))
     }
 
     pub fn resolve(
