@@ -401,13 +401,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_asset_is_pinned_and_digest_shaped() {
-        let asset = tool_asset();
-        if let Some(asset) = asset {
-            assert_eq!(asset.sha256.len(), 64);
-            assert!(asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
-            assert!(asset.name.contains(TOOL_VERSION));
-        }
+    fn platform_asset_is_pinned_and_digest_shaped() -> Result<()> {
+        let asset = tool_asset().context("release host has no pinned go-pmtiles artifact")?;
+        assert_eq!(asset.sha256.len(), 64);
+        assert!(asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(asset.name.contains(TOOL_VERSION));
+        Ok(())
     }
 
     #[test]

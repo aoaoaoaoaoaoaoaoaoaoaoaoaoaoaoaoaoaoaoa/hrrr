@@ -9,8 +9,8 @@ thread.
 
 ## Install
 
-HRRR requires Rust 1.96 or newer, Linux/X11, and a working Vulkan graphics
-stack.
+HRRR requires Rust 1.96 or newer and a working wgpu-compatible graphics stack.
+The released native hosts are Linux/X11, macOS, and Windows.
 
 ```sh
 cargo install hrrr --locked
@@ -32,10 +32,9 @@ hrrr basemap status
 hrrr basemap remove
 ```
 
-Linux/X11 is the sole current native-host coordinate. The tray implementation
-uses XEmbed; lack of a tray degrades window-close behavior to ordinary
-termination. Wayland, macOS, and Windows require proved Eternalist host
-projections before they can be claimed.
+Linux uses an XEmbed tray; lack of a tray degrades window-close behavior to
+ordinary termination. macOS and Windows use their native tray facilities.
+Linux/Wayland is not yet a release coordinate.
 
 ## Use
 
@@ -59,8 +58,16 @@ quits the process.
 
 ## Storage
 
-HRRR follows the host platform’s application-directory conventions. On Linux
-the defaults are:
+HRRR follows the host platform’s application-directory conventions. The
+platform roots are:
+
+| Host | Persistent root | Disposable root |
+| --- | --- | --- |
+| Linux | XDG config, data, and state roots under `hrrr/` | `$XDG_CACHE_HOME/hrrr/` |
+| macOS | `~/Library/Application Support/moe.swarm.hrrr/` | `~/Library/Caches/moe.swarm.hrrr/` |
+| Windows | `%APPDATA%\swarm\hrrr\` | `%LOCALAPPDATA%\swarm\hrrr\cache\` |
+
+On Linux the individual defaults are:
 
 | Meaning | Path |
 | --- | --- |
@@ -89,14 +96,17 @@ Displayed forecasts are model output, not official warnings or observations.
 
 Run the non-mutating source gate with `./check.py verify`. `scripts/test-gui`
 builds the optimized product twice, first ordinarily and then with its one-way
-test witness, and runs the complete native suite in private X11, XDG, process,
+test witness, and runs the complete Linux suite in private X11, XDG, process,
 network, and software-graphics namespaces. The stories prove inert launch;
-transient and persistent probes; restart restoration; pin drag and undo; and
-tray hide, reveal, menu, and quit behavior. Failure evidence is retained under
-`/tmp/hrrr-acceptance-artifacts` by default.
+field selection and restart restoration; transient and persistent probes; pin
+drag and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence
+is retained under `/tmp/hrrr-acceptance-artifacts` by default.
 
-Native acceptance and ordinary-product CI share one declared coordinate:
-Linux/X11.
+The portability controller launches the real witnessed product on macOS arm64,
+macOS x86_64, and Windows x86_64, then requires CLI identity, native tray
+construction, a successfully presented GPU frame, the current HRRR witness
+contract, and the map surface. Each host also runs the product laws, verifies
+the crates.io package graph, and proves ordinary install/uninstall behavior.
 
 The UI vocabulary is a separately published dependency. When it changes,
 release it first with `scripts/release-contract VERSION publish`; only after

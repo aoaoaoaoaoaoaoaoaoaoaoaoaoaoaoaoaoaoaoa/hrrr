@@ -123,4 +123,22 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+
+    #[test]
+    fn platform_project_roots_are_absolute() -> Result<()> {
+        let lair = Lair::claim()?;
+        for path in [
+            lair.config.clone(),
+            lair.state.clone(),
+            lair.data.clone(),
+            lair.cache_root(),
+        ] {
+            assert!(
+                path.is_absolute(),
+                "relative product root: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
 }

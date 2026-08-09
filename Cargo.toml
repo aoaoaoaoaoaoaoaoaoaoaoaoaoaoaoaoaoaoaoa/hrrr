@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/hrrr-acceptance", "crates/hrrr-contract"]
+members = [
+    "crates/hrrr-acceptance",
+    "crates/hrrr-contract",
+    "crates/hrrr-portability",
+]
 resolver = "3"
 
 [package]

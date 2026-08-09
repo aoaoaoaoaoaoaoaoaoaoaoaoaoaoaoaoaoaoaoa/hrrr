@@ -1256,6 +1256,17 @@ name = "hrrr-contract"
 version = "0.2.0"
 
 [[package]]
+name = "hrrr-portability"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "egui-tester-witness",
+ "hrrr-contract",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

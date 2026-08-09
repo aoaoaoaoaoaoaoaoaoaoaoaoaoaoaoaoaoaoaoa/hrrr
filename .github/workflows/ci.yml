@@ -54,6 +54,63 @@ jobs:
       - name: Verify crates.io packages
         run: scripts/package
 
+  portable-hosts:
+    name: Runtime · ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+            executable: hrrr
+          - name: macOS x86_64
+            os: macos-15-intel
+            executable: hrrr
+          - name: Windows x86_64
+            os: windows-2025
+            executable: hrrr.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Prove platform laws
+        run: >-
+          cargo test --locked
+          --package hrrr
+          --package hrrr-contract
+          --package hrrr-portability
+          --all-targets
+          --all-features
+      - name: Build witnessed product
+        run: cargo build --release --locked --package hrrr --features egui-test
+      - name: Prove native startup and first present
+        env:
+          HRRR_PORTABILITY_ARTIFACTS: ${{ runner.temp }}/hrrr-portability
+        run: cargo run --release --locked --package hrrr-portability
+      - name: Verify package graph
+        run: cargo package --locked --package hrrr
+      - name: Install ordinary product
+        shell: bash
+        run: cargo install --path . --root "$RUNNER_TEMP/hrrr-install" --locked --force
+      - name: Prove installed CLI identity
+        shell: bash
+        run: '"$RUNNER_TEMP/hrrr-install/bin/${{ matrix.executable }}" --version'
+      - name: Uninstall ordinary product
+        shell: bash
+        run: |
+          cargo uninstall --root "$RUNNER_TEMP/hrrr-install" hrrr
+          test ! -e "$RUNNER_TEMP/hrrr-install/bin/${{ matrix.executable }}"
+      - name: Retain portability evidence
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-portability-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/hrrr-portability
+          if-no-files-found: ignore
+          retention-days: 7
+
   lifecycle:
     name: Install and uninstall · Linux/X11
     runs-on: ubuntu-24.04
