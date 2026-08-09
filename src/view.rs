@@ -93,7 +93,9 @@ impl SavedView {
 }
 
 impl Named for SavedView {
-    fn name(&self) -> &EntryName {
+    type Key = EntryName;
+
+    fn key(&self) -> &EntryName {
         &self.name
     }
 

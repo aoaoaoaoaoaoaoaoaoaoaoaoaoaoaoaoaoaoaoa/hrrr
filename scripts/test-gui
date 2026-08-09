@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+cargo build --release --bin hrrr
+cargo build --release --package hrrr-acceptance
+cargo run --release --package hrrr-acceptance -- --smoke
+cargo build --release --bin hrrr --features egui-test
+if [ "$#" -eq 0 ]; then
+    set -- map-objects tray
+fi
+for story do
+    cargo run --release --package hrrr-acceptance -- \
+        --story "$story" \
+        --artifacts "${HRRR_ACCEPTANCE_ARTIFACTS:-/tmp/hrrr-acceptance-artifacts}"
+done

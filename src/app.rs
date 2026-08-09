@@ -2,9 +2,9 @@ use crate::{
     basemap::{self, Basemap, TileKey, VectorTile},
     cache::Custodian,
     config::{Config, ConfigLoad},
-    fold_ui, forge,
+    fold_ui,
     library::EntryName,
-    library_ui::{self, Action as ViewAction, NameEdit, ShelfEdit},
+    library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
     map::{self, FieldPaint},
     model::{FieldGrid, FrameKey, LeadHour, MercatorPoint, Product, RunId, RunSelection, Viewport},
     spec::{Scale, ScaleAtlas, SmokeRegime, TemperatureSeason},
@@ -36,6 +36,8 @@ const LATEST_LONG_RUN: egui::KeyboardShortcut = egui::KeyboardShortcut::new(
     egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
     egui::Key::R,
 );
+const UNDO_MAP_OBJECT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
 #[derive(Clone, Copy, PartialEq)]
 struct SmokeScene {
     key: FrameKey,
@@ -60,6 +62,161 @@ struct PinTug {
     slot: usize,
     origin: MercatorPoint,
     world_points: f64,
+}
+
+impl PinTug {
+    fn reversal(self, present: &[MercatorPoint]) -> Option<Vec<MercatorPoint>> {
+        (present.get(self.slot).copied()? != self.origin).then(|| {
+            let mut before = present.to_vec();
+            before[self.slot] = self.origin;
+            before
+        })
+    }
+}
+
+enum MapReversal {
+    Pins {
+        view: EntryName,
+        before: Vec<MercatorPoint>,
+    },
+    Probe {
+        before: Option<MercatorPoint>,
+    },
+}
+
+impl MapReversal {
+    fn belongs_to(&self, view: &EntryName) -> bool {
+        match self {
+            Self::Pins { view: owner, .. } => owner == view,
+            Self::Probe { .. } => true,
+        }
+    }
+
+    fn recoil(self, pins: &[MercatorPoint], probe: Option<MercatorPoint>) -> Option<MapRecoil> {
+        match self {
+            Self::Pins { before, .. } if before != pins => Some(MapRecoil::Pins(before)),
+            Self::Probe { before } if before != probe => Some(MapRecoil::Probe(before)),
+            Self::Pins { .. } | Self::Probe { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum MapRecoil {
+    Pins(Vec<MercatorPoint>),
+    Probe(Option<MercatorPoint>),
+}
+
+#[derive(Default)]
+struct MapUndo {
+    reversals: VecDeque<MapReversal>,
+}
+
+impl MapUndo {
+    const CAPACITY: usize = 64;
+
+    fn remember(&mut self, reversal: MapReversal) {
+        if self.reversals.len() == Self::CAPACITY {
+            let _forgotten = self.reversals.pop_front();
+        }
+        self.reversals.push_back(reversal);
+    }
+
+    fn recoil(
+        &mut self,
+        view: &EntryName,
+        pins: &[MercatorPoint],
+        probe: Option<MercatorPoint>,
+    ) -> Option<MapRecoil> {
+        loop {
+            let slot = self
+                .reversals
+                .iter()
+                .rposition(|reversal| reversal.belongs_to(view))?;
+            let reversal = self.reversals.remove(slot)?;
+            if let Some(recoil) = reversal.recoil(pins, probe) {
+                return Some(recoil);
+            }
+        }
+    }
+
+    fn rename_view(&mut self, old: &EntryName, new: &EntryName) {
+        for reversal in &mut self.reversals {
+            if let MapReversal::Pins { view, .. } = reversal
+                && view == old
+            {
+                view.clone_from(new);
+            }
+        }
+    }
+
+    fn forget_view(&mut self, view: &EntryName) {
+        self.reversals.retain(
+            |reversal| !matches!(reversal, MapReversal::Pins { view: owner, .. } if owner == view),
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PlaqueBerth {
+    position: egui::Pos2,
+    pivot: egui::Align2,
+}
+
+impl PlaqueBerth {
+    fn rect(self, size: egui::Vec2) -> egui::Rect {
+        self.pivot.anchor_size(self.position, size)
+    }
+}
+
+struct PlaquePhalanx {
+    bounds: egui::Rect,
+    occupied: Vec<egui::Rect>,
+}
+
+impl PlaquePhalanx {
+    const CLEARANCE: f32 = 3.0;
+
+    fn forge(bounds: egui::Rect) -> Self {
+        Self {
+            bounds,
+            occupied: Vec::new(),
+        }
+    }
+
+    fn berth(&self, anchor: egui::Pos2, size: egui::Vec2, gap: egui::Vec2) -> PlaqueBerth {
+        let right = PlaqueBerth {
+            position: anchor + gap,
+            pivot: egui::Align2::LEFT_TOP,
+        };
+        let left = PlaqueBerth {
+            position: anchor + egui::vec2(-gap.x, gap.y),
+            pivot: egui::Align2::RIGHT_TOP,
+        };
+        let clear = |berth: PlaqueBerth| {
+            let rect = berth.rect(size);
+            !self
+                .occupied
+                .iter()
+                .any(|prior| prior.intersects(rect.expand(Self::CLEARANCE)))
+        };
+        let contained = |berth: PlaqueBerth| self.bounds.contains_rect(berth.rect(size));
+
+        [right, left]
+            .into_iter()
+            .find(|&berth| contained(berth) && clear(berth))
+            .or_else(|| [right, left].into_iter().find(|&berth| clear(berth)))
+            .unwrap_or(right)
+    }
+
+    fn occupy(&mut self, rect: egui::Rect) {
+        self.occupied.push(rect);
+    }
+}
+
+struct PlaqueResponse {
+    reap: bool,
+    rect: egui::Rect,
 }
 
 impl SmokeSurvey {
@@ -113,9 +270,11 @@ pub struct WeatherApp {
     fold_focus: fold_ui::FoldCage,
     transient_probe: Option<MercatorPoint>,
     pin_tug: Option<PinTug>,
+    map_undo: MapUndo,
     view_name_entry: String,
     name_edit: NameEdit,
     shelf_edit: Option<ShelfEdit>,
+    entry_edit: Option<EntryEdit>,
     scales: ScaleAtlas,
     smoke_regime: SmokeRegime,
     smoke_survey: SmokeSurvey,
@@ -199,9 +358,11 @@ impl WeatherApp {
             fold_focus: fold_ui::FoldCage::default(),
             transient_probe: None,
             pin_tug: None,
+            map_undo: MapUndo::default(),
             view_name_entry: String::new(),
             name_edit: NameEdit::Idle,
             shelf_edit: None,
+            entry_edit: None,
             scales: ScaleAtlas::default(),
             smoke_regime: SmokeRegime::default(),
             smoke_survey: SmokeSurvey::default(),
@@ -222,18 +383,15 @@ impl WeatherApp {
         self.fold_focus.take_keys(ui.ctx());
         self.take_keys(ui.ctx());
         self.fold_focus.begin_pass();
-        let _left = egui::Panel::left("forecast-inspector")
-            .resizable(false)
-            .exact_size(chrome::INSPECTOR_WIDTH)
-            .show_inside(ui, |ui| {
-                let _scroll = egui::ScrollArea::vertical()
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(ui.spacing().item_spacing.x);
-                        self.inspector(ui);
-                    });
-            });
+        let inspector = eternalist_apps::Inspector::new("forecast-inspector")
+            .scroll_id("forecast-inspector-scroll")
+            .scroll_offset(self.slate.inspector_scroll)
+            .show(ui, |ui| self.inspector(ui));
+        if inspector.scroll_offset != self.slate.inspector_scroll {
+            self.slate.inspector_scroll = inspector.scroll_offset;
+            self.mark_dirty();
+        }
+        self.water.heave(ui.ctx(), inspector.scroll_offset);
         let _center = egui::CentralPanel::default().show_inside(ui, |ui| self.map(ui));
         self.fold_focus.end_pass();
         self.flush_state(false);
@@ -270,10 +428,8 @@ impl WeatherApp {
                     for &product in row {
                         let response = ui.add_sized(
                             [width, 26.0],
-                            chrome::glyph_button(
-                                product.label(),
-                                self.slate.overlay.active() == Some(product),
-                            ),
+                            egui::Button::new(product.label())
+                                .selected(self.slate.overlay.active() == Some(product)),
                         );
                         chrome::tension(ui, &response);
                         if response.hovered() {
@@ -325,7 +481,7 @@ impl WeatherApp {
             let _row = row;
             let response = ui.add_sized(
                 [ui.available_width(), 24.0],
-                chrome::glyph_button("⌖  RESET CONUS", false),
+                egui::Button::new("⌖  RESET CONUS"),
             );
             chrome::tension(ui, &response);
             if response.hovered() {
@@ -355,7 +511,7 @@ impl WeatherApp {
         let (wake, focus) = fold_ui::section(ui, "application", "application", true, |ui| {
             let response = ui.add_sized(
                 [ui.available_width(), 26.0],
-                chrome::glyph_button("CLOSE MINIMIZES", self.config.close_minimizes),
+                egui::Button::new("CLOSE MINIMIZES").selected(self.config.close_minimizes),
             );
             chrome::tension(ui, &response);
             if response.hovered() {
@@ -401,6 +557,7 @@ impl WeatherApp {
         let mut edit = self.name_edit;
         let actions = library_ui::active_card(
             ui,
+            &mut self.water,
             "view",
             &mut self.view_name_entry,
             &mut edit,
@@ -412,9 +569,18 @@ impl WeatherApp {
 
     fn view_library_panel(&mut self, ui: &mut egui::Ui) {
         let mut shelf_edit = self.shelf_edit.take();
-        let actions =
-            library_ui::library(ui, "view", &self.active_view, &self.views, &mut shelf_edit);
+        let mut entry_edit = self.entry_edit.take();
+        let actions = library_ui::library(
+            ui,
+            &mut self.water,
+            "view",
+            &self.active_view,
+            &self.views,
+            &mut shelf_edit,
+            &mut entry_edit,
+        );
         self.shelf_edit = shelf_edit;
+        self.entry_edit = entry_edit;
         self.apply_view_actions(actions);
     }
 
@@ -440,7 +606,7 @@ impl WeatherApp {
         let _row = ui.horizontal(|ui| {
             let previous = ui.add_enabled(
                 published.is_some() && self.slate.lead > LeadHour::ZERO,
-                chrome::glyph_button("◀", false),
+                egui::Button::new("◀"),
             );
             chrome::tension(ui, &previous);
             if previous.clicked() {
@@ -454,7 +620,7 @@ impl WeatherApp {
             )));
             let next = ui.add_enabled(
                 published.is_some() && self.slate.lead < gate,
-                chrome::glyph_button("▶", false),
+                egui::Button::new("▶"),
             );
             chrome::tension(ui, &next);
             if next.clicked() {
@@ -492,15 +658,14 @@ impl WeatherApp {
             .map(|latest| RunSelection::LatestLong.bind(latest));
         let mut run_step = None;
         let _row = ui.horizontal(|ui| {
-            let older = ui.add(chrome::glyph_button("−1H", false));
+            let older = ui.add(egui::Button::new("−1H"));
             if older.clicked() {
                 run_step = Some((RunSelection::Fixed(run.hours_ago(1)), older.rect));
             }
             let latest = ui
                 .add_enabled(
                     self.latest_run.is_some(),
-                    chrome::glyph_button(
-                        "LATEST",
+                    egui::Button::new("LATEST").selected(
                         self.slate.cycle == RunSelection::Latest && self.latest_run == Some(run),
                     ),
                 )
@@ -514,8 +679,7 @@ impl WeatherApp {
             let latest_long = ui
                 .add_enabled(
                     latest_extended.is_some(),
-                    chrome::glyph_button(
-                        "LATEST LONG",
+                    egui::Button::new("LATEST LONG").selected(
                         self.slate.cycle == RunSelection::LatestLong
                             && latest_extended == Some(run),
                     ),
@@ -529,7 +693,7 @@ impl WeatherApp {
             }
             let newer = ui.add_enabled(
                 self.latest_run.is_some_and(|latest_run| run < latest_run),
-                chrome::glyph_button("+1H", false),
+                egui::Button::new("+1H"),
             );
             if newer.clicked() {
                 let candidate = run.hours_after(1);
@@ -547,6 +711,7 @@ impl WeatherApp {
     fn map(&mut self, ui: &mut egui::Ui) {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        crate::witness::anchor(ui, hrrr_contract::Target::Map, response.rect);
         self.water.begin(Domain::shelf(rect));
         let pins = self.tug_pins(ui, rect);
         self.navigate(ui, &response, rect, pins.captured);
@@ -700,11 +865,13 @@ impl WeatherApp {
         for slot in 0..self.pins.len() {
             let pin = self.pins[slot];
             let anchor = map::screen_at(self.viewport, map_rect, pin.world());
+            let hardware = chrome::ForgePin::new(anchor).size(chrome::MechanismSize::Medium);
             let response = ui.interact(
-                forge::pin_grip(anchor),
+                hardware.grip(),
                 egui::Id::new(("pin-bulb", slot)),
                 egui::Sense::drag(),
             );
+            crate::witness::anchor(ui, hrrr_contract::Target::Pin(slot), response.rect);
             let seized = response.dragged_by(egui::PointerButton::Primary);
             seized_any |= seized;
             if response.drag_started_by(egui::PointerButton::Primary) {
@@ -735,8 +902,14 @@ impl WeatherApp {
                 self.pins[slot] = displaced;
             }
         }
-        if !seized_any {
-            self.pin_tug = None;
+        if !seized_any
+            && let Some(tug) = self.pin_tug.take()
+            && let Some(before) = tug.reversal(&self.pins)
+        {
+            self.map_undo.remember(MapReversal::Pins {
+                view: self.active_view.clone(),
+                before,
+            });
         }
         if moved {
             self.sync_active_view();
@@ -749,9 +922,11 @@ impl WeatherApp {
             return;
         };
         if persistent {
+            self.remember_pins();
             self.pins.push(point);
             self.sync_active_view();
-        } else {
+        } else if self.transient_probe != Some(point) {
+            self.remember_probe();
             self.transient_probe = Some(point);
         }
     }
@@ -769,6 +944,7 @@ impl WeatherApp {
             .min_by(|left, right| left.1.total_cmp(&right.1))
             .map(|(slot, _)| slot);
         if let Some(victim) = victim {
+            self.remember_pins();
             let _reaped = self.pins.remove(victim);
             self.sync_active_view();
         }
@@ -788,6 +964,28 @@ impl WeatherApp {
             .as_ref()
             .map(|(key, _)| *key)
             .or_else(|| self.active_key());
+        let mut phalanx = PlaquePhalanx::forge(map_rect);
+        let mut victims = Vec::new();
+        for slot in 0..self.pins.len() {
+            let pin = self.pins[slot];
+            let anchor = map::screen_at(self.viewport, map_rect, pin.world());
+            if !map_rect.expand(8.0).contains(anchor) {
+                continue;
+            }
+            let hardware = chrome::ForgePin::new(anchor).size(chrome::MechanismSize::Medium);
+            let crown = hardware.bulb();
+            hardware.paint(painter, hot_pin == Some(slot));
+            let id = egui::Id::new(("persistent-pin", slot));
+            let size = ctx
+                .memory(|memory| memory.area_rect(id).map(|rect| rect.size()))
+                .unwrap_or_default();
+            let berth = phalanx.berth(crown, size, egui::vec2(11.0, 7.0));
+            let response = self.point_popup(ctx, id, berth, pin, key, field.as_ref(), true);
+            phalanx.occupy(response.rect);
+            if response.reap {
+                victims.push(slot);
+            }
+        }
 
         if let Some(probe) = self.transient_probe {
             let anchor = map::screen_at(self.viewport, map_rect, probe.world());
@@ -798,39 +996,22 @@ impl WeatherApp {
                     3.25,
                     egui::Stroke::new(1.0_f32, chrome::SURFACE),
                 );
-                let _closed = self.point_popup(
+                crate::witness::rect(
                     ctx,
-                    egui::Id::new("transient-probe"),
-                    anchor + egui::vec2(9.0, 9.0),
-                    probe,
-                    key,
-                    field.as_ref(),
-                    false,
+                    hrrr_contract::Target::TransientProbe,
+                    egui::Rect::from_center_size(anchor, egui::Vec2::splat(8.0)),
                 );
-            }
-        }
-
-        let mut victims = Vec::new();
-        for (slot, pin) in self.pins.iter().copied().enumerate() {
-            let anchor = map::screen_at(self.viewport, map_rect, pin.world());
-            if !map_rect.expand(8.0).contains(anchor) {
-                continue;
-            }
-            let crown = forge::pin_bulb(anchor);
-            forge::pin(painter, anchor, hot_pin == Some(slot));
-            if self.point_popup(
-                ctx,
-                egui::Id::new(("persistent-pin", slot)),
-                crown + egui::vec2(11.0, 7.0),
-                pin,
-                key,
-                field.as_ref(),
-                true,
-            ) {
-                victims.push(slot);
+                let id = egui::Id::new("transient-probe");
+                let size = ctx
+                    .memory(|memory| memory.area_rect(id).map(|rect| rect.size()))
+                    .unwrap_or_default();
+                let berth = phalanx.berth(anchor, size, egui::vec2(9.0, 9.0));
+                let popup = self.point_popup(ctx, id, berth, probe, key, field.as_ref(), false);
+                phalanx.occupy(popup.rect);
             }
         }
         if !victims.is_empty() {
+            self.remember_pins();
             for victim in victims.into_iter().rev() {
                 let _reaped = self.pins.remove(victim);
             }
@@ -838,26 +1019,46 @@ impl WeatherApp {
         }
     }
 
+    #[cfg(feature = "egui-test")]
+    pub fn witness_state(&self) -> crate::witness::State {
+        crate::witness::State {
+            contract: hrrr_contract::UI_FINGERPRINT,
+            active_view: self.active_view.as_str().to_owned(),
+            pins: self.pins.iter().map(|pin| pin.world()).collect(),
+            transient_probe: self.transient_probe.map(MercatorPoint::world),
+            dragging_pin: self.pin_tug.map(|tug| tug.slot),
+            viewport: crate::witness::Viewport {
+                center: self.viewport.center_mercator,
+                zoom: self.viewport.zoom,
+            },
+        }
+    }
+
     fn point_popup(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         id: egui::Id,
-        position: egui::Pos2,
+        berth: PlaqueBerth,
         point: MercatorPoint,
         key: Option<FrameKey>,
         field: Option<&(FrameKey, Arc<FieldGrid>)>,
         removable: bool,
-    ) -> bool {
+    ) -> PlaqueResponse {
         let sample = field.and_then(|(_, field)| sample_point(point, field));
         let mut reap = false;
-        let _popup = egui::Area::new(id)
+        let popup = egui::Area::new(id)
             .order(egui::Order::Foreground)
-            .fixed_pos(position)
+            .pivot(berth.pivot)
+            .fixed_pos(berth.position)
+            .constrain(false)
             .show(ctx, |ui| {
-                let _frame = egui::Frame::new()
+                let close = removable
+                    .then(|| chrome::CornerClose::new().size(chrome::MechanismSize::Small));
+                let margin = egui::Margin::symmetric(8, 6);
+                let pane = egui::Frame::new()
                     .fill(chrome::SURFACE)
                     .stroke(egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG))
-                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .inner_margin(margin)
                     .show(ui, |ui| {
                         let valid = self.run.map_or_else(
                             || "AWAITING CYCLE".to_owned(),
@@ -866,12 +1067,12 @@ impl WeatherApp {
                                     .unwrap_or_else(|_| "INVALID TIME".to_owned())
                             },
                         );
-                        let _head = ui.horizontal(|ui| {
+                        if let Some(close) = close {
+                            let _time = close
+                                .guarded_header(ui, margin, |ui| ui.label(chrome::eyebrow(valid)));
+                        } else {
                             let _time = ui.label(chrome::eyebrow(valid));
-                            if removable {
-                                reap = map_icon(ui, "×").on_hover_text("remove pin").clicked();
-                            }
-                        });
+                        }
                         if let (Some(key), Some(raw)) = (key, sample) {
                             let scale = self.scale_for(key);
                             let _value = ui.label(chrome::section_title(scale.display(raw)));
@@ -886,8 +1087,18 @@ impl WeatherApp {
                         let _position =
                             ui.label(chrome::muted(format!("{latitude:.4}°, {longitude:.4}°")));
                     });
+                if let Some(close) = close {
+                    let close = close
+                        .show(ui, pane.response.rect, (id, "close"))
+                        .on_hover_text("remove pin");
+                    self.water.corner_close(&close);
+                    reap = close.clicked();
+                }
             });
-        reap
+        PlaqueResponse {
+            reap,
+            rect: popup.response.rect,
+        }
     }
 
     fn legend(painter: &egui::Painter, rect: egui::Rect, scale: &Scale) {
@@ -1154,13 +1365,17 @@ impl WeatherApp {
     }
 
     fn take_keys(&mut self, ctx: &egui::Context) {
+        let text_edit_focused = ctx.text_edit_focused();
         let latest_long = ctx.input_mut(|input| input.consume_shortcut(&LATEST_LONG_RUN));
         if latest_long {
             self.follow_cycle(RunSelection::LatestLong);
         } else if ctx.input_mut(|input| input.consume_shortcut(&LATEST_RUN)) {
             self.follow_cycle(RunSelection::Latest);
         }
-        if !ctx.text_edit_focused() {
+        if !text_edit_focused && ctx.input_mut(|input| input.consume_shortcut(&UNDO_MAP_OBJECT)) {
+            self.undo_map_object();
+        }
+        if !text_edit_focused {
             while let Some((slot, assign)) = consume_view_slot(ctx) {
                 if assign {
                     self.assign_view_slot(slot);
@@ -1169,9 +1384,11 @@ impl WeatherApp {
                 }
             }
         }
-        if !ctx.text_edit_focused()
+        if !text_edit_focused
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            && self.transient_probe.is_some()
         {
+            self.remember_probe();
             self.transient_probe = None;
         }
         let frontier = self.run.and_then(|run| self.run_extents.get(&run)).copied();
@@ -1196,8 +1413,16 @@ impl WeatherApp {
                 ViewAction::Load(view) => self.load_view(view),
                 ViewAction::Clone(name) => self.clone_view(&name),
                 ViewAction::Delete(name) => self.delete_view(&name),
+                ViewAction::RenameEntry { from, to } => {
+                    let _renamed = self.rename_view_to(&from, to);
+                }
                 ViewAction::Moor { name, berth } => {
                     self.views.moor(&name, &berth);
+                    self.mark_views_dirty();
+                }
+                ViewAction::MoorShelf { shelf, berth } => {
+                    self.views.moor_shelf(shelf, berth);
+                    self.shelf_edit = None;
                     self.mark_views_dirty();
                 }
                 ViewAction::NewShelf => {
@@ -1206,13 +1431,13 @@ impl WeatherApp {
                 }
                 ViewAction::ToggleShelf(shelf) => {
                     self.views.toggle_shelf(shelf);
-                    self.slate.closed_folders = self.views.closed_folders();
+                    self.slate.closed_folders = self.views.closed_shelves();
                     self.mark_dirty();
                 }
                 ViewAction::ScuttleShelf(shelf) => {
                     self.views.scuttle_shelf(shelf);
                     self.shelf_edit = None;
-                    self.slate.closed_folders = self.views.closed_folders();
+                    self.slate.closed_folders = self.views.closed_shelves();
                     self.mark_dirty();
                     self.mark_views_dirty();
                 }
@@ -1232,7 +1457,7 @@ impl WeatherApp {
                 ViewAction::CommitShelfRename => {
                     if let Some(edit) = self.shelf_edit.take() {
                         if self.views.rename_shelf(edit.shelf, &edit.name) {
-                            self.slate.closed_folders = self.views.closed_folders();
+                            self.slate.closed_folders = self.views.closed_shelves();
                             self.mark_dirty();
                             self.mark_views_dirty();
                         } else {
@@ -1259,6 +1484,36 @@ impl WeatherApp {
         self.mark_views_dirty();
     }
 
+    fn remember_pins(&mut self) {
+        self.map_undo.remember(MapReversal::Pins {
+            view: self.active_view.clone(),
+            before: self.pins.clone(),
+        });
+    }
+
+    fn remember_probe(&mut self) {
+        self.map_undo.remember(MapReversal::Probe {
+            before: self.transient_probe,
+        });
+    }
+
+    fn undo_map_object(&mut self) {
+        let Some(recoil) =
+            self.map_undo
+                .recoil(&self.active_view, &self.pins, self.transient_probe)
+        else {
+            return;
+        };
+        self.pin_tug = None;
+        match recoil {
+            MapRecoil::Pins(pins) => {
+                self.pins = pins;
+                self.sync_active_view();
+            }
+            MapRecoil::Probe(probe) => self.transient_probe = probe,
+        }
+    }
+
     fn new_view(&mut self) {
         self.sync_active_view();
         let source = self.active_view.clone();
@@ -1279,6 +1534,7 @@ impl WeatherApp {
         self.slate.active_view = Some(view.name.clone());
         self.viewport = view.viewport;
         self.pins = view.pins;
+        self.pin_tug = None;
         self.view_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         self.status = format!("active view `{}`", view.name);
@@ -1339,6 +1595,7 @@ impl WeatherApp {
         let Some(removed) = self.views.remove(name) else {
             return;
         };
+        self.map_undo.forget_view(&removed.name);
         let successor = (self.active_view == removed.name)
             .then(|| self.views.all().next().cloned())
             .flatten();
@@ -1360,24 +1617,35 @@ impl WeatherApp {
             return;
         };
         let old = self.active_view.clone();
-        if old == new {
+        if self.rename_view_to(&old, new) {
             self.view_name_entry.clear();
             self.name_edit = NameEdit::Idle;
-            return;
+        }
+    }
+
+    fn rename_view_to(&mut self, old: &EntryName, new: EntryName) -> bool {
+        if old == &new {
+            return true;
         }
         if self.views.taken(&new) {
             self.status = format!("view `{new}` already exists");
-            return;
+            return false;
         }
-        self.sync_active_view();
-        self.views.rename(&old, new.clone());
-        self.active_view = new.clone();
-        self.slate.active_view = Some(new.clone());
-        self.view_name_entry.clear();
-        self.name_edit = NameEdit::Idle;
+        if old == &self.active_view {
+            self.sync_active_view();
+        }
+        if !self.views.rename(old, new.clone()) {
+            return false;
+        }
+        self.map_undo.rename_view(old, &new);
+        if old == &self.active_view {
+            self.active_view = new.clone();
+            self.slate.active_view = Some(new.clone());
+        }
         self.status = format!("renamed view `{old}` → `{new}`");
         self.mark_dirty();
         self.mark_views_dirty();
+        true
     }
 
     fn strike_overlay(&mut self, product: Product) {
@@ -1758,12 +2026,6 @@ fn view_slot_command(event: &egui::Event) -> Option<(ViewSlot, bool)> {
     ViewSlot::forge(digit).map(|slot| (slot, modifiers.shift))
 }
 
-fn map_icon(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
-    let response = ui.add(chrome::icon_button(glyph).sense(egui::Sense::CLICK));
-    chrome::tension(ui, &response);
-    response
-}
-
 fn sample_point(point: MercatorPoint, field: &FieldGrid) -> Option<f32> {
     let [i, j] = map::grid_at(field, point.world()).map(f64::round);
     if !(0.0..f64::from(field.width)).contains(&i) || !(0.0..f64::from(field.height)).contains(&j) {
@@ -1870,6 +2132,130 @@ impl VectorBank {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
+
+    fn point(x: f64) -> Result<MercatorPoint> {
+        MercatorPoint::forge([x, 0.5]).context("test map point")
+    }
+
+    fn view(name: &str) -> Result<EntryName> {
+        EntryName::forge(name).context("test view name")
+    }
+
+    #[test]
+    fn map_undo_interleaves_global_probe_and_view_owned_pins() -> Result<()> {
+        let alpha = view("alpha")?;
+        let beta = view("beta")?;
+        let alpha_pin = point(0.2)?;
+        let beta_pin = point(0.7)?;
+        let probe = point(0.4)?;
+        let mut undo = MapUndo::default();
+        undo.remember(MapReversal::Pins {
+            view: alpha.clone(),
+            before: Vec::new(),
+        });
+        undo.remember(MapReversal::Pins {
+            view: beta.clone(),
+            before: Vec::new(),
+        });
+        undo.remember(MapReversal::Probe { before: None });
+
+        assert_eq!(
+            undo.recoil(&alpha, &[alpha_pin], Some(probe)),
+            Some(MapRecoil::Probe(None))
+        );
+        assert_eq!(
+            undo.recoil(&alpha, &[alpha_pin], None),
+            Some(MapRecoil::Pins(Vec::new()))
+        );
+        assert_eq!(undo.recoil(&alpha, &[], None), None);
+        assert_eq!(
+            undo.recoil(&beta, &[beta_pin], None),
+            Some(MapRecoil::Pins(Vec::new()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pin_tug_forges_one_reversal_only_for_net_motion() -> Result<()> {
+        let origin = point(0.2)?;
+        let moved = point(0.3)?;
+        let tug = PinTug {
+            slot: 0,
+            origin,
+            world_points: 1.0,
+        };
+        assert_eq!(tug.reversal(&[origin]), None);
+        assert_eq!(tug.reversal(&[moved]), Some(vec![origin]));
+        Ok(())
+    }
+
+    #[test]
+    fn map_undo_tracks_view_renames_and_forgets_deleted_views() -> Result<()> {
+        let old = view("old")?;
+        let new = view("new")?;
+        let pin = point(0.2)?;
+        let mut undo = MapUndo::default();
+        undo.remember(MapReversal::Pins {
+            view: old.clone(),
+            before: Vec::new(),
+        });
+        undo.rename_view(&old, &new);
+        assert_eq!(
+            undo.recoil(&new, &[pin], None),
+            Some(MapRecoil::Pins(Vec::new()))
+        );
+
+        undo.remember(MapReversal::Pins {
+            view: new.clone(),
+            before: Vec::new(),
+        });
+        undo.remember(MapReversal::Probe { before: None });
+        undo.forget_view(&new);
+        assert_eq!(
+            undo.recoil(&new, &[], Some(pin)),
+            Some(MapRecoil::Probe(None))
+        );
+        assert_eq!(undo.recoil(&new, &[pin], None), None);
+        Ok(())
+    }
+
+    #[test]
+    fn plaque_phalanx_flips_a_colliding_label_left() {
+        let mut phalanx = PlaquePhalanx::forge(egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(500.0, 300.0),
+        ));
+        let size = egui::vec2(120.0, 60.0);
+        let gap = egui::vec2(10.0, 5.0);
+        let first = phalanx.berth(egui::pos2(200.0, 100.0), size, gap);
+        assert_eq!(first.pivot, egui::Align2::LEFT_TOP);
+        phalanx.occupy(first.rect(size));
+
+        let second = phalanx.berth(egui::pos2(210.0, 100.0), size, gap);
+        assert_eq!(second.pivot, egui::Align2::RIGHT_TOP);
+        assert_eq!(second.rect(size).right(), 200.0);
+        assert!(!first.rect(size).intersects(second.rect(size)));
+    }
+
+    #[test]
+    fn plaque_phalanx_keeps_adjacency_when_both_flanks_are_blocked() {
+        let mut phalanx = PlaquePhalanx::forge(egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(500.0, 300.0),
+        ));
+        let size = egui::vec2(120.0, 60.0);
+        let anchor = egui::pos2(250.0, 100.0);
+        let gap = egui::vec2(10.0, 5.0);
+        phalanx.occupy(egui::Rect::from_min_max(
+            egui::pos2(0.0, 90.0),
+            egui::pos2(500.0, 180.0),
+        ));
+
+        let berth = phalanx.berth(anchor, size, gap);
+        assert_eq!(berth.pivot, egui::Align2::LEFT_TOP);
+        assert_eq!(berth.rect(size).left(), anchor.x + gap.x);
+    }
 
     #[test]
     fn physical_digits_survive_shifted_logical_keys() {

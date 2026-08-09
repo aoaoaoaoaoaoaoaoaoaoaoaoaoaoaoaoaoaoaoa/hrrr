@@ -8,8 +8,8 @@ network, GRIB, PMTiles, and mesh work run outside the UI thread.
 
 ## Install
 
-HRRR requires Rust 1.96 or newer and a working Vulkan, Metal, or DirectX 12
-graphics stack.
+HRRR requires Rust 1.96 or newer, Linux/X11, and a working Vulkan graphics
+stack.
 
 ```sh
 cargo install hrrr --locked
@@ -31,9 +31,10 @@ hrrr basemap status
 hrrr basemap remove
 ```
 
-Linux and macOS are primary platforms. Windows is supported on a best-effort
-basis. The Linux tray implementation uses XEmbed under X11; lack of a tray
-degrades window-close behavior to ordinary termination.
+Linux/X11 is the sole current native-host coordinate. The tray implementation
+uses XEmbed; lack of a tray degrades window-close behavior to ordinary
+termination. Wayland, macOS, and Windows require proved Eternalist host
+projections before they can be claimed.
 
 ## Use
 
@@ -44,7 +45,8 @@ run, and the latest 48-hour run.
 Drag to pan and scroll at the pointer to zoom. A left click moves the transient
 probe; `Shift`-left-click creates a persistent probe. Drag a persistent probe
 by its bulb and remove it with its adjacent ×. `Esc` clears the transient
-probe.
+probe. `Ctrl+Z` undoes probe placement, movement, removal, and transient
+clearing. Map navigation and saved-view operations remain outside that history.
 
 Every map position and persistent-probe set belongs to the active saved view
 and is autosaved. The + control clones the active view. Numeric keys select
@@ -81,6 +83,19 @@ Forecast data is fetched directly from the [NOAA HRRR public
 archive](https://registry.opendata.aws/noaa-hrrr-pds/). Basemap data comes from
 [OpenStreetMap](https://www.openstreetmap.org/copyright) through Protomaps.
 Displayed forecasts are model output, not official warnings or observations.
+
+## Development
+
+Run the non-mutating source gate with `./check.py verify`. `scripts/test-gui`
+builds the optimized product twice, first ordinarily and then with its one-way
+test witness, and runs the complete native suite in private X11, XDG, process,
+network, and software-graphics namespaces. The stories prove inert launch;
+transient and persistent probes; restart restoration; pin drag and undo; and
+tray hide, reveal, menu, and quit behavior. Failure evidence is retained under
+`/tmp/hrrr-acceptance-artifacts` by default.
+
+Native acceptance and ordinary-product CI share one declared coordinate:
+Linux/X11.
 
 ## License
 

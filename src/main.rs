@@ -3,12 +3,11 @@ use anyhow::Result;
 mod app;
 mod basemap;
 mod basemap_artifact;
-mod boiler;
 mod cache;
 mod config;
 mod decode;
 mod fold_ui;
-mod forge;
+mod host;
 mod library;
 mod library_ui;
 mod map;
@@ -20,6 +19,7 @@ mod state;
 mod tray;
 mod vector_map;
 mod view;
+mod witness;
 mod worker;
 mod xdg;
 
@@ -47,7 +47,10 @@ fn main() -> Result<()> {
 fn run_gui() -> Result<()> {
     let ctx = egui::Context::default();
     dwemer_poolrooms::chrome::install(&ctx);
-    boiler::run(ctx)
+    let trace = eternalist_apps::TraceGuard::arm()?;
+    let result = host::run(ctx);
+    trace.flush();
+    result
 }
 
 fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {

@@ -16,6 +16,7 @@ pub struct Slate {
     pub lead: LeadHour,
     pub active_view: Option<EntryName>,
     pub closed_folders: BTreeSet<String>,
+    pub inspector_scroll: f32,
 }
 
 impl Default for Slate {
@@ -26,6 +27,7 @@ impl Default for Slate {
             lead: LeadHour::ZERO,
             active_view: None,
             closed_folders: BTreeSet::new(),
+            inspector_scroll: 0.0,
         }
     }
 }
@@ -58,6 +60,8 @@ struct SlateV1 {
     lead: LeadHour,
     active_view: Option<EntryName>,
     closed_folders: BTreeSet<String>,
+    #[serde(default)]
+    inspector_scroll: f32,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +120,7 @@ impl Slate {
                 lead: self.lead,
                 active_view: self.active_view.clone(),
                 closed_folders: self.closed_folders.clone(),
+                inspector_scroll: self.inspector_scroll,
             },
             path,
             "serialize session state",
@@ -133,6 +138,7 @@ impl Slate {
             lead: wire.lead,
             active_view: wire.active_view,
             closed_folders: wire.closed_folders,
+            inspector_scroll: lawful_scroll(wire.inspector_scroll),
         })
     }
 
@@ -150,7 +156,16 @@ impl Slate {
             lead: wire.lead,
             active_view: wire.active_view,
             closed_folders: wire.closed_folders,
+            inspector_scroll: 0.0,
         })
+    }
+}
+
+fn lawful_scroll(offset: f32) -> f32 {
+    if offset.is_finite() {
+        offset.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -193,5 +208,16 @@ lead = 49
 closed_folders = []
 ";
         assert!(toml::from_str::<SlateWire>(text).is_err());
+    }
+
+    #[test]
+    fn inspector_scroll_repels_nonfinite_and_negative_state() -> Result<()> {
+        let mut slate = Slate::from_v1(toml::from_str::<SlateV1>(
+            "schema = 1\noverlay = \"smoke\"\ncycle = \"latest\"\nlead = 0\nclosed_folders = []\ninspector_scroll = nan\n",
+        )?)?;
+        assert_eq!(slate.inspector_scroll, 0.0);
+        slate.inspector_scroll = lawful_scroll(-8.0);
+        assert_eq!(slate.inspector_scroll, 0.0);
+        Ok(())
     }
 }

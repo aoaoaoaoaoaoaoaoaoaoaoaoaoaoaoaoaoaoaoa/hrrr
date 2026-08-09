@@ -1,6 +1,10 @@
+[workspace]
+members = ["crates/hrrr-acceptance", "crates/hrrr-contract"]
+resolver = "3"
+
 [package]
 name = "hrrr"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
@@ -13,25 +17,29 @@ keywords = ["hrrr", "weather", "egui", "wgpu", "grib"]
 categories = ["gui", "science::geo"]
 include = ["src/**", "README.md", "LICENSE"]
 
+[features]
+egui-test = ["dep:egui-tester-witness", "eternalist-apps/egui-test"]
+
 [dependencies]
 anyhow = "1.0.102"
 atomic-write-file = "0.3.0"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
-dwemer_poolrooms = "=0.3.1"
+dwemer_poolrooms = "0.9.0"
 egui = "=0.34.3"
 egui-wgpu = "=0.34.3"
-egui-winit = "=0.34.3"
+egui-tester-witness = { version = "0.6.0", optional = true, features = ["egui"] }
+eternalist-apps = { version = "0.3.0", features = ["serde"] }
 fast-mvt = { version = "0.6.1", default-features = false, features = ["reader"] }
 flate2 = "1.1.5"
 fs4 = "0.12.0"
 geo-types = "0.7.19"
 grib = { version = "0.16.0", default-features = false }
+hrrr-contract = { path = "crates/hrrr-contract", version = "0.1.0" }
 jiff = "0.2.33"
 lyon_tessellation = "1.0.20"
 pmtiles = { version = "0.23.1", default-features = false, features = ["mmap-async-tokio"] }
-pollster = "0.4"
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"
 tar = { version = "0.4.44", default-features = false }
@@ -47,7 +55,10 @@ x11rb = { version = "0.13.2", default-features = false, features = ["randr"] }
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tray-icon = { version = "0.24.1", default-features = false }
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 warnings = "deny"
 elided_lifetimes_in_paths = "deny"
 unexpected_cfgs = "deny"
@@ -60,11 +71,11 @@ ambiguous_glob_imports = "allow"
 ambiguous_glob_reexports = "allow"
 hidden_glob_reexports = "allow"
 
-[lints.rustdoc]
+[workspace.lints.rustdoc]
 bare_urls = "deny"
 broken_intra_doc_links = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "deny", priority = -2 }
 pedantic = { level = "deny", priority = -1 }
 cargo = { level = "warn", priority = -3 }
@@ -119,12 +130,12 @@ used_underscore_binding = "allow"
 
 [package.metadata.rust-starter]
 format_command = ["cargo", "fmt", "--all", "--check"]
-clippy_command = ["cargo", "clippy", "--all-targets", "--all-features"]
-test_command = ["cargo", "test", "--all-targets", "--all-features"]
-doc_command = ["cargo", "doc", "--all-features", "--no-deps"]
+clippy_command = ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--all-features"]
+test_command = ["cargo", "test", "--locked", "--workspace", "--all-targets", "--all-features"]
+doc_command = ["cargo", "doc", "--locked", "--workspace", "--all-features", "--no-deps"]
 canonicalize_commands = [
-  ["cargo", "fix", "--all-targets", "--all-features", "--allow-dirty", "--allow-staged", "--allow-no-vcs"],
-  ["cargo", "clippy", "--fix", "--all-targets", "--all-features", "--allow-dirty", "--allow-staged", "--allow-no-vcs"],
+  ["cargo", "fix", "--workspace", "--all-targets", "--all-features", "--allow-dirty", "--allow-staged", "--allow-no-vcs"],
+  ["cargo", "clippy", "--fix", "--workspace", "--all-targets", "--all-features", "--allow-dirty", "--allow-staged", "--allow-no-vcs"],
   ["cargo", "fmt", "--all"],
 ]
 

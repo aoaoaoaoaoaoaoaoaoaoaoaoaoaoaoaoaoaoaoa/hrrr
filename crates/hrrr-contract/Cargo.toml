@@ -1,0 +1,11 @@
+[package]
+name = "hrrr-contract"
+version = "0.1.0"
+description = "Stable UI identity shared by HRRR and its native acceptance stories"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr"
+rust-version = "1.96"
+
+[lints]
+workspace = true

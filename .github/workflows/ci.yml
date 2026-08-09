@@ -3,51 +3,162 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUSTUP_TOOLCHAIN: 1.96.0
 
 jobs:
-  platform:
-    name: ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-24.04
-          - name: macOS arm64
-            os: macos-15
-          - name: macOS x86_64
-            os: macos-15-intel
-          - name: Windows x86_64
-            os: windows-2025
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install declared toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal
-      - name: Check
-        run: cargo +1.96.0 check --locked --all-targets --all-features
-      - name: Test
-        run: cargo +1.96.0 test --locked --all-targets --all-features
-
-  quality:
-    name: Release gates
+  source:
+    name: Source contract
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install declared toolchain
         run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
-      - name: Format
-        run: cargo +1.96.0 fmt --all --check
-      - name: Clippy
-        run: cargo +1.96.0 clippy --locked --all-targets --all-features
-      - name: Documentation
-        run: cargo +1.96.0 doc --locked --all-features --no-deps
-      - name: Package
-        run: cargo +1.96.0 package --locked
+      - name: Verify source
+        run: scripts/check
+
+  security:
+    name: Locked dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit locked dependencies
+        run: scripts/audit
+
+  package:
+    name: Published package graph
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Verify crates.io packages
+        run: scripts/package
+
+  lifecycle:
+    name: Install and uninstall · Linux/X11
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install native test substrate
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            bubblewrap \
+            dbus-user-session \
+            libxkbcommon-x11-0 \
+            mesa-vulkan-drivers \
+            xauth \
+            xvfb
+      - name: Admit contained user services
+        run: |
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo sysctl --write kernel.unprivileged_userns_clone=1
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          runtime="/run/user/$(id -u)"
+          test -S "$runtime/bus"
+          printf 'XDG_RUNTIME_DIR=%s\n' "$runtime" >> "$GITHUB_ENV"
+          printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$runtime" >> "$GITHUB_ENV"
+      - name: Normalize software Vulkan
+        run: |
+          root="$RUNNER_TEMP/egui-tester-lavapipe"
+          library=$(find /usr/lib -name libvulkan_lvp.so -print -quit)
+          manifest=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -f "$library"
+          test -f "$manifest"
+          install -d "$root/usr/lib" "$root/usr/share/vulkan/icd.d"
+          ln -s "$library" "$root/usr/lib/libvulkan_lvp.so"
+          install -m 0644 "$manifest" "$root/usr/share/vulkan/icd.d/lvp_icd.json"
+          printf 'EGUI_TESTER_LAVAPIPE=%s\n' "$root" >> "$GITHUB_ENV"
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Verify installation lifecycle
+        env:
+          HRRR_INSTALL_ARTIFACTS: /tmp/hrrr-install-artifacts
+        run: scripts/verify-install
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-install-${{ github.run_id }}
+          path: /tmp/hrrr-install-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
+
+  native-acceptance:
+    name: Native acceptance · Linux/X11
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Install native test substrate
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bubblewrap \
+            dbus-user-session \
+            i3-wm \
+            libxkbcommon-x11-0 \
+            mesa-vulkan-drivers \
+            xauth \
+            xvfb
+      - name: Admit contained user services
+        run: |
+          if sysctl -N kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          runtime="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR="$runtime"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"
+          systemctl --user show-environment
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+      - name: Normalize software Vulkan
+        run: |
+          root="$HOME/.local/share/x11-gui-testing/lavapipe"
+          library=$(find /usr/lib -name libvulkan_lvp.so -print -quit)
+          manifest=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$library"
+          test -n "$manifest"
+          mkdir -p "$root/usr/lib" "$root/usr/share/vulkan/icd.d"
+          ln -s "$library" "$root/usr/lib/libvulkan_lvp.so"
+          cp "$manifest" "$root/usr/share/vulkan/icd.d/lvp_icd.json"
+      - name: Verify native user stories
+        env:
+          HRRR_ACCEPTANCE_ARTIFACTS: /tmp/hrrr-acceptance-artifacts
+        run: scripts/test-gui
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-x11-${{ github.run_id }}
+          path: /tmp/hrrr-acceptance-artifacts
+          if-no-files-found: ignore
+          retention-days: 7

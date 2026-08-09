@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+sandbox=$(mktemp -d "${TMPDIR:-/tmp}/hrrr-install.XXXXXX")
+prefix=$sandbox/prefix
+binary=$prefix/bin/hrrr
+cleanup() {
+    rm -rf "$sandbox"
+}
+trap cleanup EXIT HUP INT TERM
+
+cargo install --path "$root" --root "$prefix" --locked --force
+"$binary" --version >/dev/null
+
+cd "$root"
+cargo build --release --package hrrr-acceptance
+HRRR_ACCEPTANCE_BINARY=$binary \
+HRRR_ACCEPTANCE_ARTIFACTS=${HRRR_INSTALL_ARTIFACTS:-/tmp/hrrr-install-artifacts} \
+    cargo run --release --package hrrr-acceptance -- --smoke
+
+cargo uninstall --root "$prefix" hrrr
+if [ -e "$binary" ]; then
+    printf 'uninstall left executable at %s\n' "$binary" >&2
+    exit 1
+fi
+printf 'install lifecycle verified under %s\n' "$sandbox"
