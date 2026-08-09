@@ -1,10 +1,11 @@
 # HRRR
 
 HRRR is a native viewer for NOAA High-Resolution Rapid Refresh forecast
-fields. It renders surface smoke, two-metre temperature, total precipitation,
-and one-hour precipitation over a locally indexed vector basemap. Forecast
-animation, map navigation, probes, and saved views remain responsive while
-network, GRIB, PMTiles, and mesh work run outside the UI thread.
+fields. It renders surface smoke, two-metre temperature, total cloud cover,
+total precipitation, and one-hour precipitation over a locally indexed vector
+basemap. Forecast animation, map navigation, probes, and saved views remain
+responsive while network, GRIB, PMTiles, and mesh work run outside the UI
+thread.
 
 ## Install
 

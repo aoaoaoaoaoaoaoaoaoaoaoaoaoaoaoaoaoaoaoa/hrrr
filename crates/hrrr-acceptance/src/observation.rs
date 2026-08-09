@@ -4,6 +4,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Observation {
     pub contract: String,
+    pub active_field: Option<String>,
     pub active_view: String,
     pub pins: Vec<[f64; 2]>,
     pub transient_probe: Option<[f64; 2]>,
@@ -19,6 +20,13 @@ pub struct Viewport {
 
 pub mod shows {
     use super::*;
+
+    pub fn field(name: &'static str) -> Condition<Observation> {
+        Condition::new(
+            format!("{name} field selected"),
+            move |state: &Observation| state.active_field.as_deref() == Some(name),
+        )
+    }
 
     pub fn pins(count: usize) -> Condition<Observation> {
         Condition::new(

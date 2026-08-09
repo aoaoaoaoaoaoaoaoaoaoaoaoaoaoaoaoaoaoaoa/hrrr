@@ -421,7 +421,7 @@ impl WeatherApp {
     fn inspector(&mut self, ui: &mut egui::Ui) {
         let mut chosen_product = None;
         let (wake, focus) = fold_ui::section(ui, "product", "field", true, |ui| {
-            for row in Product::ROWS {
+            for &row in Product::ROWS {
                 let _row = ui.horizontal(|ui| {
                     let spacing = ui.spacing().item_spacing.x * row.len().saturating_sub(1) as f32;
                     let width = (ui.available_width() - spacing) / row.len() as f32;
@@ -430,6 +430,11 @@ impl WeatherApp {
                             [width, 26.0],
                             egui::Button::new(product.label())
                                 .selected(self.slate.overlay.active() == Some(product)),
+                        );
+                        crate::witness::anchor(
+                            ui,
+                            hrrr_contract::Target::Field(product.cache_name()),
+                            response.rect,
                         );
                         chrome::tension(ui, &response);
                         if response.hovered() {
@@ -1023,6 +1028,11 @@ impl WeatherApp {
     pub fn witness_state(&self) -> crate::witness::State {
         crate::witness::State {
             contract: hrrr_contract::UI_FINGERPRINT,
+            active_field: self
+                .slate
+                .overlay
+                .active()
+                .map(|product| product.cache_name().to_owned()),
             active_view: self.active_view.as_str().to_owned(),
             pins: self.pins.iter().map(|pin| pin.world()).collect(),
             transient_probe: self.transient_probe.map(MercatorPoint::world),
@@ -1146,7 +1156,7 @@ impl WeatherApp {
             Color32::from_black_alpha(240),
         );
         if let Some(last) = scale.bins.last() {
-            let maximum = format!("{:.0} {}", last.ceiling, scale.unit.symbol());
+            let maximum = scale.unit.format_ceiling(last.ceiling);
             Self::legend_text(
                 painter,
                 bar.right_top() - egui::vec2(0.0, 3.0),

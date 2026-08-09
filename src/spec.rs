@@ -6,6 +6,7 @@ pub enum Unit {
     Inch,
     MicrogramPerCubicMetre,
     Fahrenheit,
+    Percent,
 }
 
 impl Unit {
@@ -14,6 +15,7 @@ impl Unit {
             Self::Inch => "in",
             Self::MicrogramPerCubicMetre => "µg/m³",
             Self::Fahrenheit => "°F",
+            Self::Percent => "%",
         }
     }
 
@@ -27,6 +29,7 @@ impl Unit {
             Self::Inch => [1.0 / 25.4, 0.0],
             Self::MicrogramPerCubicMetre => [1.0e9, 0.0],
             Self::Fahrenheit => [1.8, -459.67],
+            Self::Percent => [1.0, 0.0],
         }
     }
 
@@ -35,6 +38,16 @@ impl Unit {
             Self::Inch => format!("{value:.2} {}", self.symbol()),
             Self::MicrogramPerCubicMetre => format!("{value:.1} {}", self.symbol()),
             Self::Fahrenheit => format!("{value:.1}{}", self.symbol()),
+            Self::Percent => format!("{value:.0}{}", self.symbol()),
+        }
+    }
+
+    pub fn format_ceiling(self, value: f32) -> String {
+        match self {
+            Self::Percent | Self::Fahrenheit => format!("{value:.0}{}", self.symbol()),
+            Self::Inch | Self::MicrogramPerCubicMetre => {
+                format!("{value:.0} {}", self.symbol())
+            }
         }
     }
 }
@@ -65,6 +78,14 @@ pub struct Scale {
 }
 
 impl Scale {
+    fn forge(unit: Unit, bins: impl Into<Arc<[Bin]>>, contour: Contour) -> Self {
+        Self {
+            unit,
+            bins: bins.into(),
+            contour,
+        }
+    }
+
     pub fn display(&self, raw: f32) -> String {
         self.unit.format(self.unit.convert(raw))
     }
@@ -117,68 +138,87 @@ impl TemperatureSeason {
 }
 
 #[derive(Clone, Debug)]
-pub struct ScaleAtlas {
-    qpf_run: Scale,
-    qpf_hour: Scale,
-    smoke_light: Scale,
-    smoke_heavy: Scale,
-    temperature_summer: Scale,
-    temperature_winter: Scale,
+enum ScaleFamily {
+    Static(Scale),
+    Smoke { light: Scale, heavy: Scale },
+    Temperature { summer: Scale, winter: Scale },
 }
 
-impl Default for ScaleAtlas {
-    fn default() -> Self {
-        Self {
-            qpf_run: Scale {
-                unit: Unit::Inch,
-                bins: Arc::from(QPF),
-                contour: PRECIPITATION_CONTOUR,
-            },
-            qpf_hour: Scale {
-                unit: Unit::Inch,
-                bins: Arc::from(&QPF[..QPF_HOURLY_BINS]),
-                contour: PRECIPITATION_CONTOUR,
-            },
-            smoke_light: Scale {
-                unit: Unit::MicrogramPerCubicMetre,
-                bins: Arc::from(LIGHT_SMOKE),
-                contour: SMOKE_CONTOUR,
-            },
-            smoke_heavy: Scale {
-                unit: Unit::MicrogramPerCubicMetre,
-                bins: Arc::from(HEAVY_SMOKE),
-                contour: SMOKE_CONTOUR,
-            },
-            temperature_summer: Scale {
-                unit: Unit::Fahrenheit,
-                bins: temperature_bins(40, 120, &SUMMER_TEMPERATURE),
-                contour: TEMPERATURE_CONTOUR,
-            },
-            temperature_winter: Scale {
-                unit: Unit::Fahrenheit,
-                bins: temperature_bins(-50, 80, &WINTER_TEMPERATURE),
-                contour: TEMPERATURE_CONTOUR,
-            },
+impl ScaleFamily {
+    fn resolve(&self, smoke: SmokeRegime, temperature: TemperatureSeason) -> &Scale {
+        match (self, smoke, temperature) {
+            (Self::Static(scale), _, _) => scale,
+            (Self::Smoke { light, .. }, SmokeRegime::Light, _) => light,
+            (Self::Smoke { heavy, .. }, SmokeRegime::Heavy, _) => heavy,
+            (Self::Temperature { summer, .. }, _, TemperatureSeason::Summer) => summer,
+            (Self::Temperature { winter, .. }, _, TemperatureSeason::Winter) => winter,
         }
     }
 }
 
-impl ScaleAtlas {
-    pub fn get(
-        &self,
-        product: Product,
-        smoke: SmokeRegime,
-        temperature: TemperatureSeason,
-    ) -> &Scale {
-        match (product, smoke, temperature) {
-            (Product::QpfRun, _, _) => &self.qpf_run,
-            (Product::QpfHour, _, _) => &self.qpf_hour,
-            (Product::Smoke, SmokeRegime::Light, _) => &self.smoke_light,
-            (Product::Smoke, SmokeRegime::Heavy, _) => &self.smoke_heavy,
-            (Product::Temperature, _, TemperatureSeason::Summer) => &self.temperature_summer,
-            (Product::Temperature, _, TemperatureSeason::Winter) => &self.temperature_winter,
+macro_rules! scale_arsenal {
+    ($($product:ident => $field:ident = $family:expr),+ $(,)?) => {
+        #[derive(Clone, Debug)]
+        pub struct ScaleAtlas {
+            $($field: ScaleFamily),+
         }
-    }
+
+        impl Default for ScaleAtlas {
+            fn default() -> Self {
+                Self {
+                    $($field: $family),+
+                }
+            }
+        }
+
+        impl ScaleAtlas {
+            pub fn get(
+                &self,
+                product: Product,
+                smoke: SmokeRegime,
+                temperature: TemperatureSeason,
+            ) -> &Scale {
+                match product {
+                    $(Product::$product => &self.$field),+
+                }
+                .resolve(smoke, temperature)
+            }
+        }
+    };
+}
+
+scale_arsenal! {
+    QpfRun => qpf_run = ScaleFamily::Static(Scale::forge(
+        Unit::Inch,
+        QPF,
+        PRECIPITATION_CONTOUR,
+    )),
+    QpfHour => qpf_hour = ScaleFamily::Static(Scale::forge(
+        Unit::Inch,
+        &QPF[..QPF_HOURLY_BINS],
+        PRECIPITATION_CONTOUR,
+    )),
+    Smoke => smoke = ScaleFamily::Smoke {
+        light: Scale::forge(Unit::MicrogramPerCubicMetre, LIGHT_SMOKE, SMOKE_CONTOUR),
+        heavy: Scale::forge(Unit::MicrogramPerCubicMetre, HEAVY_SMOKE, SMOKE_CONTOUR),
+    },
+    Temperature => temperature = ScaleFamily::Temperature {
+        summer: Scale::forge(
+            Unit::Fahrenheit,
+            temperature_bins(40, 120, &SUMMER_TEMPERATURE),
+            TEMPERATURE_CONTOUR,
+        ),
+        winter: Scale::forge(
+            Unit::Fahrenheit,
+            temperature_bins(-50, 80, &WINTER_TEMPERATURE),
+            TEMPERATURE_CONTOUR,
+        ),
+    },
+    CloudCover => cloud_cover = ScaleFamily::Static(Scale::forge(
+        Unit::Percent,
+        CLOUD_COVER,
+        CLOUD_CONTOUR,
+    )),
 }
 
 const VOID: [u8; 4] = [10, 10, 8, 0];
@@ -193,6 +233,10 @@ const SMOKE_CONTOUR: Contour = Contour {
 const TEMPERATURE_CONTOUR: Contour = Contour {
     width_points: 0.18,
     srgb: [35, 31, 26, 34],
+};
+const CLOUD_CONTOUR: Contour = Contour {
+    width_points: 0.18,
+    srgb: [35, 31, 26, 38],
 };
 const QPF_HOURLY_BINS: usize = 15;
 const QPF: [Bin; 18] = [
@@ -234,6 +278,19 @@ const LIGHT_SMOKE: [Bin; 10] = [
 ];
 const HEAVY_SMOKE: [Bin; 9] = [
     SMOKE_0, SMOKE_1, SMOKE_5, SMOKE_10, SMOKE_20, SMOKE_40, SMOKE_80, SMOKE_160, SMOKE_320,
+];
+const CLOUD_COVER: [Bin; 11] = [
+    Bin::new(0.0, VOID),
+    Bin::new(10.0, [91, 122, 143, 34]),
+    Bin::new(20.0, [101, 129, 149, 48]),
+    Bin::new(30.0, [112, 136, 155, 63]),
+    Bin::new(40.0, [124, 143, 161, 79]),
+    Bin::new(50.0, [138, 151, 168, 96]),
+    Bin::new(60.0, [154, 160, 176, 115]),
+    Bin::new(70.0, [173, 173, 185, 136]),
+    Bin::new(80.0, [195, 190, 194, 158]),
+    Bin::new(90.0, [219, 208, 202, 182]),
+    Bin::new(100.0, [242, 231, 218, 206]),
 ];
 const TEMPERATURE_ALPHA: u8 = 210;
 
@@ -318,6 +375,9 @@ mod tests {
         assert!((Unit::Inch.convert(25.4) - 1.0).abs() < 1e-6);
         assert!((Unit::Fahrenheit.convert(273.15) - 32.0).abs() < 1e-4);
         assert_eq!(Unit::MicrogramPerCubicMetre.convert(1e-9), 1.0);
+        assert_eq!(Unit::Percent.convert(73.0), 73.0);
+        assert_eq!(Unit::Percent.format(72.6), "73%");
+        assert_eq!(Unit::Percent.format_ceiling(100.0), "100%");
     }
 
     #[test]
@@ -430,5 +490,32 @@ mod tests {
         assert_eq!(TemperatureSeason::for_month(9), TemperatureSeason::Summer);
         assert_eq!(TemperatureSeason::for_month(4), TemperatureSeason::Winter);
         assert_eq!(TemperatureSeason::for_month(10), TemperatureSeason::Winter);
+    }
+
+    #[test]
+    fn cloud_cover_is_a_complete_decile_lattice() {
+        let atlas = ScaleAtlas::default();
+        let cloud = atlas.get(
+            Product::CloudCover,
+            SmokeRegime::Light,
+            TemperatureSeason::Summer,
+        );
+        assert_eq!(cloud.unit, Unit::Percent);
+        assert_eq!(cloud.bins.len(), 11);
+        assert_eq!(cloud.bins.first().map(|bin| bin.ceiling), Some(0.0));
+        assert_eq!(cloud.bins.last().map(|bin| bin.ceiling), Some(100.0));
+        assert!(
+            cloud
+                .bins
+                .windows(2)
+                .all(|pair| (pair[1].ceiling - pair[0].ceiling - 10.0).abs() < f32::EPSILON)
+        );
+        assert_eq!(cloud.bins[0].srgb[3], 0);
+        assert!(
+            cloud
+                .bins
+                .windows(2)
+                .all(|pair| pair[0].srgb[3] < pair[1].srgb[3])
+        );
     }
 }

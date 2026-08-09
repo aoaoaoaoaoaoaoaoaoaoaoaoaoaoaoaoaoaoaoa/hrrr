@@ -9,7 +9,7 @@ cargo build --release --package hrrr-acceptance
 cargo run --release --package hrrr-acceptance -- --smoke
 cargo build --release --bin hrrr --features egui-test
 if [ "$#" -eq 0 ]; then
-    set -- map-objects tray
+    set -- fields map-objects tray
 fi
 for story do
     cargo run --release --package hrrr-acceptance -- \

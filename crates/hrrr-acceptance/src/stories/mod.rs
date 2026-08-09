@@ -1,3 +1,4 @@
+mod fields;
 mod map_objects;
 mod tray;
 
@@ -36,11 +37,14 @@ pub fn smoke(harness: &Harness<'_>) -> Result<()> {
 
 pub fn run(harness: &Harness<'_>, selected: Option<&str>) -> Result<()> {
     match selected.unwrap_or("map-objects") {
+        "fields" => fields::run(harness)?,
         "map-objects" => map_objects::run(harness)?,
         "tray" => tray::run(harness)?,
         unknown => {
             return Err(egui_tester::Error::Verdict {
-                detail: format!("unknown HRRR story `{unknown}`; expected map-objects or tray"),
+                detail: format!(
+                    "unknown HRRR story `{unknown}`; expected fields, map-objects, or tray"
+                ),
             });
         }
     }

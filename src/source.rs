@@ -226,7 +226,8 @@ mod tests {
 90:300:d=2026071912:APCP:surface:1-2 hour acc fcst:\n\
 91:350:d=2026071912:MASSDEN:8 m above ground:2 hour fcst:\n\
 92:500:d=2026071912:TMP:2 m above ground:2 hour fcst:\n\
-93:800:d=2026071912:DPT:2 m above ground:2 hour fcst:\n";
+93:800:d=2026071912:TCDC:entire atmosphere:2 hour fcst:\n\
+94:900:d=2026071912:DPT:2 m above ground:2 hour fcst:\n";
 
     #[test]
     fn qpf_selectors_sever_run_and_hour_accumulations() -> Result<()> {
@@ -248,6 +249,7 @@ mod tests {
     fn exact_level_selectors_cut_the_right_messages() -> Result<()> {
         assert_eq!(select_range(INDEX, Product::Smoke)?, 350..=499);
         assert_eq!(select_range(INDEX, Product::Temperature)?, 500..=799);
+        assert_eq!(select_range(INDEX, Product::CloudCover)?, 800..=899);
         Ok(())
     }
 

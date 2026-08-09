@@ -34,6 +34,7 @@ mod active {
     #[derive(Serialize)]
     pub struct State {
         pub contract: &'static str,
+        pub active_field: Option<String>,
         pub active_view: String,
         pub pins: Vec<[f64; 2]>,
         pub transient_probe: Option<[f64; 2]>,

@@ -3,92 +3,6 @@ use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, sync::Arc};
 
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum Product {
-    #[serde(alias = "qpf")]
-    QpfRun,
-    QpfHour,
-    #[default]
-    Smoke,
-    Temperature,
-}
-
-impl Product {
-    pub const ALL: [Self; 4] = [Self::QpfRun, Self::QpfHour, Self::Smoke, Self::Temperature];
-    pub const ROWS: [&'static [Self]; 3] = [
-        &[Self::QpfRun, Self::QpfHour],
-        &[Self::Smoke],
-        &[Self::Temperature],
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::QpfRun => "QPF · TOTAL",
-            Self::QpfHour => "QPF · 1 HOUR",
-            Self::Smoke => "SURFACE SMOKE · 8 M AGL",
-            Self::Temperature => "TEMPERATURE · 2 M AGL",
-        }
-    }
-
-    pub const fn cache_name(self) -> &'static str {
-        match self {
-            Self::QpfRun => "qpf",
-            Self::QpfHour => "qpf-hour",
-            Self::Smoke => "smoke",
-            Self::Temperature => "temperature",
-        }
-    }
-
-    pub(crate) fn index_match(self, descriptor: &str) -> bool {
-        match self {
-            Self::QpfRun => {
-                AccumulationWindow::parse(descriptor).is_some_and(AccumulationWindow::begins_at_run)
-            }
-            Self::QpfHour => {
-                AccumulationWindow::parse(descriptor).is_some_and(AccumulationWindow::is_hourly)
-            }
-            Self::Smoke => descriptor.contains(":MASSDEN:8 m above ground:"),
-            Self::Temperature => descriptor.contains(":TMP:2 m above ground:"),
-        }
-    }
-
-    pub(crate) const fn grib_law(self) -> GribLaw {
-        match self {
-            Self::QpfRun => GribLaw {
-                template: 8,
-                category: 1,
-                parameter: 8,
-                surface: FixedSurfaceLaw::GROUND,
-                time: GribTimeLaw::AccumulationFromRun,
-            },
-            Self::QpfHour => GribLaw {
-                template: 8,
-                category: 1,
-                parameter: 8,
-                surface: FixedSurfaceLaw::GROUND,
-                time: GribTimeLaw::HourlyAccumulation,
-            },
-            Self::Smoke => GribLaw {
-                template: 0,
-                category: 20,
-                parameter: 0,
-                surface: FixedSurfaceLaw::metres_above_ground(8),
-                time: GribTimeLaw::Instant,
-            },
-            Self::Temperature => GribLaw {
-                template: 0,
-                category: 0,
-                parameter: 0,
-                surface: FixedSurfaceLaw::metres_above_ground(2),
-                time: GribTimeLaw::Instant,
-            },
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GribLaw {
     pub template: u16,
@@ -106,6 +20,10 @@ pub(crate) struct FixedSurfaceLaw {
 
 impl FixedSurfaceLaw {
     const GROUND: Self = Self { kind: 1, metres: 0 };
+    const ENTIRE_ATMOSPHERE: Self = Self {
+        kind: 10,
+        metres: 0,
+    };
 
     const fn metres_above_ground(metres: i32) -> Self {
         Self { kind: 103, metres }
@@ -117,6 +35,179 @@ pub(crate) enum GribTimeLaw {
     Instant,
     AccumulationFromRun,
     HourlyAccumulation,
+}
+
+impl GribLaw {
+    const fn instant(category: u8, parameter: u8, surface: FixedSurfaceLaw) -> Self {
+        Self {
+            template: 0,
+            category,
+            parameter,
+            surface,
+            time: GribTimeLaw::Instant,
+        }
+    }
+
+    const fn accumulation(time: GribTimeLaw) -> Self {
+        Self {
+            template: 8,
+            category: 1,
+            parameter: 8,
+            surface: FixedSurfaceLaw::GROUND,
+            time,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InventoryLaw {
+    AccumulationFromRun,
+    HourlyAccumulation,
+    Contains(&'static str),
+}
+
+impl InventoryLaw {
+    fn matches(self, descriptor: &str) -> bool {
+        match self {
+            Self::AccumulationFromRun => {
+                AccumulationWindow::parse(descriptor).is_some_and(AccumulationWindow::begins_at_run)
+            }
+            Self::HourlyAccumulation => {
+                AccumulationWindow::parse(descriptor).is_some_and(AccumulationWindow::is_hourly)
+            }
+            Self::Contains(needle) => descriptor.contains(needle),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProductLaw {
+    label: &'static str,
+    cache_name: &'static str,
+    inventory: InventoryLaw,
+    grib: GribLaw,
+}
+
+macro_rules! field_arsenal {
+    (
+        $(
+            [
+                $(
+                    $(#[$attribute:meta])*
+                    $variant:ident {
+                        label: $label:literal,
+                        cache: $cache:literal,
+                        inventory: $inventory:expr,
+                        grib: $grib:expr $(,)?
+                    }
+                ),+ $(,)?
+            ]
+        ),+ $(,)?
+    ) => {
+        #[derive(
+            Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd,
+            Serialize,
+        )]
+        #[serde(rename_all = "snake_case")]
+        pub enum Product {
+            $(
+                $(
+                    $(#[$attribute])*
+                    $variant,
+                )+
+            )+
+        }
+
+        impl Product {
+            pub const ALL: [Self; field_arsenal!(@count $($($variant),+),+)] = [
+                $($(Self::$variant),+),+
+            ];
+            pub const ROWS: &'static [&'static [Self]] = &[
+                $(&[$(Self::$variant),+]),+
+            ];
+
+            const fn law(self) -> ProductLaw {
+                match self {
+                    $(
+                        $(
+                            Self::$variant => ProductLaw {
+                                label: $label,
+                                cache_name: $cache,
+                                inventory: $inventory,
+                                grib: $grib,
+                            },
+                        )+
+                    )+
+                }
+            }
+
+            pub const fn label(self) -> &'static str {
+                self.law().label
+            }
+
+            pub const fn cache_name(self) -> &'static str {
+                self.law().cache_name
+            }
+
+            pub(crate) fn index_match(self, descriptor: &str) -> bool {
+                self.law().inventory.matches(descriptor)
+            }
+
+            pub(crate) const fn grib_law(self) -> GribLaw {
+                self.law().grib
+            }
+        }
+    };
+    (@count $($variant:ident),+ $(,)?) => {
+        0_usize $(+ field_arsenal!(@one $variant))+
+    };
+    (@one $variant:ident) => {{
+        let _ = stringify!($variant);
+        1_usize
+    }};
+}
+
+field_arsenal! {
+    [
+        #[serde(alias = "qpf")]
+        QpfRun {
+            label: "QPF · TOTAL",
+            cache: "qpf",
+            inventory: InventoryLaw::AccumulationFromRun,
+            grib: GribLaw::accumulation(GribTimeLaw::AccumulationFromRun),
+        },
+        QpfHour {
+            label: "QPF · 1 HOUR",
+            cache: "qpf-hour",
+            inventory: InventoryLaw::HourlyAccumulation,
+            grib: GribLaw::accumulation(GribTimeLaw::HourlyAccumulation),
+        },
+    ],
+    [
+        #[default]
+        Smoke {
+            label: "SURFACE SMOKE · 8 M AGL",
+            cache: "smoke",
+            inventory: InventoryLaw::Contains(":MASSDEN:8 m above ground:"),
+            grib: GribLaw::instant(20, 0, FixedSurfaceLaw::metres_above_ground(8)),
+        },
+    ],
+    [
+        Temperature {
+            label: "TEMPERATURE · 2 M AGL",
+            cache: "temperature",
+            inventory: InventoryLaw::Contains(":TMP:2 m above ground:"),
+            grib: GribLaw::instant(0, 0, FixedSurfaceLaw::metres_above_ground(2)),
+        },
+    ],
+    [
+        CloudCover {
+            label: "CLOUD COVER",
+            cache: "cloud-cover",
+            inventory: InventoryLaw::Contains(":TCDC:entire atmosphere:"),
+            grib: GribLaw::instant(6, 1, FixedSurfaceLaw::ENTIRE_ATMOSPHERE),
+        },
+    ],
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -649,6 +740,7 @@ impl FieldGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[derive(Debug, Deserialize, Serialize)]
     struct PinCase {
@@ -665,6 +757,23 @@ mod tests {
         assert_eq!(
             smoke.strike(Product::Temperature).active(),
             Some(Product::Temperature)
+        );
+    }
+
+    #[test]
+    fn field_arsenal_is_bijective_across_layout_and_cache() {
+        let rows = Product::ROWS
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, Product::ALL);
+        assert_eq!(
+            Product::ALL
+                .iter()
+                .map(|product| product.cache_name())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            Product::ALL.len()
         );
     }
 
