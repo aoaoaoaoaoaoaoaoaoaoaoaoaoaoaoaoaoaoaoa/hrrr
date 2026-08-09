@@ -60,7 +60,9 @@ Linux/Wayland is not yet a release coordinate.
 
 Click an active field button again to show only the basemap. The arrow keys,
 forecast rail, `Ctrl+R`, and `Ctrl+Shift+R` select forecast time, the latest
-run, and the latest 48-hour run.
+run, and the latest 48-hour run. Cumulative fields add a **Base hour** rail;
+their map shows the increment from that hour through the selected forecast
+hour.
 
 Drag to pan and scroll at the pointer to zoom. A left click moves the transient
 probe; `Shift`-left-click creates a persistent probe. Drag a persistent probe

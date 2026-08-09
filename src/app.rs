@@ -333,6 +333,10 @@ impl WeatherApp {
         let worker = Worker::spawn(ctx.clone(), &lair)?;
         let basemap = Basemap::spawn(ctx.clone(), &lair)?;
         let custodian = Custodian::spawn(ctx.clone(), lair.cache_manager())?;
+        #[cfg(feature = "egui-test")]
+        let run_extents = witnessed_frontier(run).into_iter().collect();
+        #[cfg(not(feature = "egui-test"))]
+        let run_extents = HashMap::new();
         let mut water = Surface::new(Wetness::Wet);
         {
             let (chemistry, agitation) = water.laboratory_mut();
@@ -361,7 +365,7 @@ impl WeatherApp {
             basemap,
             custodian,
             latest_run: None,
-            run_extents: HashMap::new(),
+            run_extents,
             surveying_run: None,
             next_survey: Instant::now(),
             announced_discovery: true,
@@ -626,10 +630,21 @@ impl WeatherApp {
         let horizon = run.horizon().unwrap_or(LeadHour::ZERO);
         let published = self.run_extents.get(&run).copied();
         let gate = published.unwrap_or(LeadHour::ZERO);
+        let cumulative = self
+            .slate
+            .overlay
+            .active()
+            .is_some_and(Product::has_baseline);
+        let lead_floor = if cumulative {
+            self.slate.base.next()
+        } else {
+            Some(LeadHour::ZERO)
+        };
+        let lead_ready = lead_floor.is_some_and(|floor| published.is_some() && floor <= gate);
         let mut step = None;
         let _row = ui.horizontal(|ui| {
             let previous = ui.add_enabled(
-                published.is_some() && self.slate.lead > LeadHour::ZERO,
+                lead_floor.is_some_and(|floor| lead_ready && self.slate.lead > floor),
                 egui::Button::new("◀"),
             );
             chrome::tension(ui, &previous);
@@ -642,10 +657,7 @@ impl WeatherApp {
                 gate.get(),
                 horizon.get()
             )));
-            let next = ui.add_enabled(
-                published.is_some() && self.slate.lead < gate,
-                egui::Button::new("▶"),
-            );
+            let next = ui.add_enabled(lead_ready && self.slate.lead < gate, egui::Button::new("▶"));
             chrome::tension(ui, &next);
             if next.clicked() {
                 step = Some((self.slate.lead.saturating_next(gate), next.rect));
@@ -655,18 +667,24 @@ impl WeatherApp {
             self.choose_lead(lead);
             self.water.lever(rect, 1.0);
         }
+        let rail_ceiling = u16::from(horizon.get());
+        let rail_detents = rail_ceiling + 1;
+        let allowed_floor = lead_floor
+            .filter(|_| lead_ready)
+            .map_or(0, |floor| u16::from(floor.get()));
         let mut raw_lead = u16::from(self.slate.lead.get());
         let rail = ui
-            .add_enabled_ui(published.is_some(), |ui| {
-                chrome::Rail::new(&mut raw_lead, 0..=u16::from(horizon.get()))
-                    .allowed(0..=u16::from(gate.get()))
-                    .detents(u16::from(horizon.get()) + 1)
+            .add_enabled_ui(lead_ready, |ui| {
+                chrome::Rail::new(&mut raw_lead, 0..=rail_ceiling)
+                    .allowed(allowed_floor..=u16::from(gate.get()))
+                    .detents(rail_detents)
                     .show(ui)
             })
             .inner;
+        crate::witness::anchor(ui, hrrr_contract::Target::ForecastHour, rail.rect);
         self.water.rail(&rail);
         if rail.changed()
-            && published.is_some()
+            && lead_ready
             && let Ok(raw_lead) = u8::try_from(raw_lead)
             && let Ok(lead) = LeadHour::forge(raw_lead)
         {
@@ -674,6 +692,35 @@ impl WeatherApp {
         }
         if published.is_none() {
             let _surveying = ui.label(chrome::muted("surveying publication frontier…"));
+        } else if !lead_ready {
+            let _interval = ui.label(chrome::muted("awaiting the first cumulative interval…"));
+        }
+
+        if cumulative {
+            ui.add_space(4.0);
+            let _base = ui.horizontal(|ui| {
+                let _label = ui.label(chrome::muted("BASE HOUR"));
+                let _value = ui.label(chrome::section_title(self.slate.base.to_string()));
+            });
+            let base_ceiling = self.slate.lead.saturating_previous();
+            let mut raw_base = u16::from(self.slate.base.get());
+            let base_rail = ui
+                .add_enabled_ui(lead_ready, |ui| {
+                    chrome::Rail::new(&mut raw_base, 0..=rail_ceiling)
+                        .allowed(0..=u16::from(base_ceiling.get()))
+                        .detents(rail_detents)
+                        .show(ui)
+                })
+                .inner;
+            crate::witness::anchor(ui, hrrr_contract::Target::BaseHour, base_rail.rect);
+            self.water.rail(&base_rail);
+            if base_rail.changed()
+                && lead_ready
+                && let Ok(raw_base) = u8::try_from(raw_base)
+                && let Ok(base) = LeadHour::forge(raw_base)
+            {
+                self.choose_base(base);
+            }
         }
 
         ui.add_space(4.0);
@@ -1058,6 +1105,13 @@ impl WeatherApp {
                 .overlay
                 .active()
                 .map(|product| product.cache_name().to_owned()),
+            lead_hour: self.slate.lead.get(),
+            base_hour: self
+                .slate
+                .overlay
+                .active()
+                .filter(|product| product.has_baseline())
+                .map(|_| self.slate.base.get()),
             active_view: self.active_view.as_str().to_owned(),
             pins: self.pins.iter().map(|pin| pin.world()).collect(),
             transient_probe: self.transient_probe.map(MercatorPoint::world),
@@ -1095,13 +1149,16 @@ impl WeatherApp {
                     .stroke(egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG))
                     .inner_margin(margin)
                     .show(ui, |ui| {
-                        let valid = self.run.map_or_else(
-                            || "AWAITING CYCLE".to_owned(),
-                            |run| {
-                                run.valid_local_label(self.slate.lead)
-                                    .unwrap_or_else(|_| "INVALID TIME".to_owned())
-                            },
-                        );
+                        let valid = key
+                            .map(|key| (key.run, key.valid))
+                            .or_else(|| self.run.map(|run| (run, self.slate.lead)))
+                            .map_or_else(
+                                || "AWAITING CYCLE".to_owned(),
+                                |(run, lead)| {
+                                    run.valid_local_label(lead)
+                                        .unwrap_or_else(|_| "INVALID TIME".to_owned())
+                                },
+                            );
                         if let Some(close) = close {
                             let _time = close
                                 .guarded_header(ui, margin, |ui| ui.label(chrome::eyebrow(valid)));
@@ -1262,13 +1319,14 @@ impl WeatherApp {
                     let prior = self.run_extents.insert(run, extent.published());
                     self.next_survey = Instant::now() + FRONTIER_POLL;
                     if self.run == Some(run) {
-                        self.clamp_lead();
+                        self.clamp_clock();
                         let active = self.active_key();
-                        if active.is_some()
-                            && self
-                                .displayed_field
-                                .as_ref()
-                                .is_none_or(|(key, _field)| Some(*key) != active)
+                        if self.slate.overlay.active().is_some()
+                            && (active.is_none()
+                                || self
+                                    .displayed_field
+                                    .as_ref()
+                                    .is_none_or(|(key, _field)| Some(*key) != active))
                         {
                             self.demand_active();
                         } else if prior != Some(extent.published()) {
@@ -1298,7 +1356,7 @@ impl WeatherApp {
                     }
                     self.fields.insert(demand.key, field);
                     if foreground {
-                        self.status = format!("{} decoded in {elapsed_ms} ms", demand.key.lead);
+                        self.status = format!("{} decoded in {elapsed_ms} ms", demand.key);
                     }
                     self.kick_prefetch();
                 }
@@ -1697,6 +1755,7 @@ impl WeatherApp {
         self.slate.overlay = self.slate.overlay.strike(product);
         self.mark_dirty();
         if self.slate.overlay.active().is_some() {
+            self.clamp_clock();
             self.demand_active();
         } else {
             self.demand_id.advance();
@@ -1711,8 +1770,35 @@ impl WeatherApp {
         let Some(frontier) = self.run.and_then(|run| self.run_extents.get(&run)).copied() else {
             return;
         };
-        if lead <= frontier && self.slate.lead != lead {
+        let floor = self
+            .slate
+            .overlay
+            .active()
+            .filter(|product| product.has_baseline())
+            .map_or(Some(LeadHour::ZERO), |_| self.slate.base.next());
+        let Some(floor) = floor.filter(|floor| *floor <= frontier) else {
+            return;
+        };
+        let lead = lead.clamp(floor, frontier);
+        if self.slate.lead != lead {
             self.slate.lead = lead;
+            self.mark_dirty();
+            self.demand_active();
+        }
+    }
+
+    fn choose_base(&mut self, base: LeadHour) {
+        let cumulative = self
+            .slate
+            .overlay
+            .active()
+            .is_some_and(Product::has_baseline);
+        if !cumulative || self.slate.lead == LeadHour::ZERO {
+            return;
+        }
+        let base = base.min(self.slate.lead.saturating_previous());
+        if self.slate.base != base {
+            self.slate.base = base;
             self.mark_dirty();
             self.demand_active();
         }
@@ -1739,7 +1825,7 @@ impl WeatherApp {
             self.rebase_forecast(run);
             self.mark_dirty();
             if self.run_extents.contains_key(&run) {
-                self.clamp_lead();
+                self.clamp_clock();
                 self.demand_active();
             } else {
                 self.demand_id.advance();
@@ -1750,27 +1836,40 @@ impl WeatherApp {
     }
 
     fn reconcile_forecast(&mut self) {
-        self.clamp_lead();
+        self.clamp_clock();
         let active = self.active_key();
-        if active.is_some()
-            && self
-                .displayed_field
-                .as_ref()
-                .is_none_or(|(key, _field)| Some(*key) != active)
+        if self.slate.overlay.active().is_some()
+            && (active.is_none()
+                || self
+                    .displayed_field
+                    .as_ref()
+                    .is_none_or(|(key, _field)| Some(*key) != active))
         {
             self.demand_active();
         }
     }
 
-    fn clamp_lead(&mut self) {
+    fn clamp_clock(&mut self) {
         let Some(run) = self.run else {
             return;
         };
-        let Some(published) = self.run_extents.get(&run).copied() else {
+        let Some(ceiling) = self
+            .run_extents
+            .get(&run)
+            .copied()
+            .or_else(|| run.horizon().ok())
+        else {
             return;
         };
-        if self.slate.lead > published {
-            self.slate.lead = published;
+        let (lead, base) = lawful_clock(
+            self.slate.overlay.active(),
+            self.slate.lead,
+            self.slate.base,
+            ceiling,
+        );
+        if (lead, base) != (self.slate.lead, self.slate.base) {
+            self.slate.lead = lead;
+            self.slate.base = base;
             self.mark_dirty();
         }
     }
@@ -1782,22 +1881,27 @@ impl WeatherApp {
             .copied()
             .or_else(|| run.horizon().ok())
             .unwrap_or(LeadHour::ZERO);
-        let lead = self.run.map_or(LeadHour::ZERO, |source| {
-            run.rebase_lead(source, self.slate.lead, frontier)
-        });
+        let (lead, base) = self
+            .run
+            .map_or((self.slate.lead, self.slate.base), |source| {
+                (
+                    run.rebase_lead(source, self.slate.lead, frontier),
+                    run.rebase_lead(source, self.slate.base, frontier),
+                )
+            });
+        let (lead, base) = lawful_clock(self.slate.overlay.active(), lead, base, frontier);
         self.run = Some(run);
         self.slate.lead = lead;
+        self.slate.base = base;
     }
 
     fn active_key(&self) -> Option<FrameKey> {
         let run = self.run?;
         let published = self.run_extents.get(&run)?;
         let product = self.slate.overlay.active()?;
-        (self.slate.lead <= *published).then_some(FrameKey {
-            run,
-            lead: self.slate.lead,
-            product,
-        })
+        (self.slate.lead <= *published)
+            .then(|| FrameKey::forge(run, product, self.slate.base, self.slate.lead))
+            .flatten()
     }
 
     fn scale_for(&self, key: FrameKey) -> &Scale {
@@ -1915,6 +2019,10 @@ impl WeatherApp {
 
     fn demand_active(&mut self) {
         let Some(key) = self.active_key() else {
+            self.demand_id.advance();
+            self.loading = None;
+            self.prefetch.clear();
+            self.displayed_field = None;
             return;
         };
         self.demand_id.advance();
@@ -1923,7 +2031,7 @@ impl WeatherApp {
         if self.fields.get(key).is_some() {
             self.loading = None;
             self.displayed_field = self.fields.get(key).map(|field| (key, field.clone()));
-            self.status = format!("{} ready", key.lead);
+            self.status = format!("{key} ready");
             self.kick_prefetch();
         } else {
             let demand = LoadDemand {
@@ -1931,7 +2039,7 @@ impl WeatherApp {
                 key,
             };
             self.loading = Some(demand);
-            self.status = format!("cutting {}…", key.lead);
+            self.status = format!("cutting {key}…");
             if let Err(err) = self.worker.send(Command::Load(demand)) {
                 self.loading = None;
                 self.status = err.to_string();
@@ -1946,15 +2054,17 @@ impl WeatherApp {
             .copied()
             .unwrap_or(LeadHour::ZERO);
         for distance in 1..=2 {
-            if let Ok(lead) = LeadHour::forge(key.lead.get().saturating_add(distance))
+            if let Ok(lead) = LeadHour::forge(key.valid.get().saturating_add(distance))
                 && lead <= horizon
+                && let Some(frame) = key.with_valid(lead)
             {
-                self.prefetch.push_back(FrameKey { lead, ..key });
+                self.prefetch.push_back(frame);
             }
-            if key.lead.get() >= distance
-                && let Ok(lead) = LeadHour::forge(key.lead.get() - distance)
+            if key.valid.get() >= distance
+                && let Ok(lead) = LeadHour::forge(key.valid.get() - distance)
+                && let Some(frame) = key.with_valid(lead)
             {
-                self.prefetch.push_back(FrameKey { lead, ..key });
+                self.prefetch.push_back(frame);
             }
         }
     }
@@ -2047,6 +2157,36 @@ fn consume_view_slot(ctx: &egui::Context) -> Option<(ViewSlot, bool)> {
         let _event = input.events.remove(index);
         Some(command)
     })
+}
+
+fn lawful_clock(
+    product: Option<Product>,
+    mut lead: LeadHour,
+    mut base: LeadHour,
+    ceiling: LeadHour,
+) -> (LeadHour, LeadHour) {
+    lead = lead.min(ceiling);
+    if product.is_some_and(Product::has_baseline) {
+        if ceiling == LeadHour::ZERO {
+            return (LeadHour::ZERO, LeadHour::ZERO);
+        }
+        if lead == LeadHour::ZERO {
+            lead = LeadHour::ONE;
+        }
+        base = base.min(lead.saturating_previous());
+    }
+    (lead, base)
+}
+
+#[cfg(feature = "egui-test")]
+fn witnessed_frontier(run: Option<RunId>) -> Option<(RunId, LeadHour)> {
+    let run = run?;
+    let raw = std::env::var("HRRR_ACCEPTANCE_PUBLISHED").ok()?;
+    let published = raw
+        .parse::<u8>()
+        .ok()
+        .and_then(|hour| LeadHour::forge(hour).ok())?;
+    Some((run, published))
 }
 
 fn view_slot_command(event: &egui::Event) -> Option<(ViewSlot, bool)> {
@@ -2341,5 +2481,27 @@ mod tests {
         assert!(TileRejection::RetryAt(now + TILE_RETRY_DELAY).blocks(now));
         assert!(!TileRejection::RetryAt(now).resolves());
         assert!(!TileRejection::RetryAt(now).blocks(now));
+    }
+
+    #[test]
+    fn cumulative_clock_preserves_valid_time_and_lowers_an_illegal_base() -> Result<()> {
+        let hour = |value| LeadHour::forge(value);
+        assert_eq!(
+            lawful_clock(Some(Product::QpfRun), hour(5)?, hour(8)?, hour(18)?),
+            (hour(5)?, hour(4)?)
+        );
+        assert_eq!(
+            lawful_clock(Some(Product::QpfRun), hour(0)?, hour(8)?, hour(18)?),
+            (hour(1)?, hour(0)?)
+        );
+        assert_eq!(
+            lawful_clock(Some(Product::QpfRun), hour(8)?, hour(3)?, hour(0)?),
+            (hour(0)?, hour(0)?)
+        );
+        assert_eq!(
+            lawful_clock(Some(Product::Smoke), hour(8)?, hour(6)?, hour(4)?),
+            (hour(4)?, hour(6)?)
+        );
+        Ok(())
     }
 }

@@ -4,6 +4,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounde
 use egui::Context;
 use jiff::Timestamp;
 use std::{
+    collections::{HashMap, VecDeque},
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -11,6 +12,7 @@ use std::{
 
 const DISCOVERY_POLL: Duration = Duration::from_mins(5);
 const DISCOVERY_RETRY: Duration = Duration::from_secs(30);
+const BLADE_CAPACITY: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DemandId(u64);
@@ -124,6 +126,7 @@ impl Drop for Worker {
 
 fn labor(ctx: Context, source: Source, commands: Receiver<ForgeCommand>, events: Sender<Event>) {
     let mut deferred = None;
+    let mut blades = BladeBank::new(BLADE_CAPACITY);
     while let Some(command) = deferred.take().or_else(|| commands.recv().ok()) {
         let command = coalesce_load(command, &commands, &mut deferred);
         let event =
@@ -137,12 +140,10 @@ fn labor(ctx: Context, source: Source, commands: Receiver<ForgeCommand>, events:
                     }),
                 ForgeCommand::Load(demand) => {
                     let began = Instant::now();
-                    source
-                        .field_message(demand.key)
-                        .and_then(|bytes| decode::field(demand.key, &bytes))
+                    forge_frame(&source, &mut blades, demand.key)
                         .map(|field| Event::Loaded {
                             demand,
-                            field: Arc::new(field),
+                            field,
                             elapsed_ms: began.elapsed().as_millis(),
                         })
                         .unwrap_or_else(|err| Event::Fault {
@@ -156,6 +157,60 @@ fn labor(ctx: Context, source: Source, commands: Receiver<ForgeCommand>, events:
             break;
         }
         ctx.request_repaint();
+    }
+}
+
+fn forge_frame(source: &Source, blades: &mut BladeBank, key: FrameKey) -> Result<Arc<FieldGrid>> {
+    let crown = blades.load(source, key.blade())?;
+    let Some(baseline) = key.baseline_blade() else {
+        return Ok(crown);
+    };
+    if baseline.lead == LeadHour::ZERO {
+        return Ok(crown);
+    }
+    let root = blades.load(source, baseline)?;
+    Ok(Arc::new(crown.increment_since(&root)?))
+}
+
+struct BladeBank {
+    capacity: usize,
+    fields: HashMap<BladeKey, Arc<FieldGrid>>,
+    order: VecDeque<BladeKey>,
+}
+
+impl BladeBank {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            fields: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn load(&mut self, source: &Source, key: BladeKey) -> Result<Arc<FieldGrid>> {
+        if let Some(field) = self.fields.get(&key).cloned() {
+            self.touch(key);
+            return Ok(field);
+        }
+        let bytes = source.field_message(key)?;
+        let field = Arc::new(decode::field(key, &bytes)?);
+        let _replaced = self.fields.insert(key, field.clone());
+        self.touch(key);
+        while self.fields.len() > self.capacity {
+            let victim = self
+                .order
+                .pop_front()
+                .context("nonempty blade bank has no eviction order")?;
+            let _evicted = self.fields.remove(&victim);
+        }
+        Ok(field)
+    }
+
+    fn touch(&mut self, key: BladeKey) {
+        if let Some(slot) = self.order.iter().position(|candidate| *candidate == key) {
+            let _prior = self.order.remove(slot);
+        }
+        self.order.push_back(key);
     }
 }
 

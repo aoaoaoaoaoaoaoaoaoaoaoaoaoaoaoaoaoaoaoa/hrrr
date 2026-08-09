@@ -12,7 +12,7 @@ publish = false
 egui-tester = "0.6.1"
 fast-mvt = { version = "0.6.1", default-features = false, features = ["writer"] }
 geo-types = "0.7.19"
-hrrr-contract = { path = "../hrrr-contract", version = "0.3.0" }
+hrrr-contract = { path = "../hrrr-contract", version = "0.4.0" }
 pmtiles = { version = "0.23.1", default-features = false, features = ["write"] }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"

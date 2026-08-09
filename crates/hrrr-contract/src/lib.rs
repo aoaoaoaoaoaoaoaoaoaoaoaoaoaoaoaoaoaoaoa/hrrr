@@ -2,13 +2,15 @@
 
 use std::{borrow::Cow, fmt};
 
-pub const UI_FINGERPRINT: &str = "hrrr.ui/3";
+pub const UI_FINGERPRINT: &str = "hrrr.ui/4";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum Target {
     BasemapInstall,
+    BaseHour,
     Field(&'static str),
+    ForecastHour,
     Map,
     Pin(usize),
     TransientProbe,
@@ -19,7 +21,9 @@ impl Target {
     pub fn wire(self) -> Cow<'static, str> {
         match self {
             Self::BasemapInstall => Cow::Borrowed("basemap.install"),
+            Self::BaseHour => Cow::Borrowed("forecast.base-hour"),
             Self::Field(name) => Cow::Owned(format!("field/{name}")),
+            Self::ForecastHour => Cow::Borrowed("forecast.valid-hour"),
             Self::Map => Cow::Borrowed("map.canvas"),
             Self::Pin(slot) => Cow::Owned(format!("map.pin/{slot}")),
             Self::TransientProbe => Cow::Borrowed("map.probe/transient"),
@@ -50,6 +54,7 @@ mod tests {
             Target::Field("cloud-cover").wire(),
             Target::Field("smoke").wire()
         );
+        assert_ne!(Target::BaseHour.wire(), Target::ForecastHour.wire());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::{
     cache::CacheStore,
     decode,
-    model::{FrameKey, LeadHour, Product, RunExtent, RunId},
+    model::{BladeKey, LeadHour, Product, RunExtent, RunId},
     xdg::Lair,
 };
 use anyhow::{Context as _, Result, bail};
@@ -64,7 +64,7 @@ impl Source {
         RunExtent::forge(run, published)
     }
 
-    pub fn field_message(&self, key: FrameKey) -> Result<Vec<u8>> {
+    pub fn field_message(&self, key: BladeKey) -> Result<Vec<u8>> {
         let blade = field_blade(key)?;
         self.cache.resolve(
             &blade,
@@ -126,7 +126,7 @@ fn frame_chamber(run: RunId, lead: LeadHour) -> Result<PathBuf> {
     Ok(PathBuf::from(run.stamp()?).join(format!("f{:02}", lead.get())))
 }
 
-fn field_blade(key: FrameKey) -> Result<PathBuf> {
+fn field_blade(key: BladeKey) -> Result<PathBuf> {
     Ok(frame_chamber(key.run, key.lead)?.join(format!("{}.grib2", key.product.cache_name())))
 }
 

@@ -10,6 +10,7 @@ use egui_tester::{
 use crate::observation::Observation;
 
 pub const TITLE: &str = "HRRR · native forecast fields";
+pub const SLATE: &str = "xdg/state/hrrr/slate.toml";
 pub const VIEWS: &str = "xdg/data/hrrr/views.toml";
 
 pub type HrrrStory<'app, 'bed> = Story<'app, 'bed, Observation>;
@@ -32,6 +33,7 @@ impl<'a> Harness<'a> {
     pub fn command(&self, witnessed: bool) -> AppCommand {
         let command = AppCommand::new(self.binary)
             .private_env("HRRR_BASEMAP_ARCHIVE", "fixtures/basemap.pmtiles")
+            .env("HRRR_ACCEPTANCE_PUBLISHED", "18")
             .graphics(Graphics::Software)
             .network(Network::Deny)
             .runtime(Duration::from_secs(45));

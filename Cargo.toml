@@ -46,7 +46,7 @@ fast-mvt = { version = "0.6.1", default-features = false, features = ["reader"] 
 fs4 = "0.12.0"
 geo-types = "0.7.19"
 grib = { version = "0.16.0", default-features = false }
-hrrr-contract = { path = "crates/hrrr-contract", version = "0.3.0" }
+hrrr-contract = { path = "crates/hrrr-contract", version = "0.4.0" }
 jiff = "0.2.33"
 lyon_tessellation = "1.0.20"
 pmtiles = { version = "0.23.1", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls-native-certs"] }

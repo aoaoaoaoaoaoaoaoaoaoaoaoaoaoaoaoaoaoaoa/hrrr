@@ -37,6 +37,23 @@ pub(crate) enum GribTimeLaw {
     HourlyAccumulation,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemporalShape {
+    Instant,
+    Interval,
+    Cumulative,
+}
+
+impl GribTimeLaw {
+    const fn temporal_shape(self) -> TemporalShape {
+        match self {
+            Self::Instant => TemporalShape::Instant,
+            Self::HourlyAccumulation => TemporalShape::Interval,
+            Self::AccumulationFromRun => TemporalShape::Cumulative,
+        }
+    }
+}
+
 impl GribLaw {
     const fn instant(category: u8, parameter: u8, surface: FixedSurfaceLaw) -> Self {
         Self {
@@ -155,6 +172,14 @@ macro_rules! field_arsenal {
 
             pub(crate) const fn grib_law(self) -> GribLaw {
                 self.law().grib
+            }
+
+            pub const fn temporal_shape(self) -> TemporalShape {
+                self.law().grib.time.temporal_shape()
+            }
+
+            pub const fn has_baseline(self) -> bool {
+                matches!(self.temporal_shape(), TemporalShape::Cumulative)
             }
         }
     };
@@ -442,6 +467,7 @@ pub struct LeadHour(u8);
 
 impl LeadHour {
     pub const ZERO: Self = Self(0);
+    pub const ONE: Self = Self(1);
     pub const MAX: u8 = 48;
 
     pub fn forge(hour: u8) -> Result<Self> {
@@ -457,6 +483,13 @@ impl LeadHour {
 
     pub fn saturating_next(self, horizon: Self) -> Self {
         Self(self.0.saturating_add(1).min(horizon.0))
+    }
+
+    pub fn next(self) -> Option<Self> {
+        self.0
+            .checked_add(1)
+            .filter(|hour| *hour <= Self::MAX)
+            .map(Self)
     }
 
     pub fn saturating_previous(self) -> Self {
@@ -509,10 +542,78 @@ impl RunExtent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct FrameKey {
+pub(crate) struct BladeKey {
     pub run: RunId,
     pub lead: LeadHour,
     pub product: Product,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FrameKey {
+    pub run: RunId,
+    pub valid: LeadHour,
+    pub product: Product,
+    baseline: Option<LeadHour>,
+}
+
+impl FrameKey {
+    pub fn forge(
+        run: RunId,
+        product: Product,
+        baseline: LeadHour,
+        valid: LeadHour,
+    ) -> Option<Self> {
+        let baseline = match product.temporal_shape() {
+            TemporalShape::Cumulative if baseline < valid => Some(baseline),
+            TemporalShape::Cumulative => return None,
+            TemporalShape::Instant | TemporalShape::Interval => None,
+        };
+        Some(Self {
+            run,
+            valid,
+            product,
+            baseline,
+        })
+    }
+
+    pub const fn baseline(self) -> Option<LeadHour> {
+        self.baseline
+    }
+
+    pub(crate) const fn blade(self) -> BladeKey {
+        BladeKey {
+            run: self.run,
+            lead: self.valid,
+            product: self.product,
+        }
+    }
+
+    pub(crate) fn baseline_blade(self) -> Option<BladeKey> {
+        self.baseline.map(|lead| BladeKey {
+            run: self.run,
+            lead,
+            product: self.product,
+        })
+    }
+
+    pub fn with_valid(self, valid: LeadHour) -> Option<Self> {
+        Self::forge(
+            self.run,
+            self.product,
+            self.baseline.unwrap_or(LeadHour::ZERO),
+            valid,
+        )
+    }
+}
+
+impl fmt::Display for FrameKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(baseline) = self.baseline() {
+            write!(formatter, "{baseline}–{}", self.valid)
+        } else {
+            self.valid.fmt(formatter)
+        }
+    }
 }
 
 /// The spherical Lambert conformal law carried by each HRRR GRIB message.
@@ -735,6 +836,34 @@ impl FieldGrid {
         }
         self.values.get((j * self.width + i) as usize).copied()
     }
+
+    pub fn increment_since(&self, baseline: &Self) -> Result<Self> {
+        if self.width != baseline.width
+            || self.height != baseline.height
+            || self.projection != baseline.projection
+        {
+            bail!("cumulative endpoints do not share one grid law");
+        }
+        let values = self
+            .values
+            .iter()
+            .zip(baseline.values.iter())
+            .map(|(&total, &base)| {
+                let increment = total - base;
+                if increment.is_finite() {
+                    increment.max(0.0)
+                } else {
+                    increment
+                }
+            })
+            .collect();
+        Self::forge(
+            values,
+            self.width as usize,
+            self.height as usize,
+            self.projection,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -775,6 +904,60 @@ mod tests {
                 .len(),
             Product::ALL.len()
         );
+    }
+
+    #[test]
+    fn field_arsenal_generates_temporal_capabilities() {
+        assert_eq!(Product::QpfRun.temporal_shape(), TemporalShape::Cumulative);
+        assert_eq!(Product::QpfHour.temporal_shape(), TemporalShape::Interval);
+        assert_eq!(Product::Smoke.temporal_shape(), TemporalShape::Instant);
+        assert!(Product::QpfRun.has_baseline());
+        assert!(
+            Product::ALL
+                .into_iter()
+                .filter(|product| product.has_baseline())
+                .eq([Product::QpfRun])
+        );
+    }
+
+    #[test]
+    fn cumulative_frame_identity_requires_a_nonempty_span() -> Result<()> {
+        let run = RunId::forge(1_785_272_400)?;
+        let base = LeadHour::forge(3)?;
+        let valid = LeadHour::forge(8)?;
+        let frame = FrameKey::forge(run, Product::QpfRun, base, valid).context("QPF span")?;
+        assert_eq!(frame.baseline(), Some(base));
+        assert_eq!(frame.blade().lead, valid);
+        assert_eq!(frame.baseline_blade().map(|blade| blade.lead), Some(base));
+        assert_eq!(frame.to_string(), "F03–F08");
+        assert!(FrameKey::forge(run, Product::QpfRun, valid, valid).is_none());
+
+        let hourly =
+            FrameKey::forge(run, Product::QpfHour, base, valid).context("hourly QPF frame")?;
+        assert_eq!(hourly.baseline(), None);
+        assert_eq!(hourly.to_string(), "F08");
+        Ok(())
+    }
+
+    #[test]
+    fn cumulative_increment_obeys_grid_identity_and_nonnegativity() -> Result<()> {
+        let projection = LambertGrid {
+            cone: 1.0,
+            radius_factor: 2.0,
+            origin_rho: 3.0,
+            central_lon: 4.0,
+            first_xy: [5.0, 6.0],
+            spacing: [7.0, 8.0],
+        };
+        let crown = FieldGrid::forge(vec![1.0, 5.0, f32::NAN], 3, 1, projection)?;
+        let root = FieldGrid::forge(vec![2.0, 3.0, 0.0], 3, 1, projection)?;
+        let increment = crown.increment_since(&root)?;
+        assert_eq!(&increment.values[..2], &[0.0, 2.0]);
+        assert!(increment.values[2].is_nan());
+
+        let alien = FieldGrid::forge(vec![0.0], 1, 1, projection)?;
+        assert!(crown.increment_since(&alien).is_err());
+        Ok(())
     }
 
     #[test]

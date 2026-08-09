@@ -124,7 +124,7 @@ pub enum TemperatureSeason {
 impl TemperatureSeason {
     pub fn at(key: FrameKey) -> Self {
         key.run
-            .valid_month_utc(key.lead)
+            .valid_month_utc(key.valid)
             .map_or(Self::Winter, Self::for_month)
     }
 

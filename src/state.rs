@@ -7,13 +7,14 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
-const SCHEMA: u16 = 1;
+const SCHEMA: u16 = 2;
 
 #[derive(Clone, Debug)]
 pub struct Slate {
     pub overlay: Overlay,
     pub cycle: RunSelection,
     pub lead: LeadHour,
+    pub base: LeadHour,
     pub active_view: Option<EntryName>,
     pub closed_folders: BTreeSet<String>,
     pub inspector_scroll: f32,
@@ -25,6 +26,7 @@ impl Default for Slate {
             overlay: Product::default().into(),
             cycle: RunSelection::default(),
             lead: LeadHour::ZERO,
+            base: LeadHour::ZERO,
             active_view: None,
             closed_folders: BTreeSet::new(),
             inspector_scroll: 0.0,
@@ -44,13 +46,13 @@ enum CycleMode {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SlateWire {
-    V1(SlateV1),
+    Versioned(VersionedSlate),
     Legacy(LegacySlate),
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SlateV1 {
+struct VersionedSlate {
     schema: u16,
     #[serde(alias = "product")]
     overlay: Overlay,
@@ -58,6 +60,8 @@ struct SlateV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fixed_run: Option<RunId>,
     lead: LeadHour,
+    #[serde(default)]
+    base: LeadHour,
     active_view: Option<EntryName>,
     closed_folders: BTreeSet<String>,
     #[serde(default)]
@@ -100,7 +104,10 @@ impl Slate {
             return Ok((Self::default(), false));
         };
         match wire {
-            SlateWire::V1(wire) => Ok((Self::from_v1(wire)?, false)),
+            SlateWire::Versioned(wire) => {
+                let migrated = wire.schema != SCHEMA;
+                Ok((Self::from_versioned(wire)?, migrated))
+            }
             SlateWire::Legacy(wire) => Ok((Self::from_legacy(wire)?, true)),
         }
     }
@@ -112,12 +119,13 @@ impl Slate {
             RunSelection::Fixed(run) => (CycleMode::Fixed, Some(run)),
         };
         save_toml(
-            &SlateV1 {
+            &VersionedSlate {
                 schema: SCHEMA,
                 overlay: self.overlay,
                 cycle,
                 fixed_run,
                 lead: self.lead,
+                base: self.base,
                 active_view: self.active_view.clone(),
                 closed_folders: self.closed_folders.clone(),
                 inspector_scroll: self.inspector_scroll,
@@ -127,8 +135,8 @@ impl Slate {
         )
     }
 
-    fn from_v1(wire: SlateV1) -> Result<Self> {
-        if wire.schema != SCHEMA {
+    fn from_versioned(wire: VersionedSlate) -> Result<Self> {
+        if !matches!(wire.schema, 1 | SCHEMA) {
             bail!("unsupported session-state schema {}", wire.schema);
         }
         let cycle = refine_cycle(wire.cycle, wire.fixed_run)?;
@@ -136,6 +144,7 @@ impl Slate {
             overlay: wire.overlay,
             cycle,
             lead: wire.lead,
+            base: wire.base,
             active_view: wire.active_view,
             closed_folders: wire.closed_folders,
             inspector_scroll: lawful_scroll(wire.inspector_scroll),
@@ -154,6 +163,7 @@ impl Slate {
             overlay: wire.overlay,
             cycle,
             lead: wire.lead,
+            base: LeadHour::ZERO,
             active_view: wire.active_view,
             closed_folders: wire.closed_folders,
             inspector_scroll: 0.0,
@@ -212,12 +222,25 @@ closed_folders = []
 
     #[test]
     fn inspector_scroll_repels_nonfinite_and_negative_state() -> Result<()> {
-        let mut slate = Slate::from_v1(toml::from_str::<SlateV1>(
+        let mut slate = Slate::from_versioned(toml::from_str::<VersionedSlate>(
             "schema = 1\noverlay = \"smoke\"\ncycle = \"latest\"\nlead = 0\nclosed_folders = []\ninspector_scroll = nan\n",
         )?)?;
         assert_eq!(slate.inspector_scroll, 0.0);
         slate.inspector_scroll = lawful_scroll(-8.0);
         assert_eq!(slate.inspector_scroll, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn versioned_state_migrates_and_persists_the_base_hour() -> Result<()> {
+        let prior = toml::from_str::<VersionedSlate>(
+            "schema = 1\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nclosed_folders = []\n",
+        )?;
+        assert_eq!(prior.base, LeadHour::ZERO);
+        let current = Slate::from_versioned(toml::from_str::<VersionedSlate>(
+            "schema = 2\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\n",
+        )?)?;
+        assert_eq!(current.base, LeadHour::forge(3)?);
         Ok(())
     }
 }

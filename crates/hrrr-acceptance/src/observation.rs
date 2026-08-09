@@ -6,6 +6,8 @@ pub struct Observation {
     pub contract: String,
     pub launch: String,
     pub active_field: Option<String>,
+    pub lead_hour: u8,
+    pub base_hour: Option<u8>,
     pub active_view: String,
     pub pins: Vec<[f64; 2]>,
     pub transient_probe: Option<[f64; 2]>,

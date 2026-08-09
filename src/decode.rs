@@ -1,11 +1,11 @@
-use crate::model::{FieldGrid, FrameKey, GribTimeLaw, LambertGrid};
+use crate::model::{BladeKey, FieldGrid, GribTimeLaw, LambertGrid};
 use anyhow::{Context as _, Result, bail};
 use grib::{
     Grib2SubmessageDecoder, GridDefinitionTemplateValues, Name, codetables::grib2::Table4_4,
 };
 use jiff::{Timestamp, tz::TimeZone};
 
-pub fn field(key: FrameKey, bytes: &[u8]) -> Result<FieldGrid> {
+pub fn field(key: BladeKey, bytes: &[u8]) -> Result<FieldGrid> {
     validate(key, bytes)?;
     let index_grib = grib::from_bytes(bytes).context("parse GRIB grid definition")?;
     let (_, index_message) = index_grib
@@ -41,7 +41,7 @@ pub fn field(key: FrameKey, bytes: &[u8]) -> Result<FieldGrid> {
     FieldGrid::forge(grid, width, height, projection)
 }
 
-pub fn validate(key: FrameKey, bytes: &[u8]) -> Result<()> {
+pub fn validate(key: BladeKey, bytes: &[u8]) -> Result<()> {
     let grib = grib::from_bytes(bytes).context("parse GRIB identity")?;
     let mut messages = grib.iter();
     let (_, message) = messages
@@ -54,7 +54,7 @@ pub fn validate(key: FrameKey, bytes: &[u8]) -> Result<()> {
 }
 
 fn validate_identity<R: std::io::Read>(
-    key: FrameKey,
+    key: BladeKey,
     message: &grib::SubMessage<'_, R>,
 ) -> Result<()> {
     let law = key.product.grib_law();
@@ -122,7 +122,7 @@ fn validate_identity<R: std::io::Read>(
     Ok(())
 }
 
-fn validate_accumulation(key: FrameKey, product: &[u8]) -> Result<()> {
+fn validate_accumulation(key: BladeKey, product: &[u8]) -> Result<()> {
     const END: std::ops::Range<usize> = 29..36;
     const RANGE_COUNT: usize = 36;
     const STATISTICAL_PROCESS: usize = 41;
@@ -219,20 +219,20 @@ mod tests {
         let run = RunId::forge(1_785_272_400)?;
         let lead = LeadHour::forge(20)?;
         for product in Product::ALL {
-            let key = FrameKey { run, lead, product };
+            let key = BladeKey { run, lead, product };
             let blade = synthetic_blade(key)?;
             validate(key, &blade)?;
-            let wrong_lead = FrameKey {
+            let wrong_lead = BladeKey {
                 lead: LeadHour::forge(19)?,
                 ..key
             };
             assert!(validate(wrong_lead, &blade).is_err());
-            let wrong_run = FrameKey {
+            let wrong_run = BladeKey {
                 run: run.hours_ago(1),
                 ..key
             };
             assert!(validate(wrong_run, &blade).is_err());
-            let wrong_product = FrameKey {
+            let wrong_product = BladeKey {
                 product: if product == Product::Smoke {
                     Product::Temperature
                 } else {
@@ -245,7 +245,7 @@ mod tests {
         Ok(())
     }
 
-    fn synthetic_blade(key: FrameKey) -> Result<Vec<u8>> {
+    fn synthetic_blade(key: BladeKey) -> Result<Vec<u8>> {
         let reference = key.run.timestamp()?.to_zoned(TimeZone::UTC);
         let mut identification = vec![0_u8; 16];
         identification[0..2].copy_from_slice(&7_u16.to_be_bytes());
