@@ -26,8 +26,9 @@ cd "$root"
     die 'HEAD is not the pushed origin/main commit'
 grep -Fqx "version = \"$version\"" Cargo.toml ||
     die "Cargo.toml does not declare package version $version"
-[ "$(git tag --points-at HEAD)" = "v$version" ] ||
-    die "v$version does not uniquely tag HEAD"
+git tag --points-at HEAD | grep -Fqx "v$version" ||
+    die "v$version does not tag HEAD"
+git tag -v "v$version" >/dev/null 2>&1 || die "v$version is not a valid signed tag"
 
 scripts/check
 scripts/audit

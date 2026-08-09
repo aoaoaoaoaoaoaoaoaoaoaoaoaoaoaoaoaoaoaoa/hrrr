@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+die() {
+    printf 'contract release refused: %s\n' "$1" >&2
+    exit 1
+}
+
+version=${1:-}
+mode=${2:-check}
+[ -n "$version" ] || die 'usage: scripts/release-contract VERSION [check|publish]'
+case "$version" in
+    *[!0-9.]*|'') die "invalid version: $version" ;;
+esac
+case "$mode" in
+    check|publish) ;;
+    *) die "invalid mode: $mode" ;;
+esac
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+tag="hrrr-contract-v$version"
+
+[ "$(git branch --show-current)" = main ] || die 'release checkout is not main'
+[ -z "$(git status --porcelain)" ] || die 'worktree is dirty'
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
+    die 'HEAD is not the pushed origin/main commit'
+grep -Fqx "version = \"$version\"" crates/hrrr-contract/Cargo.toml ||
+    die "hrrr-contract does not declare version $version"
+git tag --points-at HEAD | grep -Fqx "$tag" || die "$tag does not tag HEAD"
+git tag -v "$tag" >/dev/null 2>&1 || die "$tag is not a valid signed tag"
+
+scripts/check
+scripts/audit
+cargo package --locked --package hrrr-contract
+
+if [ "$mode" = publish ]; then
+    cargo publish --locked --package hrrr-contract
+else
+    printf 'contract candidate %s is clean and packaged; publication was not requested\n' "$tag"
+fi

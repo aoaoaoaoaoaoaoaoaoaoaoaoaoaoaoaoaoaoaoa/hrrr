@@ -98,6 +98,12 @@ tray hide, reveal, menu, and quit behavior. Failure evidence is retained under
 Native acceptance and ordinary-product CI share one declared coordinate:
 Linux/X11.
 
+The UI vocabulary is a separately published dependency. When it changes,
+release it first with `scripts/release-contract VERSION publish`; only after
+that exact version is visible on crates.io may `scripts/release VERSION
+publish` seal the application. Both release commands require a clean, pushed
+`main` checkout and a valid signed tag at `HEAD`.
+
 ## License
 
 HRRR is distributed under the [MIT License](LICENSE).
