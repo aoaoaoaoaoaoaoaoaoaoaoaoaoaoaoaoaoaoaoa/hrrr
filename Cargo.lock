@@ -645,9 +645,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "148b44ac83ff6e5193a150c551c2a87335193c28ab20481b2b1e4dcce5b8035b"
+checksum = "13a00bc6eac9e1889b49c90d3a549f83d0e84a991e8015f34e7ebf7a425ade1f"
 dependencies = [
  "bitflags 2.13.1",
  "egui-tester-witness",
@@ -663,15 +663,16 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-witness"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "872f2c5043dbf4c5f24230a1587401313b4f72d7b4e746f69c94c5172096dd71"
+checksum = "70af569f222c02628b43e6d7f6fb86bbe57239b0afb6691bb91f26db66b7d29c"
 dependencies = [
  "egui",
  "rustix 1.1.4",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1205,7 +1206,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hrrr"
-version = "0.10.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",
