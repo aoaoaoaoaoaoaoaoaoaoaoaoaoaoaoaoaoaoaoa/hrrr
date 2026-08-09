@@ -32,9 +32,7 @@ fn select_cloud_cover(harness: &Harness<'_>) -> Result<()> {
         Duration::from_secs(4),
         Duration::from_millis(700),
         "cloud-cover selection to survive the autosave interval",
-        |frame| {
-            (frame.state.active_field.as_deref() == Some(CLOUD_COVER)).then_some(())
-        },
+        |frame| (frame.state.active_field.as_deref() == Some(CLOUD_COVER)).then_some(()),
     )?;
     app.terminate()
 }
