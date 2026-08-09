@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "hrrr"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
