@@ -141,8 +141,12 @@ fn prove_cli(binary: &Path) -> Result<()> {
 
 fn isolate_host_paths(command: &mut Command, root: &Path) -> Result<()> {
     let home = root.join("home");
-    let roaming = root.join("roaming");
-    let local = root.join("local");
+    // `SHGetKnownFolderPath` expands the profile-relative AppData defaults
+    // after observing USERPROFILE. Keep those known folders inside the cell;
+    // free-standing APPDATA directories leave the Windows shell resolver with
+    // a profile whose canonical children do not exist.
+    let roaming = home.join("AppData").join("Roaming");
+    let local = home.join("AppData").join("Local");
     let roots = [
         ("HOME", home.clone()),
         ("USERPROFILE", home),
@@ -285,5 +289,24 @@ mod tests {
             "state": { "contract": "hrrr.ui/alien" },
         });
         assert!(presented_hrrr_frame(&alien).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_known_folders_remain_inside_the_isolated_profile() -> Result<()> {
+        let cell = tempfile::tempdir()?;
+        let mut command = Command::new("hrrr.exe");
+        isolate_host_paths(&mut command, cell.path())?;
+        let environment = command
+            .get_envs()
+            .filter_map(|(name, value)| value.map(|value| (name, value)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let profile = Path::new(environment[std::ffi::OsStr::new("USERPROFILE")]);
+        for variable in ["APPDATA", "LOCALAPPDATA"] {
+            let path = Path::new(environment[std::ffi::OsStr::new(variable)]);
+            assert!(path.starts_with(profile), "{variable} escaped USERPROFILE");
+            assert!(path.is_dir(), "{variable} was not forged");
+        }
+        Ok(())
     }
 }

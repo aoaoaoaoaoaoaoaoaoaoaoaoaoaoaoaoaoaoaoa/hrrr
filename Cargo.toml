@@ -30,11 +30,11 @@ atomic-write-file = "0.3.0"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
-dwemer_poolrooms = "0.9.0"
+dwemer_poolrooms = "0.9.1"
 egui = "=0.34.3"
 egui-wgpu = "=0.34.3"
 egui-tester-witness = { version = "0.6.1", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.3.0", features = ["serde"] }
+eternalist-apps = { version = "0.3.1", features = ["serde"] }
 fast-mvt = { version = "0.6.1", default-features = false, features = ["reader"] }
 flate2 = "1.1.5"
 fs4 = "0.12.0"
