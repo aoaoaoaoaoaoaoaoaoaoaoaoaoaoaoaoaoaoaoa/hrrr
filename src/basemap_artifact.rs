@@ -1,12 +1,14 @@
 use crate::{persist::save_toml, xdg::Lair};
 use anyhow::{Context as _, Result, bail};
+#[cfg(target_os = "linux")]
 use flate2::read::GzDecoder;
 use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use std::ffi::OsStr;
 use std::{
     error::Error as StdError,
-    ffi::OsStr,
     fmt,
     fs::File,
     io::{Read as _, Write as _},
@@ -72,18 +74,63 @@ impl fmt::Display for Cancelled {
 impl StdError for Cancelled {}
 
 #[derive(Clone, Copy)]
-enum Package {
-    TarGz,
-    Zip,
-}
-
-#[derive(Clone, Copy)]
 struct ToolAsset {
     name: &'static str,
     sha256: &'static str,
-    package: Package,
     executable: &'static str,
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const TOOL_ASSET: Option<ToolAsset> = Some(ToolAsset {
+    name: "go-pmtiles_1.31.2_Linux_x86_64.tar.gz",
+    sha256: "3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f",
+    executable: "pmtiles",
+});
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const TOOL_ASSET: Option<ToolAsset> = Some(ToolAsset {
+    name: "go-pmtiles_1.31.2_Linux_arm64.tar.gz",
+    sha256: "f8bd47e7ea866863489cad588fbaf2f31f42e5821f7a03f009b3769f05801cb1",
+    executable: "pmtiles",
+});
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const TOOL_ASSET: Option<ToolAsset> = Some(ToolAsset {
+    name: "go-pmtiles-1.31.2_Darwin_x86_64.zip",
+    sha256: "1f0dc02eee6c58312dd6c509faee1b5c32f0596568af1bf51f1b034e7a88a65b",
+    executable: "pmtiles",
+});
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const TOOL_ASSET: Option<ToolAsset> = Some(ToolAsset {
+    name: "go-pmtiles-1.31.2_Darwin_arm64.zip",
+    sha256: "40528f7f616fcbf91207cd48c8fc023d213f6d86c0cbf1f748732803d1880f3d",
+    executable: "pmtiles",
+});
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const TOOL_ASSET: Option<ToolAsset> = Some(ToolAsset {
+    name: "go-pmtiles_1.31.2_Windows_x86_64.zip",
+    sha256: "a658baa4d7e55020aef6ca17bd9ff9faa1582671266b36f58c52db0ac8e785a1",
+    executable: "pmtiles.exe",
+});
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const TOOL_ASSET: Option<ToolAsset> = Some(ToolAsset {
+    name: "go-pmtiles_1.31.2_Windows_arm64.zip",
+    sha256: "8780a17453c63af757917a694cbbb50b943db89cc3f1b07e6fd62c1ff8e6963b",
+    executable: "pmtiles.exe",
+});
+
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64"),
+)))]
+const TOOL_ASSET: Option<ToolAsset> = None;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -325,45 +372,7 @@ fn validate_day(day: &str) -> Result<String> {
 }
 
 fn tool_asset() -> Option<ToolAsset> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some(ToolAsset {
-            name: "go-pmtiles_1.31.2_Linux_x86_64.tar.gz",
-            sha256: "3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f",
-            package: Package::TarGz,
-            executable: "pmtiles",
-        }),
-        ("linux", "aarch64") => Some(ToolAsset {
-            name: "go-pmtiles_1.31.2_Linux_arm64.tar.gz",
-            sha256: "f8bd47e7ea866863489cad588fbaf2f31f42e5821f7a03f009b3769f05801cb1",
-            package: Package::TarGz,
-            executable: "pmtiles",
-        }),
-        ("macos", "x86_64") => Some(ToolAsset {
-            name: "go-pmtiles-1.31.2_Darwin_x86_64.zip",
-            sha256: "1f0dc02eee6c58312dd6c509faee1b5c32f0596568af1bf51f1b034e7a88a65b",
-            package: Package::Zip,
-            executable: "pmtiles",
-        }),
-        ("macos", "aarch64") => Some(ToolAsset {
-            name: "go-pmtiles-1.31.2_Darwin_arm64.zip",
-            sha256: "40528f7f616fcbf91207cd48c8fc023d213f6d86c0cbf1f748732803d1880f3d",
-            package: Package::Zip,
-            executable: "pmtiles",
-        }),
-        ("windows", "x86_64") => Some(ToolAsset {
-            name: "go-pmtiles_1.31.2_Windows_x86_64.zip",
-            sha256: "a658baa4d7e55020aef6ca17bd9ff9faa1582671266b36f58c52db0ac8e785a1",
-            package: Package::Zip,
-            executable: "pmtiles.exe",
-        }),
-        ("windows", "aarch64") => Some(ToolAsset {
-            name: "go-pmtiles_1.31.2_Windows_arm64.zip",
-            sha256: "8780a17453c63af757917a694cbbb50b943db89cc3f1b07e6fd62c1ff8e6963b",
-            package: Package::Zip,
-            executable: "pmtiles.exe",
-        }),
-        _ => None,
-    }
+    TOOL_ASSET
 }
 
 fn download(
@@ -426,39 +435,47 @@ fn verify_sha256(path: &Path, expected: &str, cancel: &AtomicBool) -> Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn extract_tool(package: &Path, tool: &Path, asset: ToolAsset, cancel: &AtomicBool) -> Result<()> {
-    match asset.package {
-        Package::TarGz => {
-            let file =
-                File::open(package).with_context(|| format!("open {}", package.display()))?;
-            for entry in tar::Archive::new(GzDecoder::new(file)).entries()? {
-                heed(cancel)?;
-                let mut entry = entry?;
-                if entry.path()?.file_name() == Some(OsStr::new(asset.executable)) {
-                    let mut output = File::create(tool)?;
-                    let _bytes = std::io::copy(&mut entry, &mut output)?;
-                    output.sync_all()?;
-                    return Ok(());
-                }
-            }
-        }
-        Package::Zip => {
-            let file =
-                File::open(package).with_context(|| format!("open {}", package.display()))?;
-            let mut zip = zip::ZipArchive::new(file).context("open go-pmtiles zip")?;
-            for slot in 0..zip.len() {
-                heed(cancel)?;
-                let mut entry = zip.by_index(slot)?;
-                if Path::new(entry.name()).file_name() == Some(OsStr::new(asset.executable)) {
-                    let mut output = File::create(tool)?;
-                    let _bytes = std::io::copy(&mut entry, &mut output)?;
-                    output.sync_all()?;
-                    return Ok(());
-                }
-            }
+    let file = File::open(package).with_context(|| format!("open {}", package.display()))?;
+    for entry in tar::Archive::new(GzDecoder::new(file)).entries()? {
+        heed(cancel)?;
+        let mut entry = entry?;
+        if entry.path()?.file_name() == Some(OsStr::new(asset.executable)) {
+            let mut output = File::create(tool)?;
+            let _bytes = std::io::copy(&mut entry, &mut output)?;
+            output.sync_all()?;
+            return Ok(());
         }
     }
     bail!("{} contains no {}", package.display(), asset.executable)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn extract_tool(package: &Path, tool: &Path, asset: ToolAsset, cancel: &AtomicBool) -> Result<()> {
+    let file = File::open(package).with_context(|| format!("open {}", package.display()))?;
+    let mut zip = zip::ZipArchive::new(file).context("open go-pmtiles zip")?;
+    for slot in 0..zip.len() {
+        heed(cancel)?;
+        let mut entry = zip.by_index(slot)?;
+        if Path::new(entry.name()).file_name() == Some(OsStr::new(asset.executable)) {
+            let mut output = File::create(tool)?;
+            let _bytes = std::io::copy(&mut entry, &mut output)?;
+            output.sync_all()?;
+            return Ok(());
+        }
+    }
+    bail!("{} contains no {}", package.display(), asset.executable)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn extract_tool(
+    _package: &Path,
+    _tool: &Path,
+    _asset: ToolAsset,
+    _cancel: &AtomicBool,
+) -> Result<()> {
+    bail!("basemap installation is unsupported on this platform")
 }
 
 #[cfg(unix)]

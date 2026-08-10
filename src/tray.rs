@@ -713,8 +713,10 @@ mod platform {
                 .context("build tray menu")?;
             let icon = TrayIconBuilder::new()
                 .with_tooltip("HRRR forecast fields")
-                .with_icon(icon()?)
-                .with_icon_as_template(cfg!(target_os = "macos"))
+                .with_icon(icon()?);
+            #[cfg(target_os = "macos")]
+            let icon = icon.with_icon_as_template(true);
+            let icon = icon
                 .with_menu(Box::new(menu.clone()))
                 .with_menu_on_left_click(false)
                 .build()

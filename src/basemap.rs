@@ -1123,8 +1123,6 @@ mod tests {
     use pmtiles::{DirectoryCache, PmTilesWriter, TileType};
     use std::{
         fs::File,
-        io::{Read as _, Write as _},
-        net::{TcpListener, TcpStream},
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1292,34 +1290,39 @@ mod tests {
         halt: Arc<AtomicBool>,
         requests: Arc<AtomicUsize>,
         faults: Receiver<String>,
+        server: Arc<tiny_http::Server>,
         thread: Option<JoinHandle<()>>,
     }
 
     impl RangeServer {
         fn raise(bytes: Vec<u8>) -> Result<Self> {
-            let listener = TcpListener::bind(("127.0.0.1", 0))?;
-            let address = listener.local_addr()?;
-            listener.set_nonblocking(true)?;
+            let server = Arc::new(
+                tiny_http::Server::http(("127.0.0.1", 0))
+                    .map_err(|error| anyhow::anyhow!("raise range fixture: {error}"))?,
+            );
+            let address = server
+                .server_addr()
+                .to_ip()
+                .context("range fixture did not bind an IP socket")?;
             let halt = Arc::new(AtomicBool::new(false));
             let thread_halt = Arc::clone(&halt);
             let requests = Arc::new(AtomicUsize::new(0));
             let thread_requests = Arc::clone(&requests);
+            let thread_server = Arc::clone(&server);
             let (fault_tx, faults) = bounded(1);
             let thread = thread::Builder::new()
                 .name("pmtiles-range-fixture".to_owned())
                 .spawn(move || {
                     while !thread_halt.load(Ordering::Acquire) {
-                        match listener.accept() {
-                            Ok((stream, _)) => {
-                                if let Err(error) = serve_range(stream, &bytes) {
+                        match thread_server.recv_timeout(Duration::from_millis(10)) {
+                            Ok(Some(request)) => {
+                                if let Err(error) = serve_range(request, &bytes) {
                                     let _sent = fault_tx.try_send(format!("{error:#}"));
                                     return;
                                 }
                                 let _previous = thread_requests.fetch_add(1, Ordering::Relaxed);
                             }
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                thread::sleep(Duration::from_millis(2));
-                            }
+                            Ok(None) => {}
                             Err(error) => {
                                 let _sent = fault_tx.try_send(error.to_string());
                                 return;
@@ -1332,6 +1335,7 @@ mod tests {
                 halt,
                 requests,
                 faults,
+                server,
                 thread: Some(thread),
             })
         }
@@ -1354,6 +1358,7 @@ mod tests {
 
         fn stop(&mut self) {
             self.halt.store(true, Ordering::Release);
+            self.server.unblock();
             if let Some(thread) = self.thread.take() {
                 let _joined = thread.join();
             }
@@ -1366,36 +1371,17 @@ mod tests {
         }
     }
 
-    fn serve_range(mut stream: TcpStream, bytes: &[u8]) -> Result<()> {
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        let mut request = [0_u8; 16 * 1024];
-        let mut filled = 0;
-        loop {
-            if filled == request.len() {
-                anyhow::bail!("range request headers exceed {} bytes", request.len());
-            }
-            let read = stream.read(&mut request[filled..])?;
-            if read == 0 {
-                anyhow::bail!("range request ended before its headers");
-            }
-            filled += read;
-            if request[..filled]
-                .windows(4)
-                .any(|bytes| bytes == b"\r\n\r\n")
-            {
-                break;
-            }
-        }
-        let request = std::str::from_utf8(&request[..filled])?;
+    fn serve_range(request: tiny_http::Request, bytes: &[u8]) -> Result<()> {
         let range = request
-            .lines()
-            .find_map(|line| {
-                line.to_ascii_lowercase()
-                    .strip_prefix("range: bytes=")
-                    .map(str::to_owned)
-            })
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("Range"))
+            .map(|header| header.value.as_str())
             .context("range request omitted Range header")?;
-        let (start, end) = range.split_once('-').context("malformed Range header")?;
+        let range = range
+            .strip_prefix("bytes=")
+            .context("malformed Range header")?;
+        let (start, end) = range.split_once('-').context("malformed byte range")?;
         let start = start.parse::<usize>().context("invalid range start")?;
         let end = end.parse::<usize>().context("invalid range end")?;
         if start >= bytes.len() || end < start {
@@ -1403,16 +1389,22 @@ mod tests {
         }
         let end = end.min(bytes.len() - 1);
         let body = &bytes[start..=end];
-        write!(
-            stream,
-            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nAccept-Ranges: bytes\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
-            body.len(),
-            bytes.len(),
-        )?;
-        stream.write_all(body)?;
-        stream.flush()?;
-        let _shutdown = stream.shutdown(std::net::Shutdown::Write);
-        Ok(())
+        let response = tiny_http::Response::from_data(body)
+            .with_status_code(206)
+            .with_header(fixture_header(
+                "Content-Range",
+                &format!("bytes {start}-{end}/{}", bytes.len()),
+            )?)
+            .with_header(fixture_header("Accept-Ranges", "bytes")?)
+            .with_header(fixture_header("ETag", "\"fixture\"")?);
+        request
+            .respond(response)
+            .context("respond to range request")
+    }
+
+    fn fixture_header(name: &str, value: &str) -> Result<tiny_http::Header> {
+        tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+            .map_err(|()| anyhow::anyhow!("invalid fixture header {name}: {value}"))
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::{
 
 const STARTUP_LIMIT: Duration = Duration::from_secs(45);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const TRAY_FAILURE: &str = "could not raise HRRR tray icon";
 
 fn main() -> Result<()> {
@@ -61,12 +62,11 @@ fn main() -> Result<()> {
             "HRRR presented no witnessed frame within {STARTUP_LIMIT:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ),
     }
-    if cfg!(any(target_os = "macos", target_os = "windows")) {
-        ensure!(
-            !stderr.contains(TRAY_FAILURE),
-            "native tray construction failed\nstderr:\n{stderr}"
-        );
-    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    ensure!(
+        !stderr.contains(TRAY_FAILURE),
+        "native tray construction failed\nstderr:\n{stderr}"
+    );
     println!(
         "HRRR portability passed: {} {}",
         std::env::consts::OS,
