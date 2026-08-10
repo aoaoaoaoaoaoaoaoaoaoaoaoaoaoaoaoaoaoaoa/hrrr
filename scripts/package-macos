@@ -35,7 +35,7 @@ lipo -create \
     "$target/aarch64-apple-darwin/release/HRRR" \
     "$target/x86_64-apple-darwin/release/HRRR" \
     -output "$stage/HRRR"
-lipo -verify_arch arm64 x86_64 "$stage/HRRR"
+lipo "$stage/HRRR" -verify_arch arm64 x86_64
 
 cargo packager --release --formats dmg --target universal-apple-darwin \
     --out-dir "$raw"
@@ -59,7 +59,7 @@ mounted=true
     die 'DMG Applications drop target is misdirected'
 binary=$mount/HRRR.app/Contents/MacOS/HRRR
 [ -x "$binary" ] || die 'DMG contains no executable HRRR app'
-lipo -verify_arch arm64 x86_64 "$binary"
+lipo "$binary" -verify_arch arm64 x86_64
 "$binary" --version
 HRRR_PORTABILITY_BINARY=$binary \
 HRRR_PORTABILITY_ARTIFACTS=${HRRR_PORTABILITY_ARTIFACTS:-$target/hrrr-packaged-portability} \
