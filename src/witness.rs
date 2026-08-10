@@ -34,6 +34,7 @@ mod active {
     #[derive(Serialize)]
     pub struct State {
         pub contract: &'static str,
+        pub launch: &'static str,
         pub active_field: Option<String>,
         pub active_view: String,
         pub pins: Vec<[f64; 2]>,
@@ -46,5 +47,23 @@ mod active {
     pub struct Viewport {
         pub center: [f64; 2],
         pub zoom: f64,
+    }
+
+    impl State {
+        pub fn threshold(launch: &'static str) -> Self {
+            Self {
+                contract: hrrr_contract::UI_FINGERPRINT,
+                launch,
+                active_field: None,
+                active_view: String::new(),
+                pins: Vec::new(),
+                transient_probe: None,
+                dragging_pin: None,
+                viewport: Viewport {
+                    center: [0.0; 2],
+                    zoom: 0.0,
+                },
+            }
+        }
     }
 }

@@ -1,38 +1,57 @@
 use crate::{
     app::WeatherApp,
+    basemap_artifact::{self, InstallPhase, InstallProgress},
     map::MapGpu,
     tray::{Signal as TraySignal, Tray},
     vector_map::VectorMapGpu,
+    witness,
+    xdg::{InstanceGuard, Lair},
 };
-use anyhow::Result;
-use eternalist_apps::{CloseDisposition, NativeApp, WindowSpec};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use anyhow::{Context as _, Result};
+use crossbeam_channel::{Receiver, unbounded};
+use dwemer_poolrooms::{
+    chrome,
+    water::{Frame as WaterFrame, Surface, Wetness},
+};
+use eternalist_apps::{CloseDisposition, LivingWait, NativeApp, WindowSpec};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
 };
 
 const TITLE: &str = "HRRR · native forecast fields";
 
 pub fn run(ctx: egui::Context) -> Result<()> {
-    let app = ForecastViewer {
-        weather: WeatherApp::open(&ctx)?,
-        tray: None,
-        tray_armed: false,
-        quit: Arc::new(AtomicBool::new(false)),
-    };
-    eternalist_apps::run(ctx, app)
+    eternalist_apps::run(ctx.clone(), ForecastViewer::open(&ctx)?)
 }
 
 struct ForecastViewer {
-    weather: WeatherApp,
+    body: Body,
     tray: Option<Tray>,
     tray_armed: bool,
     quit: Arc<AtomicBool>,
+    wait: LivingWait,
+    launch_water: Surface,
 }
 
 impl ForecastViewer {
+    fn open(ctx: &egui::Context) -> Result<Self> {
+        Ok(Self {
+            body: Body::open(ctx)?,
+            tray: None,
+            tray_armed: false,
+            quit: Arc::new(AtomicBool::new(false)),
+            wait: LivingWait::default(),
+            launch_water: Surface::new(Wetness::Wet),
+        })
+    }
+
     fn arm_tray(&mut self, ctx: &egui::Context) {
-        if self.tray_armed {
+        if self.tray_armed || !matches!(self.body, Body::Ready(_)) {
             return;
         }
         self.tray_armed = true;
@@ -54,6 +73,15 @@ impl ForecastViewer {
             Err(error) => eprintln!("could not raise HRRR tray icon: {error:#}"),
         }
     }
+
+    fn draw_body(&mut self, ui: &mut egui::Ui) {
+        let event = self.body.draw(ui, &mut self.wait, &mut self.launch_water);
+        let Some(event) = event else {
+            return;
+        };
+        let body = std::mem::replace(&mut self.body, Body::Poisoned);
+        self.body = body.transition(event, ui.ctx());
+    }
 }
 
 impl NativeApp for ForecastViewer {
@@ -61,15 +89,23 @@ impl NativeApp for ForecastViewer {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.arm_tray(ui.ctx());
-        self.weather.pulse(ui);
+        self.draw_body(ui);
     }
 
     fn close_requested(&mut self) -> CloseDisposition {
-        self.weather.retire();
-        if self.weather.close_minimizes() && self.tray.as_ref().is_some_and(Tray::available) {
-            CloseDisposition::Hide
-        } else {
-            CloseDisposition::Exit
+        match &mut self.body {
+            Body::Ready(weather) => {
+                weather.retire();
+                if weather.close_minimizes() && self.tray.as_ref().is_some_and(Tray::available) {
+                    CloseDisposition::Hide
+                } else {
+                    CloseDisposition::Exit
+                }
+            }
+            body => {
+                body.cancel();
+                CloseDisposition::Exit
+            }
         }
     }
 
@@ -86,9 +122,14 @@ impl NativeApp for ForecastViewer {
         ctx: &egui::Context,
         pixels_per_point: f32,
         tooltip_rects: &[egui::Rect],
-    ) -> dwemer_poolrooms::water::Frame {
-        self.weather
-            .water_frame(ctx, pixels_per_point, tooltip_rects)
+    ) -> WaterFrame {
+        if let Body::Ready(weather) = &mut self.body {
+            weather.water_frame(ctx, pixels_per_point, tooltip_rects)
+        } else {
+            self.wait.compose(ctx, &mut self.launch_water);
+            self.launch_water
+                .frame(ctx, pixels_per_point, tooltip_rects, None)
+        }
     }
 
     fn register_gpu(
@@ -105,10 +146,425 @@ impl NativeApp for ForecastViewer {
     }
 
     #[cfg(feature = "egui-test")]
-    type Observation = crate::witness::State;
+    type Observation = witness::State;
 
     #[cfg(feature = "egui-test")]
     fn observe(&self, _text_edit_focused: bool) -> Self::Observation {
-        self.weather.witness_state()
+        match &self.body {
+            Body::Ready(weather) => weather.witness_state(),
+            body => witness::State::threshold(body.witness_phase()),
+        }
+    }
+}
+
+struct Seed {
+    lair: Lair,
+    instance: InstanceGuard,
+}
+
+impl Seed {
+    fn claim() -> Result<Self> {
+        let lair = Lair::claim()?;
+        let instance = lair.lock_instance()?;
+        Ok(Self { lair, instance })
+    }
+
+    fn archive(&self) -> Result<PathBuf> {
+        self.lair.basemap_path()
+    }
+
+    fn open(self, ctx: &egui::Context) -> Result<WeatherApp> {
+        WeatherApp::open_at(ctx, self.lair, self.instance)
+    }
+}
+
+enum Body {
+    Consent(Seed),
+    Installing { seed: Seed, worker: Installer },
+    Fault(Fault),
+    Ready(Box<WeatherApp>),
+    Poisoned,
+}
+
+impl Body {
+    fn open(ctx: &egui::Context) -> Result<Self> {
+        let seed = Seed::claim()?;
+        let archive = seed.archive()?;
+        if archive.is_file() {
+            return Ok(Self::Ready(Box::new(seed.open(ctx)?)));
+        }
+        if Lair::basemap_is_external() {
+            return Ok(Self::Fault(Fault {
+                seed: Some(seed),
+                title: "CONFIGURED BASEMAP NOT FOUND".to_owned(),
+                detail: format!("No archive exists at {}.", archive.display()),
+                action: FaultAction::Recheck,
+            }));
+        }
+        Ok(Self::Consent(seed))
+    }
+
+    fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        wait: &mut LivingWait,
+        water: &mut Surface,
+    ) -> Option<BodyEvent> {
+        match self {
+            Self::Consent(_) => consent(ui, water),
+            Self::Installing { worker, .. } => {
+                let settled = worker.poll();
+                let action = installing(ui, wait, water, worker);
+                settled.map(BodyEvent::Settled).or(action)
+            }
+            Self::Fault(fault) => fault.draw(ui, water),
+            Self::Ready(weather) => {
+                weather.pulse(ui);
+                None
+            }
+            Self::Poisoned => unreachable!("HRRR launch state escaped a transition"),
+        }
+    }
+
+    fn transition(self, event: BodyEvent, ctx: &egui::Context) -> Self {
+        match (self, event) {
+            (Self::Consent(seed), BodyEvent::Install)
+            | (
+                Self::Fault(Fault {
+                    seed: Some(seed),
+                    action: FaultAction::RetryInstall,
+                    ..
+                }),
+                BodyEvent::Install,
+            ) => match Installer::spawn(&seed.lair, ctx) {
+                Ok(worker) => Self::Installing { seed, worker },
+                Err(error) => Self::install_fault(seed, error),
+            },
+            (Self::Installing { seed, mut worker }, BodyEvent::Cancel) => {
+                worker.cancel();
+                Self::Installing { seed, worker }
+            }
+            (Self::Installing { seed, .. }, BodyEvent::Settled(Ok(_archive))) => {
+                match seed.open(ctx) {
+                    Ok(weather) => Self::Ready(Box::new(weather)),
+                    Err(error) => Self::Fault(Fault {
+                        seed: None,
+                        title: "BASEMAP INSTALLED; STARTUP FAILED".to_owned(),
+                        detail: format!("{error:#}"),
+                        action: FaultAction::None,
+                    }),
+                }
+            }
+            (Self::Installing { seed, .. }, BodyEvent::Settled(Err(error)))
+                if basemap_artifact::was_cancelled(&error) =>
+            {
+                Self::Consent(seed)
+            }
+            (Self::Installing { seed, .. }, BodyEvent::Settled(Err(error))) => {
+                Self::install_fault(seed, error)
+            }
+            (
+                Self::Fault(Fault {
+                    seed: Some(seed),
+                    action: FaultAction::Recheck,
+                    ..
+                }),
+                BodyEvent::Recheck,
+            ) => match seed.archive() {
+                Ok(archive) if archive.is_file() => match seed.open(ctx) {
+                    Ok(weather) => Self::Ready(Box::new(weather)),
+                    Err(error) => Self::Fault(Fault {
+                        seed: None,
+                        title: "BASEMAP OPEN FAILED".to_owned(),
+                        detail: format!("{error:#}"),
+                        action: FaultAction::None,
+                    }),
+                },
+                Ok(archive) => Self::Fault(Fault {
+                    seed: Some(seed),
+                    title: "CONFIGURED BASEMAP NOT FOUND".to_owned(),
+                    detail: format!("No archive exists at {}.", archive.display()),
+                    action: FaultAction::Recheck,
+                }),
+                Err(error) => Self::Fault(Fault {
+                    seed: Some(seed),
+                    title: "BASEMAP PATH REJECTED".to_owned(),
+                    detail: format!("{error:#}"),
+                    action: FaultAction::Recheck,
+                }),
+            },
+            (body, _) => {
+                debug_assert!(false, "illegal HRRR launch transition");
+                body
+            }
+        }
+    }
+
+    fn install_fault(seed: Seed, error: anyhow::Error) -> Self {
+        Self::Fault(Fault {
+            seed: Some(seed),
+            title: "BASEMAP INSTALL FAILED".to_owned(),
+            detail: format!("{error:#}"),
+            action: FaultAction::RetryInstall,
+        })
+    }
+
+    fn cancel(&mut self) {
+        if let Self::Installing { worker, .. } = self {
+            worker.cancel();
+        }
+    }
+
+    #[cfg(feature = "egui-test")]
+    const fn witness_phase(&self) -> &'static str {
+        match self {
+            Self::Consent(_) => "basemap-required",
+            Self::Installing { .. } => "basemap-installing",
+            Self::Fault(_) => "basemap-fault",
+            Self::Ready(_) => "ready",
+            Self::Poisoned => "transitioning",
+        }
+    }
+}
+
+enum BodyEvent {
+    Install,
+    Cancel,
+    Recheck,
+    Settled(Result<PathBuf>),
+}
+
+struct Fault {
+    seed: Option<Seed>,
+    title: String,
+    detail: String,
+    action: FaultAction,
+}
+
+struct LaunchAction {
+    label: &'static str,
+    event: BodyEvent,
+    target: Option<hrrr_contract::Target>,
+}
+
+#[derive(Clone, Copy)]
+enum FaultAction {
+    RetryInstall,
+    Recheck,
+    None,
+}
+
+impl Fault {
+    fn draw(&self, ui: &mut egui::Ui, water: &mut Surface) -> Option<BodyEvent> {
+        let action = match self.action {
+            FaultAction::RetryInstall => Some(LaunchAction {
+                label: "TRY AGAIN",
+                event: BodyEvent::Install,
+                target: None,
+            }),
+            FaultAction::Recheck => Some(LaunchAction {
+                label: "RECHECK",
+                event: BodyEvent::Recheck,
+                target: None,
+            }),
+            FaultAction::None => None,
+        };
+        launch_card(ui, water, &self.title, &self.detail, action).0
+    }
+}
+
+fn consent(ui: &mut egui::Ui, water: &mut Surface) -> Option<BodyEvent> {
+    let detail = "HRRR keeps a North American map core local so forecasts remain responsive. Installation downloads about 1.1 GB from Protomaps and uses roughly the same disk space. At the closest zoom, only visible detail is fetched and retained in a bounded cache. Nothing is fetched until you approve.";
+    launch_card(
+        ui,
+        water,
+        "LOCAL BASEMAP REQUIRED",
+        detail,
+        Some(LaunchAction {
+            label: "INSTALL BASEMAP",
+            event: BodyEvent::Install,
+            target: Some(hrrr_contract::Target::BasemapInstall),
+        }),
+    )
+    .0
+}
+
+fn installing(
+    ui: &mut egui::Ui,
+    wait: &mut LivingWait,
+    water: &mut Surface,
+    worker: &Installer,
+) -> Option<BodyEvent> {
+    let detail = if worker.cancelling {
+        "CANCELING…".to_owned()
+    } else {
+        format!(
+            "{}\n{}",
+            worker.progress.phase.label(),
+            progress_bytes(worker.progress)
+        )
+    };
+    let action = (!worker.cancelling).then_some(LaunchAction {
+        label: "CANCEL",
+        event: BodyEvent::Cancel,
+        target: None,
+    });
+    let (event, rect) = launch_card(ui, water, "BUILDING LOCAL BASEMAP", &detail, action);
+    wait.claim(rect);
+    event
+}
+
+fn launch_card(
+    ui: &mut egui::Ui,
+    water: &mut Surface,
+    title: &str,
+    detail: &str,
+    action: Option<LaunchAction>,
+) -> (Option<BodyEvent>, egui::Rect) {
+    let mut event = None;
+    let panel = egui::CentralPanel::default().show_inside(ui, |ui| {
+        let top = ((ui.available_height() - 250.0) * 0.5).max(24.0);
+        ui.add_space(top);
+        let centered = ui.vertical_centered(|ui| {
+            ui.set_max_width(560.0);
+            let card = egui::Frame::new()
+                .fill(chrome::SURFACE)
+                .stroke(egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG))
+                .corner_radius(2)
+                .inner_margin(egui::Margin::symmetric(28, 24))
+                .show(ui, |ui| {
+                    ui.set_min_width(500.0_f32.min(ui.available_width()));
+                    let _eyebrow = ui.label(chrome::eyebrow("FIRST CONTACT"));
+                    let _title = ui.label(chrome::title(title));
+                    ui.add_space(10.0);
+                    let _detail = ui.label(chrome::muted(detail));
+                    if let Some(action) = action {
+                        ui.add_space(18.0);
+                        let response = ui.add_sized([220.0, 34.0], egui::Button::new(action.label));
+                        chrome::tension(ui, &response);
+                        if let Some(target) = action.target {
+                            witness::anchor(ui, target, response.rect);
+                        }
+                        if response.clicked() {
+                            water.click(response.rect);
+                            event = Some(action.event);
+                        }
+                    }
+                });
+            card.response.rect
+        });
+        centered.inner
+    });
+    (event, panel.inner)
+}
+
+impl InstallPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::FetchingTool => "FETCHING VERIFIED EXTRACTION TOOL",
+            Self::CheckingTool => "CHECKING EXTRACTION TOOL",
+            Self::UnpackingTool => "UNPACKING EXTRACTION TOOL",
+            Self::ExtractingMap => "EXTRACTING NORTH AMERICA THROUGH Z11",
+            Self::CheckingMap => "CHECKING LOCAL MAP ARCHIVE",
+        }
+    }
+}
+
+fn progress_bytes(progress: InstallProgress) -> String {
+    if progress.bytes == 0 {
+        return "Preparing…".to_owned();
+    }
+    let bytes = decimal_bytes(progress.bytes);
+    progress.total.map_or_else(
+        || format!("{bytes} written"),
+        |total| format!("{bytes} / {}", decimal_bytes(total)),
+    )
+}
+
+fn decimal_bytes(bytes: u64) -> String {
+    const KB: f64 = 1_000.0;
+    const MB: f64 = 1_000_000.0;
+    const GB: f64 = 1_000_000_000.0;
+    if bytes >= 1_000_000_000 {
+        format!("{:.2} GB", bytes as f64 / GB)
+    } else if bytes >= 1_000_000 {
+        format!("{:.0} MB", bytes as f64 / MB)
+    } else {
+        format!("{:.0} kB", bytes as f64 / KB)
+    }
+}
+
+struct Installer {
+    cancel: Arc<AtomicBool>,
+    events: Receiver<InstallEvent>,
+    thread: Option<JoinHandle<()>>,
+    progress: InstallProgress,
+    cancelling: bool,
+}
+
+enum InstallEvent {
+    Progress(InstallProgress),
+    Settled(Result<PathBuf>),
+}
+
+impl Installer {
+    fn spawn(lair: &Lair, ctx: &egui::Context) -> Result<Self> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&cancel);
+        let lair = lair.clone();
+        let ctx = ctx.clone();
+        let (send, events) = unbounded();
+        let progress_send = send.clone();
+        let thread = thread::Builder::new()
+            .name("hrrr-basemap-install".to_owned())
+            .spawn(move || {
+                let result =
+                    basemap_artifact::install_attended(&lair, None, &thread_cancel, |progress| {
+                        let _sent = progress_send.send(InstallEvent::Progress(progress));
+                        ctx.request_repaint();
+                    });
+                let _sent = send.send(InstallEvent::Settled(result));
+                ctx.request_repaint();
+            })
+            .context("spawn basemap installer")?;
+        Ok(Self {
+            cancel,
+            events,
+            thread: Some(thread),
+            progress: InstallProgress {
+                phase: InstallPhase::FetchingTool,
+                bytes: 0,
+                total: None,
+            },
+            cancelling: false,
+        })
+    }
+
+    fn poll(&mut self) -> Option<Result<PathBuf>> {
+        let mut settled = None;
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                InstallEvent::Progress(progress) => self.progress = progress,
+                InstallEvent::Settled(result) => settled = Some(result),
+            }
+        }
+        if settled.is_some()
+            && let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            return Some(Err(anyhow::anyhow!("basemap installer thread panicked")));
+        }
+        settled
+    }
+
+    fn cancel(&mut self) {
+        self.cancelling = true;
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for Installer {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }

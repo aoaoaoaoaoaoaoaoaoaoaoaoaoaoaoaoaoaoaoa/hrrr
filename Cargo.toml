@@ -8,7 +8,7 @@ resolver = "3"
 
 [package]
 name = "hrrr"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
@@ -19,15 +19,22 @@ repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr"
 homepage = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr"
 keywords = ["hrrr", "weather", "egui", "wgpu", "grib"]
 categories = ["gui", "science::geo"]
-include = ["src/**", "README.md", "LICENSE"]
+include = ["assets/**", "build.rs", "src/**", "README.md", "LICENSE"]
 
 [features]
+desktop-launcher = []
 egui-test = ["dep:egui-tester-witness", "eternalist-apps/egui-test"]
+
+[[bin]]
+name = "HRRR"
+path = "src/bin/desktop.rs"
+required-features = ["desktop-launcher"]
 
 [dependencies]
 anyhow = "1.0.102"
 atomic-write-file = "0.3.0"
 bytemuck = { version = "1.24.0", features = ["derive"] }
+bytes = "1.11.1"
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
 dwemer_poolrooms = "0.9.1"
@@ -40,17 +47,24 @@ flate2 = "1.1.5"
 fs4 = "0.12.0"
 geo-types = "0.7.19"
 grib = { version = "0.16.0", default-features = false }
-hrrr-contract = { path = "crates/hrrr-contract", version = "0.2.0" }
+hrrr-contract = { path = "crates/hrrr-contract", version = "0.3.0" }
 jiff = "0.2.33"
 lyon_tessellation = "1.0.20"
-pmtiles = { version = "0.23.1", default-features = false, features = ["mmap-async-tokio"] }
+pmtiles = { version = "0.23.1", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls-native-certs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"
 tar = { version = "0.4.44", default-features = false }
-tokio = { version = "1.48.0", features = ["rt"] }
+tokio = { version = "1.48.0", features = ["net", "rt", "time"] }
 toml = "1.1.2"
 ureq = "3.3.0"
 zip = { version = "7.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+fast-mvt = { version = "0.6.1", default-features = false, features = ["reader", "writer"] }
+pmtiles = { version = "0.23.1", default-features = false, features = ["write"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30.1", default-features = false, features = ["poll"] }
@@ -147,3 +161,21 @@ canonicalize_commands = [
 max_lines = 3000
 include = ["*.rs", "**/*.rs"]
 exclude = []
+
+[package.metadata.packager]
+product-name = "HRRR"
+identifier = "moe.swarm.hrrr"
+publisher = "Eternalist"
+category = "Weather"
+license-file = "LICENSE"
+icons = ["assets/hrrr-32.png", "assets/hrrr-128.png", "assets/hrrr-256.png", "assets/hrrr-512.png", "assets/hrrr-512@2x.png", "assets/hrrr.ico"]
+binaries = [{ path = "HRRR", main = true }]
+
+[package.metadata.packager.macos]
+minimum-system-version = "13.0"
+
+[package.metadata.packager.nsis]
+compression = "lzma"
+installer-mode = "currentUser"
+installer-icon = "assets/hrrr.ico"
+languages = ["English"]

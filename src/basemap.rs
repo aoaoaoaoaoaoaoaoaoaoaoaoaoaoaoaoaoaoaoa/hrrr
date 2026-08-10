@@ -1,6 +1,15 @@
-use crate::{basemap_artifact::MAX_ZOOM as MAX_SOURCE_ZOOM, map, model::Viewport};
+use crate::{
+    basemap_artifact::{
+        BOUNDS, DetailSource, LOCAL_MAX_ZOOM, MAX_ZOOM as MAX_SOURCE_ZOOM, detail_source,
+    },
+    cache::CacheStore,
+    map,
+    model::Viewport,
+    xdg::Lair,
+};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
+use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use egui::Context;
 use fast_mvt::{MvtFeatureRef, MvtGeometry, MvtReaderRef, MvtValueRef};
@@ -9,10 +18,10 @@ use lyon_tessellation::{
     BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers, math::point,
     path::Path,
 };
-use pmtiles::{AsyncPmTilesReader, HashMapCache, MmapBackend, TileCoord};
+use pmtiles::{AsyncPmTilesReader, HashMapCache, HttpBackend, MmapBackend, TileCoord};
 use std::{
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -20,6 +29,8 @@ use std::{
 pub const PAPER_SRGB: [u8; 3] = [229; 3];
 pub const APPARITION_SPAN: f32 = 1.35;
 const RETAINED_DEPTH: u8 = 4;
+const DETAIL_CONNECT_LIMIT: Duration = Duration::from_secs(8);
+const DETAIL_TRANSFER_LIMIT: Duration = Duration::from_secs(30);
 
 pub fn apparition(view_zoom: f32, onset_zoom: f32) -> f32 {
     let phase = ((view_zoom - onset_zoom) / APPARITION_SPAN).clamp(0.0, 1.0);
@@ -34,6 +45,10 @@ pub struct TileKey {
 }
 
 impl TileKey {
+    pub const fn is_detail(self) -> bool {
+        self.zoom > LOCAL_MAX_ZOOM
+    }
+
     fn coordinate(self) -> Result<TileCoord> {
         TileCoord::new(self.zoom, self.x, self.y).context("invalid PMTiles coordinate")
     }
@@ -167,7 +182,8 @@ pub struct Basemap {
 }
 
 impl Basemap {
-    pub fn spawn(ctx: Context, archive: PathBuf) -> Result<Self> {
+    pub fn spawn(ctx: Context, lair: &Lair) -> Result<Self> {
+        let archive = lair.basemap_path()?;
         if !archive.is_file() {
             anyhow::bail!(
                 "no basemap archive at {}; run `hrrr basemap install`",
@@ -177,10 +193,16 @@ impl Basemap {
         let workers = thread::available_parallelism()
             .map_or(4, std::num::NonZeroUsize::get)
             .clamp(2, 8);
-        Self::spawn_with_workers(ctx, archive, workers)
+        let detail = detail_source(lair)?.map(|source| Detail::new(source, lair.basemap_cache()));
+        Self::spawn_with_workers(ctx, archive, detail, workers)
     }
 
-    fn spawn_with_workers(ctx: Context, archive: PathBuf, workers: usize) -> Result<Self> {
+    fn spawn_with_workers(
+        ctx: Context,
+        archive: PathBuf,
+        detail: Option<Detail>,
+        workers: usize,
+    ) -> Result<Self> {
         if let Some(directory) = archive.parent() {
             purge_partials(directory)?;
         }
@@ -188,7 +210,7 @@ impl Basemap {
         let (event_tx, events) = bounded(256);
         let thread = thread::Builder::new()
             .name("vector-armory".to_owned())
-            .spawn(move || armory(ctx, archive, command_rx, event_tx, workers))
+            .spawn(move || armory(ctx, archive, detail, command_rx, event_tx, workers))
             .context("spawn vector basemap armory")?;
         Ok(Self {
             commands,
@@ -204,7 +226,10 @@ impl Basemap {
 
 pub fn cover(view: Viewport, rect: egui::Rect) -> Cover {
     let zoom = view.zoom.floor().clamp(0.0, f64::from(MAX_SOURCE_ZOOM)) as u8;
-    let ceiling = zoom.saturating_add(1).min(MAX_SOURCE_ZOOM);
+    let ceiling = zoom
+        .saturating_add(1)
+        .min(MAX_SOURCE_ZOOM)
+        .min(LOCAL_MAX_ZOOM.max(zoom));
     let strata = (zoom.saturating_sub(RETAINED_DEPTH)..=ceiling)
         .map(|level| Stratum {
             intent: match level.cmp(&zoom) {
@@ -255,10 +280,94 @@ fn tile_distance(key: TileKey, center: [f64; 2]) -> f64 {
 }
 
 type Archive = AsyncPmTilesReader<MmapBackend, HashMapCache>;
+type DetailArchive = AsyncPmTilesReader<HttpBackend, HashMapCache>;
+
+struct Detail {
+    source: DetailSource,
+    cache: CacheStore,
+    archive: Mutex<Option<Arc<DetailArchive>>>,
+}
+
+impl Detail {
+    const fn new(source: DetailSource, cache: CacheStore) -> Self {
+        Self {
+            source,
+            cache,
+            archive: Mutex::new(None),
+        }
+    }
+
+    fn fetch(&self, runtime: &tokio::runtime::Runtime, key: TileKey) -> Result<Option<Bytes>> {
+        if key.zoom <= LOCAL_MAX_ZOOM || !within_detail_bounds(key) {
+            return Ok(None);
+        }
+        let blade = PathBuf::from(&self.source.generation)
+            .join(key.zoom.to_string())
+            .join(key.x.to_string())
+            .join(format!("{}.mvt", key.y));
+        if let Some(bytes) = self.cache.recall(&blade, valid_mvt)? {
+            return Ok(Some(bytes.into()));
+        }
+        let archive = self.open(runtime)?;
+        let bytes = runtime
+            .block_on(archive.get_tile_decompressed(key.coordinate()?))
+            .map_err(anyhow::Error::new)
+            .context("fetch detailed basemap tile")?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if !valid_mvt(&bytes) {
+            anyhow::bail!("remote basemap returned an invalid vector tile");
+        }
+        self.cache.write(&blade, &bytes)?;
+        Ok(Some(bytes))
+    }
+
+    fn open(&self, runtime: &tokio::runtime::Runtime) -> Result<Arc<DetailArchive>> {
+        let mut slot = self
+            .archive
+            .lock()
+            .map_err(|_| anyhow::anyhow!("detailed basemap archive lock was poisoned"))?;
+        if let Some(archive) = slot.as_ref() {
+            return Ok(Arc::clone(archive));
+        }
+        let client = pmtiles::reqwest::Client::builder()
+            .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(DETAIL_CONNECT_LIMIT)
+            .timeout(DETAIL_TRANSFER_LIMIT)
+            .build()
+            .context("build basemap detail client")?;
+        let archive = runtime
+            .block_on(DetailArchive::new_with_cached_url(
+                HashMapCache::default(),
+                client,
+                &self.source.url,
+            ))
+            .map_err(anyhow::Error::new)
+            .context("open remote basemap detail")?;
+        let archive = Arc::new(archive);
+        *slot = Some(Arc::clone(&archive));
+        Ok(archive)
+    }
+}
+
+fn valid_mvt(bytes: &[u8]) -> bool {
+    MvtReaderRef::new(bytes).is_ok()
+}
+
+fn within_detail_bounds(key: TileKey) -> bool {
+    let scale = f64::from(1_u32 << key.zoom);
+    let west = f64::from(key.x) / scale * 360.0 - 180.0;
+    let east = f64::from(key.x + 1) / scale * 360.0 - 180.0;
+    let north = map::lon_lat_at([0.0, f64::from(key.y) / scale])[1];
+    let south = map::lon_lat_at([0.0, f64::from(key.y + 1) / scale])[1];
+    east >= BOUNDS[0] && west <= BOUNDS[2] && north >= BOUNDS[1] && south <= BOUNDS[3]
+}
 
 fn armory(
     ctx: Context,
     archive: PathBuf,
+    detail: Option<Detail>,
     commands: Receiver<TileKey>,
     events: Sender<Event>,
     worker_count: usize,
@@ -289,15 +398,17 @@ fn armory(
         return;
     }
     ctx.request_repaint();
+    let detail = detail.map(Arc::new);
     let mut workers = Vec::with_capacity(worker_count);
     for slot in 0..worker_count {
         let worker_ctx = ctx.clone();
         let reader = reader.clone();
+        let detail = detail.clone();
         let commands = commands.clone();
         let worker_events = events.clone();
         let worker = thread::Builder::new()
             .name(format!("vector-quarry-{slot}"))
-            .spawn(move || quarry(worker_ctx, reader, commands, worker_events));
+            .spawn(move || quarry(worker_ctx, reader, detail, commands, worker_events));
         match worker {
             Ok(worker) => workers.push(worker),
             Err(err) => {
@@ -320,11 +431,18 @@ fn armory(
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
         .context("build basemap runtime")
 }
 
-fn quarry(ctx: Context, archive: Arc<Archive>, commands: Receiver<TileKey>, events: Sender<Event>) {
+fn quarry(
+    ctx: Context,
+    archive: Arc<Archive>,
+    detail: Option<Arc<Detail>>,
+    commands: Receiver<TileKey>,
+    events: Sender<Event>,
+) {
     let runtime = match runtime() {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -334,11 +452,7 @@ fn quarry(ctx: Context, archive: Arc<Archive>, commands: Receiver<TileKey>, even
     };
     while let Ok(key) = commands.recv() {
         let begun = Instant::now();
-        let bytes = match key.coordinate().and_then(|coordinate| {
-            runtime
-                .block_on(archive.get_tile_decompressed(coordinate))
-                .map_err(anyhow::Error::new)
-        }) {
+        let bytes = match load_tile(&runtime, &archive, detail.as_deref(), key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 if events.send(Event::Missing(key)).is_err() {
@@ -372,6 +486,21 @@ fn quarry(ctx: Context, archive: Arc<Archive>, commands: Receiver<TileKey>, even
             break;
         }
         ctx.request_repaint();
+    }
+}
+
+fn load_tile(
+    runtime: &tokio::runtime::Runtime,
+    archive: &Archive,
+    detail: Option<&Detail>,
+    key: TileKey,
+) -> Result<Option<Bytes>> {
+    let local = runtime
+        .block_on(archive.get_tile_decompressed(key.coordinate()?))
+        .map_err(anyhow::Error::new)?;
+    match local {
+        Some(bytes) => Ok(Some(bytes)),
+        None => detail.map_or(Ok(None), |detail| detail.fetch(runtime, key)),
     }
 }
 
@@ -989,8 +1118,20 @@ fn purge_partials(directory: &FsPath) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pmtiles::DirectoryCache;
-    use std::time::Duration;
+    use crate::cache::{CacheClass, CacheManager};
+    use fast_mvt::MvtTileBuilder;
+    use pmtiles::{DirectoryCache, PmTilesWriter, TileType};
+    use std::{
+        fs::File,
+        io::{Read as _, Write as _},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread::{self, JoinHandle},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn vector_cover_prefetches_without_presenting() {
@@ -1036,6 +1177,224 @@ mod tests {
         let crown = cover.strata.last().context("top stratum")?;
         assert_eq!(crown.intent, Intent::Required);
         assert!(crown.keys.iter().all(|tile| tile.zoom == MAX_SOURCE_ZOOM));
+        Ok(())
+    }
+
+    #[test]
+    fn detail_is_demanded_only_at_its_native_zoom() -> Result<()> {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let near = cover(profile_view(-97.5, 38.5, 11.99), rect);
+        assert!(
+            near.strata
+                .iter()
+                .all(|stratum| stratum.keys.iter().all(|key| key.zoom <= LOCAL_MAX_ZOOM))
+        );
+
+        let detail = cover(profile_view(-97.5, 38.5, 12.0), rect);
+        let crown = detail.strata.last().context("detail stratum")?;
+        assert_eq!(crown.intent, Intent::Required);
+        assert!(crown.keys.iter().all(|key| key.zoom == MAX_SOURCE_ZOOM));
+        Ok(())
+    }
+
+    #[test]
+    fn detail_bounds_admit_north_america_only() -> Result<()> {
+        let plains = profile_keys(profile_view(-97.5, 38.5, 12.0))
+            .into_iter()
+            .next()
+            .context("plains tile")?;
+        assert!(within_detail_bounds(plains));
+        assert!(!within_detail_bounds(TileKey {
+            zoom: MAX_SOURCE_ZOOM,
+            x: 0,
+            y: 0,
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn detail_crosses_http_range_once_then_resides_in_cache() -> Result<()> {
+        let root = test_root("detail-cache")?;
+        let local_path = root.join("local.pmtiles");
+        let remote_path = root.join("remote.pmtiles");
+        let tile = MvtTileBuilder::new().layer("earth")?.end().encode();
+        let key = profile_keys(profile_view(-97.5, 38.5, 12.0))
+            .into_iter()
+            .next()
+            .context("detail tile")?;
+        forge_archive(
+            &local_path,
+            TileKey {
+                zoom: 0,
+                x: 0,
+                y: 0,
+            },
+            &tile,
+        )?;
+        forge_archive(&remote_path, key, &tile)?;
+
+        let server = RangeServer::raise(std::fs::read(remote_path)?)?;
+        let store = CacheManager::standard(root.join("cache")).store(CacheClass::Basemap);
+        let detail = Detail::new(
+            DetailSource {
+                url: server.url(),
+                generation: "20260809".to_owned(),
+            },
+            store.clone(),
+        );
+        let runtime = runtime()?;
+        let local = runtime.block_on(Archive::new_with_cached_path(
+            HashMapCache::default(),
+            &local_path,
+        ))?;
+
+        let fetched = load_tile(&runtime, &local, Some(&detail), key)?.context("remote tile")?;
+        assert_eq!(fetched.as_ref(), tile);
+        let requests = server.requests();
+        assert!(requests > 0);
+        let cached = load_tile(&runtime, &local, Some(&detail), key)?.context("cached tile")?;
+        assert_eq!(cached.as_ref(), tile);
+        assert_eq!(server.requests(), requests);
+
+        let blade = PathBuf::from("20260809")
+            .join(MAX_SOURCE_ZOOM.to_string())
+            .join(key.x.to_string())
+            .join(format!("{}.mvt", key.y));
+        assert_eq!(
+            store.recall(&blade, valid_mvt)?.as_deref(),
+            Some(tile.as_slice())
+        );
+        server.finish()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn forge_archive(path: &FsPath, key: TileKey, tile: &[u8]) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = PmTilesWriter::new(TileType::Mvt)
+            .min_zoom(key.zoom)
+            .max_zoom(key.zoom)
+            .create(file)?;
+        writer.add_tile(key.coordinate()?, tile)?;
+        writer.finalize()?;
+        Ok(())
+    }
+
+    fn test_root(name: &str) -> Result<PathBuf> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("hrrr-{name}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        Ok(root)
+    }
+
+    struct RangeServer {
+        address: std::net::SocketAddr,
+        halt: Arc<AtomicBool>,
+        requests: Arc<AtomicUsize>,
+        faults: Receiver<String>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl RangeServer {
+        fn raise(bytes: Vec<u8>) -> Result<Self> {
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            let address = listener.local_addr()?;
+            listener.set_nonblocking(true)?;
+            let halt = Arc::new(AtomicBool::new(false));
+            let thread_halt = Arc::clone(&halt);
+            let requests = Arc::new(AtomicUsize::new(0));
+            let thread_requests = Arc::clone(&requests);
+            let (fault_tx, faults) = bounded(1);
+            let thread = thread::Builder::new()
+                .name("pmtiles-range-fixture".to_owned())
+                .spawn(move || {
+                    while !thread_halt.load(Ordering::Acquire) {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                if let Err(error) = serve_range(stream, &bytes) {
+                                    let _sent = fault_tx.try_send(format!("{error:#}"));
+                                    return;
+                                }
+                                let _previous = thread_requests.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(error) => {
+                                let _sent = fault_tx.try_send(error.to_string());
+                                return;
+                            }
+                        }
+                    }
+                })?;
+            Ok(Self {
+                address,
+                halt,
+                requests,
+                faults,
+                thread: Some(thread),
+            })
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/detail.pmtiles", self.address)
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+
+        fn finish(mut self) -> Result<()> {
+            self.stop();
+            if let Ok(fault) = self.faults.try_recv() {
+                anyhow::bail!("range fixture failed: {fault}");
+            }
+            Ok(())
+        }
+
+        fn stop(&mut self) {
+            self.halt.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _joined = thread.join();
+            }
+        }
+    }
+
+    impl Drop for RangeServer {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    fn serve_range(mut stream: TcpStream, bytes: &[u8]) -> Result<()> {
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut request = [0_u8; 4096];
+        let read = stream.read(&mut request)?;
+        let request = std::str::from_utf8(&request[..read])?;
+        let range = request
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("range: bytes=")
+                    .map(str::to_owned)
+            })
+            .context("range request omitted Range header")?;
+        let (start, end) = range.split_once('-').context("malformed Range header")?;
+        let start = start.parse::<usize>().context("invalid range start")?;
+        let end = end.parse::<usize>().context("invalid range end")?;
+        if start >= bytes.len() || end < start {
+            anyhow::bail!("range {start}-{end} exceeds {} bytes", bytes.len());
+        }
+        let end = end.min(bytes.len() - 1);
+        let body = &bytes[start..=end];
+        write!(
+            stream,
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nAccept-Ranges: bytes\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
+            body.len(),
+            bytes.len(),
+        )?;
+        stream.write_all(body)?;
+        stream.flush()?;
         Ok(())
     }
 
@@ -1121,7 +1480,7 @@ mod tests {
         workers: usize,
         pass: usize,
     ) -> Result<()> {
-        let basemap = Basemap::spawn_with_workers(Context::default(), path, workers)?;
+        let basemap = Basemap::spawn_with_workers(Context::default(), path, None, workers)?;
         match basemap.events.recv_timeout(Duration::from_secs(5))? {
             Event::Ready => {}
             event => anyhow::bail!("basemap opened with {event:?}"),

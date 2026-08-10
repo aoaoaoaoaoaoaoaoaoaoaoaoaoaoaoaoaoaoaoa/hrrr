@@ -16,8 +16,9 @@ const TRAY_FAILURE: &str = "could not raise HRRR tray icon";
 fn main() -> Result<()> {
     let binary = binary()?;
     prove_cli(&binary)?;
+    prove_first_contact(&binary)?;
 
-    let cell = Cell::forge()?;
+    let cell = Cell::forge("ready")?;
     let basemap = cell.path().join("basemap.pmtiles");
     let _archive = File::create(&basemap).context("forge inert basemap archive")?;
     let witness = cell.path().join("hrrr.observations");
@@ -42,7 +43,7 @@ fn main() -> Result<()> {
         .spawn()
         .with_context(|| format!("launch {}", binary.display()))?;
     let mut captive = Captive::new(child);
-    let verdict = await_presented_frame(captive.child_mut()?, &witness, &launch)?;
+    let verdict = await_presented_frame(captive.child_mut()?, &witness, &launch, Surface::Map)?;
     let output = captive.finish()?;
     std::fs::write(cell.path().join("hrrr.stdout"), &output.stdout)
         .context("retain HRRR portability stdout")?;
@@ -74,16 +75,59 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn prove_first_contact(binary: &Path) -> Result<()> {
+    let cell = Cell::forge("first-contact")?;
+    let witness = cell.path().join("hrrr-first-contact.observations");
+    let frames = cell.path().join("hrrr-first-contact.frames");
+    let launch = format!(
+        "hrrr-first-contact-{}-{}",
+        std::env::consts::OS,
+        std::process::id()
+    );
+    let mut command = Command::new(binary);
+    let _command = command
+        .env("EGUI_TESTER_WITNESS", &witness)
+        .env("EGUI_TESTER_FRAMES", &frames)
+        .env("EGUI_TESTER_LAUNCH", &launch)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    isolate_host_paths(&mut command, cell.path())?;
+    let child = command
+        .spawn()
+        .with_context(|| format!("launch {} without prior state", binary.display()))?;
+    let mut captive = Captive::new(child);
+    let verdict = await_presented_frame(
+        captive.child_mut()?,
+        &witness,
+        &launch,
+        Surface::FirstContact,
+    )?;
+    let output = captive.finish()?;
+    match verdict {
+        Startup::Ready => Ok(()),
+        Startup::Exited(status) => bail!(
+            "HRRR exited before presenting first contact with {status}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Startup::TimedOut => bail!(
+            "HRRR presented no first-contact surface within {STARTUP_LIMIT:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
 struct Cell {
     path: PathBuf,
     _temporary: Option<tempfile::TempDir>,
 }
 
 impl Cell {
-    fn forge() -> Result<Self> {
+    fn forge(label: &str) -> Result<Self> {
         if let Some(path) = std::env::var_os("HRRR_PORTABILITY_ARTIFACTS") {
             let path = PathBuf::from(path).join(format!(
-                "{}-{}-{}",
+                "{}-{}-{}-{label}",
                 std::env::consts::OS,
                 std::env::consts::ARCH,
                 std::process::id()
@@ -172,7 +216,18 @@ enum Startup {
     TimedOut,
 }
 
-fn await_presented_frame(child: &mut Child, path: &Path, launch: &str) -> Result<Startup> {
+#[derive(Clone, Copy)]
+enum Surface {
+    FirstContact,
+    Map,
+}
+
+fn await_presented_frame(
+    child: &mut Child,
+    path: &Path,
+    launch: &str,
+    expected: Surface,
+) -> Result<Startup> {
     let begun = Instant::now();
     let mut journal = ObservationJournal::sealed(path, launch);
     while begun.elapsed() < STARTUP_LIMIT {
@@ -182,7 +237,7 @@ fn await_presented_frame(child: &mut Child, path: &Path, launch: &str) -> Result
         match journal.read_new::<Value>() {
             Ok(frames) => {
                 for frame in frames {
-                    if presented_hrrr_frame(&frame)? {
+                    if presented_hrrr_frame(&frame, expected)? {
                         return Ok(Startup::Ready);
                     }
                 }
@@ -196,7 +251,7 @@ fn await_presented_frame(child: &mut Child, path: &Path, launch: &str) -> Result
     Ok(Startup::TimedOut)
 }
 
-fn presented_hrrr_frame(frame: &Value) -> Result<bool> {
+fn presented_hrrr_frame(frame: &Value, expected: Surface) -> Result<bool> {
     let Some(state) = frame.get("state") else {
         return Ok(false);
     };
@@ -213,16 +268,24 @@ fn presented_hrrr_frame(frame: &Value) -> Result<bool> {
         .get("surface_sequence")
         .and_then(Value::as_u64)
         .is_some_and(|sequence| sequence > 0);
-    let map = frame
+    let target = match expected {
+        Surface::FirstContact => hrrr_contract::Target::BasemapInstall.to_string(),
+        Surface::Map => hrrr_contract::Target::Map.to_string(),
+    };
+    let anchor = frame
         .get("anchors")
         .and_then(Value::as_array)
         .is_some_and(|anchors| {
-            anchors.iter().any(|anchor| {
-                anchor.get("name").and_then(Value::as_str)
-                    == Some(&hrrr_contract::Target::Map.to_string())
-            })
+            anchors
+                .iter()
+                .any(|anchor| anchor.get("name").and_then(Value::as_str) == Some(target.as_str()))
         });
-    Ok(presented && map)
+    let launch = state.get("launch").and_then(Value::as_str);
+    let phase = match expected {
+        Surface::FirstContact => "basemap-required",
+        Surface::Map => "ready",
+    };
+    Ok(presented && anchor && launch == Some(phase))
 }
 
 struct Captive(Option<Child>);
@@ -270,14 +333,32 @@ mod tests {
         let ready = json!({
             "surface_sequence": 1,
             "anchors": [{ "name": "map.canvas", "rect": [0.0, 0.0, 1.0, 1.0] }],
-            "state": { "contract": hrrr_contract::UI_FINGERPRINT },
+            "state": { "contract": hrrr_contract::UI_FINGERPRINT, "launch": "ready" },
         });
-        assert!(presented_hrrr_frame(&ready)?);
-        assert!(!presented_hrrr_frame(&json!({
-            "surface_sequence": 0,
-            "anchors": [{ "name": "map.canvas" }],
-            "state": { "contract": hrrr_contract::UI_FINGERPRINT },
-        }))?);
+        assert!(presented_hrrr_frame(&ready, Surface::Map)?);
+        assert!(!presented_hrrr_frame(
+            &json!({
+                "surface_sequence": 0,
+                "anchors": [{ "name": "map.canvas" }],
+                "state": { "contract": hrrr_contract::UI_FINGERPRINT, "launch": "ready" },
+            }),
+            Surface::Map
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn first_contact_requires_install_affordance() -> Result<()> {
+        let frame = json!({
+            "surface_sequence": 1,
+            "anchors": [{ "name": "basemap.install" }],
+            "state": {
+                "contract": hrrr_contract::UI_FINGERPRINT,
+                "launch": "basemap-required"
+            },
+        });
+        assert!(presented_hrrr_frame(&frame, Surface::FirstContact)?);
+        assert!(!presented_hrrr_frame(&frame, Surface::Map)?);
         Ok(())
     }
 
@@ -288,7 +369,7 @@ mod tests {
             "anchors": [{ "name": "map.canvas" }],
             "state": { "contract": "hrrr.ui/alien" },
         });
-        assert!(presented_hrrr_frame(&alien).is_err());
+        assert!(presented_hrrr_frame(&alien, Surface::Map).is_err());
     }
 
     #[cfg(target_os = "windows")]

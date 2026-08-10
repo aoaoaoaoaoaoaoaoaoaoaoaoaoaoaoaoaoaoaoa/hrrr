@@ -62,6 +62,10 @@ impl<'a> Harness<'a> {
                 ready.state.contract
             ),
         )?;
+        egui_tester::demand(
+            ready.state.launch == "ready",
+            format!("HRRR stopped at launch phase `{}`", ready.state.launch),
+        )?;
         Ok(story)
     }
 }

@@ -4,6 +4,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Observation {
     pub contract: String,
+    pub launch: String,
     pub active_field: Option<String>,
     pub active_view: String,
     pub pins: Vec<[f64; 2]>,

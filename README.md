@@ -9,21 +9,41 @@ thread.
 
 ## Install
 
-HRRR requires Rust 1.96 or newer and a working wgpu-compatible graphics stack.
-The released native hosts are Linux/X11, macOS, and Windows.
+HRRR requires a working wgpu-compatible graphics stack. Releases support
+Linux/X11, macOS 13 or newer on Apple Silicon and Intel, and 64-bit Windows.
+
+On Linux, install the ordinary command-line package with Rust 1.96 or newer:
 
 ```sh
 cargo install hrrr --locked
-hrrr basemap install
 hrrr
 ```
 
-`basemap install` is explicit because it downloads several GiB. It obtains a
-pinned, SHA-256-verified `go-pmtiles` binary for the current platform, extracts
-the North American portion of the current [Protomaps daily
-build](https://maps.protomaps.com/), verifies the resulting PMTiles archive,
-and discards the extraction tool. The z12 archive is currently about 2.3 GiB.
-Pass a historical build date as `hrrr basemap install YYYYMMDD`.
+macOS uses the universal
+[DMG](https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr/releases/latest/download/hrrr-macos-universal.dmg).
+Drag HRRR into Applications. The image is not yet signed or notarized; macOS
+therefore requires the standard manual override for an unidentified developer.
+
+Windows uses the per-user
+[installer](https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr/releases/latest/download/hrrr-windows-x86_64-setup.exe).
+It needs no administrator access and creates the normal Start Menu entry. The
+binary is not yet code-signed, so SmartScreen may require explicit approval.
+
+First launch explains and offers the basemap installation. Approval downloads
+about 1.1 GB and leaves a roughly 1.01 GiB North American map core available
+offline through zoom 11. HRRR obtains a pinned, SHA-256-verified `go-pmtiles`
+binary for the current platform, extracts the current [Protomaps daily
+build](https://maps.protomaps.com/), verifies the result, and discards the tool.
+At zoom 12, only visible detail tiles are fetched by HTTP range request. Those
+tiles enter a 512 MiB, seven-day disposable cache; zoom 11 remains visible when
+the detail source is unavailable.
+
+The same operation remains available explicitly. A date pins both the local
+core and its lazy detail tier to a historical daily build:
+
+```sh
+hrrr basemap install [YYYYMMDD]
+```
 
 Inspect or remove the basemap with:
 
@@ -80,10 +100,11 @@ Unset roots use the XDG defaults. Relative XDG roots are ignored. Set
 `HRRR_BASEMAP_ARCHIVE` to an absolute PMTiles path to use an externally managed
 archive.
 
-Forecast cache entries expire after seven days and the cache is capped at
-512 MiB. `cargo uninstall hrrr` removes the executable but preserves user
-preferences, views, and the explicitly installed basemap. Use `hrrr basemap
-remove` before uninstalling when that data should also be removed.
+Forecast and detailed-basemap caches each expire after seven days and are each
+capped at 512 MiB. Cargo, the macOS app bundle, and the Windows uninstaller
+remove installed machinery while preserving preferences, views, and the
+explicitly installed basemap. Run `hrrr basemap remove` first to remove the
+local core and cached detail as well.
 
 ## Data
 
@@ -103,16 +124,20 @@ drag and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence
 is retained under `/tmp/hrrr-acceptance-artifacts` by default.
 
 The portability controller launches the real witnessed product on macOS arm64,
-macOS x86_64, and Windows x86_64, then requires CLI identity, native tray
+macOS x86_64, and Windows x86_64. It requires CLI identity, native tray
 construction, a successfully presented GPU frame, the current HRRR witness
-contract, and the map surface. Each host also runs the product laws, verifies
-the crates.io package graph, and proves ordinary install/uninstall behavior.
+contract, first-contact basemap consent, and the map surface. Installer jobs
+also forge a universal DMG and an NSIS package, install or mount the exact
+artifact, rerun the controller against the packaged executable, and prove
+uninstallation without user-data loss.
 
 The UI vocabulary is a separately published dependency. When it changes,
 release it first with `scripts/release-contract VERSION publish`; only after
 that exact version is visible on crates.io may `scripts/release VERSION
 publish` seal the application. Both release commands require a clean, pushed
-`main` checkout and a valid signed tag at `HEAD`.
+`main` checkout and a valid signed tag at `HEAD`. A version tag publishes the
+installers only after every source, security, package, host, lifecycle, and
+native-acceptance job passes.
 
 ## License
 

@@ -16,14 +16,16 @@ const REAP_INTERVAL: Duration = Duration::from_hours(6);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheClass {
+    Basemap,
     Field,
 }
 
 impl CacheClass {
-    const ALL: [Self; 1] = [Self::Field];
+    const ALL: [Self; 2] = [Self::Basemap, Self::Field];
 
     const fn directory(self) -> &'static str {
         match self {
+            Self::Basemap => "basemap",
             Self::Field => "fields",
         }
     }
@@ -87,6 +89,17 @@ pub struct CacheStore {
 }
 
 impl CacheStore {
+    pub fn clear(&self) -> Result<()> {
+        let _guard = write_gate(&self.gate);
+        match std::fs::remove_dir_all(&self.root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("clear cache chamber {}", self.root.display()))
+            }
+        }
+    }
+
     pub fn read(&self, blade: &Path) -> std::io::Result<Vec<u8>> {
         let _guard = read_gate(&self.gate);
         let path = self.root.join(blade);
@@ -121,21 +134,27 @@ impl CacheStore {
             .with_context(|| format!("commit cache blade {}", path.display()))
     }
 
+    pub fn recall(&self, blade: &Path, valid: impl Fn(&[u8]) -> bool) -> Result<Option<Vec<u8>>> {
+        match self.read(blade) {
+            Ok(bytes) if valid(&bytes) => Ok(Some(bytes)),
+            Ok(_) => {
+                self.remove(blade)
+                    .with_context(|| format!("discard corrupt cache blade {}", blade.display()))?;
+                Ok(None)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("read {}", blade.display())),
+        }
+    }
+
     pub fn resolve(
         &self,
         blade: &Path,
         valid: impl Fn(&[u8]) -> bool,
         fetch: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
-        match self.read(blade) {
-            Ok(bytes) if valid(&bytes) => return Ok(bytes),
-            Ok(_) => self
-                .remove(blade)
-                .with_context(|| format!("discard corrupt cache blade {}", blade.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", blade.display()));
-            }
+        if let Some(bytes) = self.recall(blade, &valid)? {
+            return Ok(bytes);
         }
         let bytes = fetch()?;
         if !valid(&bytes) {
@@ -394,6 +413,22 @@ mod tests {
         assert_eq!(store.read(blade)?, b"warm");
         assert_eq!(manager.purge()?, PurgeTally::default());
         assert!(store.root.join(blade).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn clearing_one_domain_preserves_its_neighbor() -> Result<()> {
+        let root = TestRoot::forge()?;
+        let manager = CacheManager::standard(root.0.clone());
+        let blade = Path::new("generation/tile");
+        let basemap = manager.store(CacheClass::Basemap);
+        let field = manager.store(CacheClass::Field);
+        basemap.write(blade, b"map")?;
+        field.write(blade, b"forecast")?;
+
+        basemap.clear()?;
+        assert!(basemap.read(blade).is_err());
+        assert_eq!(field.read(blade)?, b"forecast");
         Ok(())
     }
 

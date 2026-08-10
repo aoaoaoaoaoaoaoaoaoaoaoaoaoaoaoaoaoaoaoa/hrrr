@@ -12,6 +12,7 @@ pub struct Lair {
     pub config: PathBuf,
     pub state: PathBuf,
     pub data: PathBuf,
+    local_data: PathBuf,
     cache: CacheManager,
 }
 
@@ -33,6 +34,7 @@ impl Lair {
             config: dirs.config_dir().to_path_buf(),
             state,
             data: dirs.data_dir().to_path_buf(),
+            local_data: dirs.data_local_dir().to_path_buf(),
             cache,
         })
     }
@@ -53,17 +55,17 @@ impl Lair {
         self.cache.store(CacheClass::Field)
     }
 
+    pub fn basemap_cache(&self) -> CacheStore {
+        self.cache.store(CacheClass::Basemap)
+    }
+
     pub fn cache_root(&self) -> PathBuf {
         self.cache.root().to_path_buf()
     }
 
     pub fn basemap_path(&self) -> Result<PathBuf> {
         let path = std::env::var_os("HRRR_BASEMAP_ARCHIVE").map_or_else(
-            || {
-                self.data
-                    .join("basemap")
-                    .join(crate::basemap_artifact::ARCHIVE_NAME)
-            },
+            || managed_basemap(&self.data, &self.local_data),
             PathBuf::from,
         );
         if path.is_absolute() {
@@ -87,6 +89,20 @@ impl Lair {
             .filter(|path| path.is_absolute())
             .map_or_else(|| self.state.clone(), |path| path.join("hrrr"));
         InstanceGuard::claim(&root)
+    }
+}
+
+fn managed_basemap(roaming: &Path, local: &Path) -> PathBuf {
+    let local = local
+        .join("basemap")
+        .join(crate::basemap_artifact::ARCHIVE_NAME);
+    let legacy = roaming
+        .join("basemap")
+        .join(crate::basemap_artifact::ARCHIVE_NAME);
+    if local.is_file() || !legacy.is_file() {
+        local
+    } else {
+        legacy
     }
 }
 
@@ -131,6 +147,7 @@ mod tests {
             lair.config.clone(),
             lair.state.clone(),
             lair.data.clone(),
+            lair.local_data.clone(),
             lair.cache_root(),
         ] {
             assert!(
@@ -139,6 +156,32 @@ mod tests {
                 path.display()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn machine_local_basemaps_supersede_roaming_legacy_archives() -> Result<()> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("hrrr-basemap-root-{}-{nonce}", std::process::id()));
+        let roaming = root.join("roaming");
+        let local = root.join("local");
+        let local_archive = local
+            .join("basemap")
+            .join(crate::basemap_artifact::ARCHIVE_NAME);
+        let legacy_archive = roaming
+            .join("basemap")
+            .join(crate::basemap_artifact::ARCHIVE_NAME);
+
+        assert_eq!(managed_basemap(&roaming, &local), local_archive);
+        std::fs::create_dir_all(legacy_archive.parent().context("legacy parent")?)?;
+        let _legacy = File::create(&legacy_archive)?;
+        assert_eq!(managed_basemap(&roaming, &local), legacy_archive);
+        std::fs::create_dir_all(local_archive.parent().context("local parent")?)?;
+        let _local = File::create(&local_archive)?;
+        assert_eq!(managed_basemap(&roaming, &local), local_archive);
+
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

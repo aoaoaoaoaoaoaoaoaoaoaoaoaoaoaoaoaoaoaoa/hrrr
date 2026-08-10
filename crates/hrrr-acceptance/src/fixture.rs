@@ -40,7 +40,7 @@ fn forge_basemap(path: &Path) -> Result<()> {
         .internal_compression(Compression::None)
         .tile_compression(Compression::None)
         .min_zoom(0)
-        .max_zoom(12)
+        .max_zoom(11)
         .bounds(-180.0, -85.0, 180.0, 85.0)
         .center(-98.5, 39.5)
         .center_zoom(4)

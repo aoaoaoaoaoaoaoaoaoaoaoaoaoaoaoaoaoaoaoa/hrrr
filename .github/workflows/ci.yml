@@ -51,11 +51,16 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install declared toolchain
         run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Verify contract package
+        if: startsWith(github.ref, 'refs/tags/hrrr-contract-v')
+        run: cargo package --locked --package hrrr-contract
       - name: Verify crates.io packages
+        if: ${{ !startsWith(github.ref, 'refs/tags/hrrr-contract-v') }}
         run: scripts/package
 
   portable-hosts:
     name: Runtime · ${{ matrix.name }}
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/hrrr-contract-v')
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +118,7 @@ jobs:
 
   lifecycle:
     name: Install and uninstall · Linux/X11
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/hrrr-contract-v')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -167,6 +173,7 @@ jobs:
 
   native-acceptance:
     name: Native acceptance · Linux/X11
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/hrrr-contract-v')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -219,3 +226,112 @@ jobs:
           path: /tmp/hrrr-acceptance-artifacts
           if-no-files-found: ignore
           retention-days: 7
+
+  installer-macos:
+    name: Installer · macOS universal
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/hrrr-contract-v')
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Bind disposable package roots
+        run: |
+          printf 'CARGO_TARGET_DIR=%s/hrrr-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'HRRR_PACKAGE_DIR=%s/hrrr-release\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'HRRR_PORTABILITY_ARTIFACTS=%s/hrrr-packaged-portability\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Install declared toolchain and universal targets
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Install pinned packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Forge, mount, and prove DMG
+        run: scripts/package-macos
+      - name: Retain installer
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-installer-macos-${{ github.run_id }}
+          path: ${{ runner.temp }}/hrrr-release/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-installer-macos-failure-${{ github.run_id }}
+          path: ${{ runner.temp }}/hrrr-packaged-portability
+          if-no-files-found: ignore
+          retention-days: 7
+
+  installer-windows:
+    name: Installer · Windows x86_64
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/hrrr-contract-v')
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Bind disposable package roots
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$env:RUNNER_TEMP\hrrr-target" >> $env:GITHUB_ENV
+          "HRRR_PACKAGE_DIR=$env:RUNNER_TEMP\hrrr-release" >> $env:GITHUB_ENV
+          "HRRR_PORTABILITY_ARTIFACTS=$env:RUNNER_TEMP\hrrr-packaged-portability" >> $env:GITHUB_ENV
+      - name: Install declared toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Install pinned packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - name: Forge, install, and prove NSIS package
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - name: Retain installer
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-installer-windows-${{ github.run_id }}
+          path: ${{ runner.temp }}\hrrr-release\*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: hrrr-installer-windows-failure-${{ github.run_id }}
+          path: ${{ runner.temp }}\hrrr-packaged-portability
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release-assets:
+    name: Publish proved installers
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - source
+      - security
+      - package
+      - portable-hosts
+      - lifecycle
+      - native-acceptance
+      - installer-macos
+      - installer-windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Recover proved installers
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: hrrr-installer-*-${{ github.run_id }}
+          path: dist
+          merge-multiple: true
+      - name: Publish release and immutable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "HRRR ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

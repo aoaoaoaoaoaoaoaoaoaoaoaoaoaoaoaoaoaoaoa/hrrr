@@ -2,10 +2,12 @@
 
 use std::{borrow::Cow, fmt};
 
-pub const UI_FINGERPRINT: &str = "hrrr.ui/2";
+pub const UI_FINGERPRINT: &str = "hrrr.ui/3";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
 pub enum Target {
+    BasemapInstall,
     Field(&'static str),
     Map,
     Pin(usize),
@@ -16,6 +18,7 @@ impl Target {
     #[must_use]
     pub fn wire(self) -> Cow<'static, str> {
         match self {
+            Self::BasemapInstall => Cow::Borrowed("basemap.install"),
             Self::Field(name) => Cow::Owned(format!("field/{name}")),
             Self::Map => Cow::Borrowed("map.canvas"),
             Self::Pin(slot) => Cow::Owned(format!("map.pin/{slot}")),
@@ -47,5 +50,11 @@ mod tests {
             Target::Field("cloud-cover").wire(),
             Target::Field("smoke").wire()
         );
+    }
+
+    #[test]
+    fn first_contact_is_disjoint_from_the_ready_map() {
+        assert_eq!(Target::BasemapInstall.wire(), "basemap.install");
+        assert_ne!(Target::BasemapInstall.wire(), Target::Map.wire());
     }
 }

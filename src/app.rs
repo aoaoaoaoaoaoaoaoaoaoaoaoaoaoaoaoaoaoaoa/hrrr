@@ -28,6 +28,7 @@ use std::{
 
 const STATE_SETTLE: Duration = Duration::from_millis(450);
 const FRONTIER_POLL: Duration = Duration::from_mins(1);
+const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
 const FIELD_CAPACITY: usize = 12;
 const VECTOR_CEILING: usize = 512 * 1_048_576;
 const LATEST_RUN: egui::KeyboardShortcut =
@@ -38,6 +39,26 @@ const LATEST_LONG_RUN: egui::KeyboardShortcut = egui::KeyboardShortcut::new(
 );
 const UNDO_MAP_OBJECT: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+
+#[derive(Clone, Copy)]
+enum TileRejection {
+    Absent,
+    RetryAt(Instant),
+}
+
+impl TileRejection {
+    fn blocks(self, now: Instant) -> bool {
+        match self {
+            Self::Absent => true,
+            Self::RetryAt(deadline) => now < deadline,
+        }
+    }
+
+    const fn resolves(self) -> bool {
+        matches!(self, Self::Absent)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct SmokeScene {
     key: FrameKey,
@@ -266,7 +287,7 @@ pub struct WeatherApp {
     tiles: VectorBank,
     presented_basemap: Arc<[Arc<VectorTile>]>,
     tile_inflight: HashSet<TileKey>,
-    tile_faults: HashSet<TileKey>,
+    tile_rejections: HashMap<TileKey, TileRejection>,
     fold_focus: fold_ui::FoldCage,
     transient_probe: Option<MercatorPoint>,
     pin_tug: Option<PinTug>,
@@ -287,9 +308,7 @@ pub struct WeatherApp {
 }
 
 impl WeatherApp {
-    pub fn open(ctx: &egui::Context) -> Result<Self> {
-        let lair = Lair::claim()?;
-        let instance = lair.lock_instance()?;
+    pub fn open_at(ctx: &egui::Context, lair: Lair, instance: InstanceGuard) -> Result<Self> {
         let ConfigLoad {
             config,
             legacy_views,
@@ -312,7 +331,7 @@ impl WeatherApp {
         let run = slate.cycle.fixed();
         slate.active_view = Some(active_view.clone());
         let worker = Worker::spawn(ctx.clone(), &lair)?;
-        let basemap = Basemap::spawn(ctx.clone(), lair.basemap_path()?)?;
+        let basemap = Basemap::spawn(ctx.clone(), &lair)?;
         let custodian = Custodian::spawn(ctx.clone(), lair.cache_manager())?;
         let mut water = Surface::new(Wetness::Wet);
         {
@@ -354,7 +373,7 @@ impl WeatherApp {
             tiles: VectorBank::new(VECTOR_CEILING),
             presented_basemap: Arc::from([]),
             tile_inflight: HashSet::new(),
-            tile_faults: HashSet::new(),
+            tile_rejections: HashMap::new(),
             fold_focus: fold_ui::FoldCage::default(),
             transient_probe: None,
             pin_tug: None,
@@ -733,9 +752,14 @@ impl WeatherApp {
 
         let cover = basemap::cover(self.viewport, rect);
         self.demand_cover(&cover);
-        let coherent = cover
-            .finest_ready(|key| self.tiles.contains(key))
-            .map(|stratum| stratum.keys.clone());
+        let coherent = cover.finest_ready(|key| {
+            self.tiles.contains(key)
+                || self
+                    .tile_rejections
+                    .get(&key)
+                    .is_some_and(|rejection| rejection.resolves())
+        });
+        let coherent = coherent.map(|stratum| stratum.keys.clone());
         if let Some(keys) = coherent
             && (keys.len() != self.presented_basemap.len()
                 || keys
@@ -1028,6 +1052,7 @@ impl WeatherApp {
     pub fn witness_state(&self) -> crate::witness::State {
         crate::witness::State {
             contract: hrrr_contract::UI_FINGERPRINT,
+            launch: "ready",
             active_field: self
                 .slate
                 .overlay
@@ -1197,7 +1222,7 @@ impl WeatherApp {
         let _ink = painter.text(anchor, align, text, font, ink);
     }
 
-    fn absorb_events(&mut self, _ctx: &egui::Context) {
+    fn absorb_events(&mut self, ctx: &egui::Context) {
         while let Ok(message) = self.custodian.faults.try_recv() {
             self.status = message;
         }
@@ -1303,6 +1328,7 @@ impl WeatherApp {
                 basemap::Event::Loaded(tile) => {
                     let key = tile.key;
                     let _was_inflight = self.tile_inflight.remove(&key);
+                    let _rejection = self.tile_rejections.remove(&key);
                     self.basemap_status = format!(
                         "PROTOMAPS · OSM · {} KB · {} µs MAP + {} µs CUT",
                         tile.timing.bytes / 1024,
@@ -1313,14 +1339,23 @@ impl WeatherApp {
                 }
                 basemap::Event::Missing(key) => {
                     let _was_inflight = self.tile_inflight.remove(&key);
-                    let _fresh = self.tile_faults.insert(key);
+                    let _prior = self.tile_rejections.insert(key, TileRejection::Absent);
                 }
                 basemap::Event::Fault { key, message } => {
+                    let detail = key.is_some_and(TileKey::is_detail);
                     if let Some(key) = key {
                         let _was_inflight = self.tile_inflight.remove(&key);
-                        let _fresh = self.tile_faults.insert(key);
+                        let _prior = self.tile_rejections.insert(
+                            key,
+                            TileRejection::RetryAt(Instant::now() + TILE_RETRY_DELAY),
+                        );
+                        ctx.request_repaint_after(TILE_RETRY_DELAY);
                     }
-                    self.basemap_status = format!("BASEMAP UNAVAILABLE · {message}");
+                    self.basemap_status = if detail {
+                        format!("Z12 DETAIL OFFLINE · Z11 RETAINED · {message}")
+                    } else {
+                        format!("BASEMAP UNAVAILABLE · {message}")
+                    };
                 }
             }
         }
@@ -1793,9 +1828,17 @@ impl WeatherApp {
     }
 
     fn demand_tile(&mut self, key: TileKey) {
+        let rejected = match self.tile_rejections.get(&key).copied() {
+            Some(rejection) if rejection.blocks(Instant::now()) => true,
+            Some(_) => {
+                let _expired = self.tile_rejections.remove(&key);
+                false
+            }
+            None => false,
+        };
         if !self.tiles.contains(key)
             && !self.tile_inflight.contains(&key)
-            && !self.tile_faults.contains(&key)
+            && !rejected
             && self.basemap.request(key)
         {
             let _fresh = self.tile_inflight.insert(key);
@@ -2288,5 +2331,15 @@ mod tests {
         };
         let command = view_slot_command(&plain).map(|(slot, assign)| (slot.digit(), assign));
         assert_eq!(command, Some((7, false)));
+    }
+
+    #[test]
+    fn absent_tiles_are_final_while_faults_cool_down() {
+        let now = Instant::now();
+        assert!(TileRejection::Absent.blocks(now));
+        assert!(TileRejection::Absent.resolves());
+        assert!(TileRejection::RetryAt(now + TILE_RETRY_DELAY).blocks(now));
+        assert!(!TileRejection::RetryAt(now).resolves());
+        assert!(!TileRejection::RetryAt(now).blocks(now));
     }
 }
