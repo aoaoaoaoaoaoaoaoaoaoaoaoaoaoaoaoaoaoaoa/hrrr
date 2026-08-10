@@ -167,9 +167,9 @@ product-name = "HRRR"
 identifier = "moe.swarm.hrrr"
 publisher = "Eternalist"
 category = "Weather"
-license-file = "LICENSE"
 icons = ["assets/hrrr-32.png", "assets/hrrr-128.png", "assets/hrrr-256.png", "assets/hrrr-512.png", "assets/hrrr-512@2x.png", "assets/hrrr.ico"]
 binaries = [{ path = "HRRR", main = true }]
+resources = ["LICENSE"]
 
 [package.metadata.packager.macos]
 minimum-system-version = "13.0"

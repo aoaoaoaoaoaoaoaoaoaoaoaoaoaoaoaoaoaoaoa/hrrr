@@ -1368,9 +1368,25 @@ mod tests {
 
     fn serve_range(mut stream: TcpStream, bytes: &[u8]) -> Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        let mut request = [0_u8; 4096];
-        let read = stream.read(&mut request)?;
-        let request = std::str::from_utf8(&request[..read])?;
+        let mut request = [0_u8; 16 * 1024];
+        let mut filled = 0;
+        loop {
+            if filled == request.len() {
+                anyhow::bail!("range request headers exceed {} bytes", request.len());
+            }
+            let read = stream.read(&mut request[filled..])?;
+            if read == 0 {
+                anyhow::bail!("range request ended before its headers");
+            }
+            filled += read;
+            if request[..filled]
+                .windows(4)
+                .any(|bytes| bytes == b"\r\n\r\n")
+            {
+                break;
+            }
+        }
+        let request = std::str::from_utf8(&request[..filled])?;
         let range = request
             .lines()
             .find_map(|line| {
@@ -1395,6 +1411,7 @@ mod tests {
         )?;
         stream.write_all(body)?;
         stream.flush()?;
+        let _shutdown = stream.shutdown(std::net::Shutdown::Write);
         Ok(())
     }
 

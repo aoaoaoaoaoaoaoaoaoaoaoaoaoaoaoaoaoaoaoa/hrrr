@@ -53,12 +53,16 @@ try {
     }
     $InstallRoot = Join-Path $env:LOCALAPPDATA 'HRRR'
     $Binary = Join-Path $InstallRoot 'HRRR.exe'
+    $License = Join-Path $InstallRoot 'LICENSE'
     $Uninstaller = Join-Path $InstallRoot 'uninstall.exe'
     if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) {
         throw "installer did not place $Binary"
     }
     if (-not (Test-Path -LiteralPath $Uninstaller -PathType Leaf)) {
         throw "installer did not place $Uninstaller"
+    }
+    if (-not (Test-Path -LiteralPath $License -PathType Leaf)) {
+        throw "installer did not place $License"
     }
     Invoke-Exact $Binary --version
 
@@ -78,6 +82,9 @@ try {
     }
     if (Test-Path -LiteralPath $Binary) {
         throw "uninstaller left $Binary"
+    }
+    if (Test-Path -LiteralPath $License) {
+        throw "uninstaller left $License"
     }
     if (-not (Test-Path -LiteralPath $Sentinel -PathType Leaf)) {
         throw 'uninstaller destroyed user data'

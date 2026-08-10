@@ -59,6 +59,8 @@ mounted=true
     die 'DMG Applications drop target is misdirected'
 binary=$mount/HRRR.app/Contents/MacOS/HRRR
 [ -x "$binary" ] || die 'DMG contains no executable HRRR app'
+[ -f "$mount/HRRR.app/Contents/Resources/LICENSE" ] ||
+    die 'DMG omits the product license'
 lipo "$binary" -verify_arch arm64 x86_64
 "$binary" --version
 HRRR_PORTABILITY_BINARY=$binary \
