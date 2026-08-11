@@ -16,7 +16,7 @@ command -v lipo >/dev/null 2>&1 || die 'lipo is required'
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 target=${CARGO_TARGET_DIR:-$root/target}
 stage=$target/universal-apple-darwin/release
-out=${HRRR_PACKAGE_DIR:-$root/dist}
+out=${HRRR_PACKAGE_DIR:-${FOUNDRY_ARTIFACT_DIR:-$root/dist}}
 raw=$target/hrrr-macos-package-$$
 artifact=$out/hrrr-macos-universal.dmg
 
@@ -25,6 +25,7 @@ mkdir -p "$stage" "$out" "$raw"
 
 export MACOSX_DEPLOYMENT_TARGET=13.0
 cd "$root"
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo build --release --locked --package hrrr \
     --bin HRRR --features desktop-launcher,egui-test \
     --target aarch64-apple-darwin

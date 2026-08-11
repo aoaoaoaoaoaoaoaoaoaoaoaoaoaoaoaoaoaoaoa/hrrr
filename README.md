@@ -9,8 +9,9 @@ thread.
 
 ## Install
 
-HRRR requires a working wgpu-compatible graphics stack. Releases support
-Linux/X11, macOS 13 or newer on Apple Silicon and Intel, and 64-bit Windows.
+HRRR requires a working wgpu-compatible graphics stack. Releases support Linux
+on X11 and Wayland, macOS 13 or newer on Apple Silicon and Intel, and 64-bit
+Windows.
 
 On Linux, install the ordinary command-line package with Rust 1.96 or newer:
 
@@ -52,9 +53,9 @@ hrrr basemap status
 hrrr basemap remove
 ```
 
-Linux uses an XEmbed tray; lack of a tray degrades window-close behavior to
-ordinary termination. macOS and Windows use their native tray facilities.
-Linux/Wayland is not yet a release coordinate.
+Linux/X11 uses an XEmbed tray. Pure Wayland has no tray integration, so
+window-close behavior degrades to ordinary termination. macOS and Windows use
+their native tray facilities.
 
 ## Use
 
@@ -125,10 +126,13 @@ field selection and restart restoration; transient and persistent probes; pin
 drag and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence
 is retained under `/tmp/hrrr-acceptance-artifacts` by default.
 
-The portability controller launches the real witnessed product on macOS arm64,
-macOS x86_64, and Windows x86_64. It requires CLI identity, native tray
-construction, a successfully presented GPU frame, the current HRRR witness
-contract, first-contact basemap consent, and the map surface. Installer jobs
+The Foundry contract runs one native runtime proof on Linux/X11,
+Linux/Wayland, macOS arm64, macOS x86_64, and Windows x86_64. The Wayland cell
+owns a headless Weston compositor and requires both a witnessed surface present
+and captured nonblack output; it makes no native-input parity claim. X11 keeps
+the full native interaction suite. The macOS and Windows controllers require
+CLI identity, a successfully presented GPU frame, the current HRRR witness
+contract, first-contact basemap consent, and the map surface. Installer cells
 also forge a universal DMG and an NSIS package, install or mount the exact
 artifact, rerun the controller against the packaged executable, and prove
 uninstallation without user-data loss.
@@ -138,8 +142,8 @@ release it first with `scripts/release-contract VERSION publish`; only after
 that exact version is visible on crates.io may `scripts/release VERSION
 publish` seal the application. Both release commands require a clean, pushed
 `main` checkout and a valid signed tag at `HEAD`. A version tag publishes the
-installers only after every source, security, package, host, lifecycle, and
-native-acceptance job passes.
+installers only after Foundry judges the complete source, security, package,
+host, lifecycle, native-acceptance, and artifact evidence graph.
 
 ## License
 

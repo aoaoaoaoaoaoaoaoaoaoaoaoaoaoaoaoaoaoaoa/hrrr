@@ -15,6 +15,24 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRAY_FAILURE: &str = "could not raise HRRR tray icon";
 
 fn main() -> Result<()> {
+    let mut arguments = std::env::args_os().skip(1);
+    let mode = arguments.next();
+    ensure!(
+        arguments.next().is_none(),
+        "hrrr-portability accepts at most one mode"
+    );
+    match mode.as_deref() {
+        None => prove_present(),
+        Some(mode) if mode == "present" => prove_present(),
+        Some(mode) if mode == "lifecycle" => prove_lifecycle(),
+        Some(mode) => bail!(
+            "unknown hrrr-portability mode {}; expected `present` or `lifecycle`",
+            Path::new(mode).display()
+        ),
+    }
+}
+
+fn prove_present() -> Result<()> {
     let binary = binary()?;
     prove_cli(&binary)?;
     prove_first_contact(&binary)?;
@@ -71,6 +89,73 @@ fn main() -> Result<()> {
         "HRRR portability passed: {} {}",
         std::env::consts::OS,
         std::env::consts::ARCH
+    );
+    Ok(())
+}
+
+fn prove_lifecycle() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .context("resolve HRRR workspace root")?;
+    let cell = tempfile::Builder::new()
+        .prefix("hrrr-lifecycle-")
+        .tempdir()
+        .context("forge installation lifecycle cell")?;
+    let prefix = cell.path().join("prefix");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+
+    let mut install = Command::new(&cargo);
+    let _install = install
+        .arg("install")
+        .arg("--path")
+        .arg(&root)
+        .arg("--root")
+        .arg(&prefix)
+        .args(["--locked", "--force"]);
+    run_checked(&mut install, "install ordinary HRRR product")?;
+
+    let binary = prefix
+        .join("bin")
+        .join(format!("hrrr{}", std::env::consts::EXE_SUFFIX));
+    ensure!(
+        binary.is_file(),
+        "cargo install omitted {}",
+        binary.display()
+    );
+    prove_cli(&binary)?;
+
+    let mut uninstall = Command::new(cargo);
+    let _uninstall = uninstall
+        .arg("uninstall")
+        .arg("--root")
+        .arg(&prefix)
+        .arg("hrrr");
+    run_checked(&mut uninstall, "uninstall ordinary HRRR product")?;
+    ensure!(
+        !binary.exists(),
+        "cargo uninstall left {}",
+        binary.display()
+    );
+    println!(
+        "HRRR lifecycle passed: {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    Ok(())
+}
+
+fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
+    let invocation = format!("{command:?}");
+    let output = command
+        .output()
+        .with_context(|| format!("{operation}: {invocation}"))?;
+    ensure!(
+        output.status.success(),
+        "{operation} failed with {}: {invocation}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
 }

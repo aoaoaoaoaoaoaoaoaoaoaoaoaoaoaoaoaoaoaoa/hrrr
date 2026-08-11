@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+coordinate=${FOUNDRY_COORDINATE:?FOUNDRY_COORDINATE is required}
+if [ -n "${FOUNDRY_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FOUNDRY_EVIDENCE_DIR/diagnostics"
+    export HRRR_ACCEPTANCE_ARTIFACTS=$FOUNDRY_EVIDENCE_DIR/diagnostics/acceptance
+    export HRRR_PORTABILITY_ARTIFACTS=$FOUNDRY_EVIDENCE_DIR/diagnostics/portability
+fi
+
+cargo test --locked \
+    --package hrrr \
+    --package hrrr-contract \
+    --package hrrr-portability \
+    --all-targets \
+    --all-features
+cargo run --release --locked --package hrrr-portability -- lifecycle
+
+case "$coordinate" in
+    linux-x86_64-x11-vulkan)
+        backend=x11
+        ;;
+    linux-x86_64-wayland-vulkan)
+        backend=wayland
+        ;;
+    macos-aarch64-metal|macos-x86_64-metal|windows-x86_64-dx12)
+        cargo build --release --locked --package hrrr --features egui-test
+        cargo run --release --locked --package hrrr-portability -- present
+        exit 0
+        ;;
+    *)
+        printf 'unsupported HRRR runtime coordinate: %s\n' "$coordinate" >&2
+        exit 64
+        ;;
+esac
+
+cargo build --release --locked --bin hrrr --features egui-test
+cargo build --release --locked --package hrrr-acceptance
+cargo run --release --locked --package hrrr-acceptance -- \
+    --smoke --backend "$backend"

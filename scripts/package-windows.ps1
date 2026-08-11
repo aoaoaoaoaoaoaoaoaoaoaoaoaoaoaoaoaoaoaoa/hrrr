@@ -25,7 +25,15 @@ if ($LASTEXITCODE -ne 0 -or $PackagerVersion -ne 'cargo-packager 0.11.8') {
 
 $Root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $Target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
-$Out = if ($env:HRRR_PACKAGE_DIR) { $env:HRRR_PACKAGE_DIR } else { Join-Path $Root 'dist' }
+$Out = if ($env:HRRR_PACKAGE_DIR) {
+    $env:HRRR_PACKAGE_DIR
+}
+elseif ($env:FOUNDRY_ARTIFACT_DIR) {
+    $env:FOUNDRY_ARTIFACT_DIR
+}
+else {
+    Join-Path $Root 'dist'
+}
 $Raw = Join-Path $Target "hrrr-windows-package-$PID"
 $Triple = 'x86_64-pc-windows-msvc'
 $Artifact = Join-Path $Out 'hrrr-windows-x86_64-setup.exe'

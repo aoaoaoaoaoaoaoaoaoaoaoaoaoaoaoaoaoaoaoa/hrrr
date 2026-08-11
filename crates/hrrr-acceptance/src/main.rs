@@ -5,7 +5,7 @@ mod stories;
 
 use std::{env, path::PathBuf};
 
-use egui_tester::{Error, Result, TestbedBuilder};
+use egui_tester::{Backend, Error, Result, TestbedBuilder, WaylandConfig, X11Config};
 
 fn main() -> Result<()> {
     let cli = Cli::parse()?;
@@ -15,7 +15,7 @@ fn main() -> Result<()> {
     let artifacts = cli
         .artifacts
         .or_else(|| env::var_os("HRRR_ACCEPTANCE_ARTIFACTS").map(PathBuf::from));
-    let mut builder = TestbedBuilder::default();
+    let mut builder = TestbedBuilder::default().backend(cli.backend);
     if let Some(artifacts) = &artifacts {
         builder = builder.failure_artifacts(artifacts);
     }
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         let _fixtures = fixture::FixtureWorld::raise(testbed)?;
         let harness = harness::Harness::new(testbed, &binary, artifacts.as_deref());
         if cli.smoke {
-            stories::smoke(&harness)
+            stories::smoke(&harness, cli.backend)
         } else {
             stories::run(&harness, cli.story.as_deref())
         }
@@ -34,6 +34,7 @@ struct Cli {
     story: Option<String>,
     artifacts: Option<PathBuf>,
     smoke: bool,
+    backend: Backend,
 }
 
 impl Cli {
@@ -42,6 +43,7 @@ impl Cli {
         let mut story = None;
         let mut artifacts = None;
         let mut smoke = false;
+        let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
             match argument.to_str() {
                 Some("--story") => {
@@ -55,6 +57,19 @@ impl Cli {
                     artifacts = Some(PathBuf::from(required(&mut args, "--artifacts")?));
                 }
                 Some("--smoke") => smoke = true,
+                Some("--backend") => {
+                    let value = required(&mut args, "--backend")?;
+                    backend = match value.to_str() {
+                        Some("x11") => Backend::X11(X11Config::default()),
+                        Some("wayland") => Backend::Wayland(WaylandConfig::default()),
+                        Some(value) => {
+                            return Err(verdict(format!(
+                                "unknown acceptance backend `{value}`; expected x11 or wayland"
+                            )));
+                        }
+                        None => return Err(verdict("acceptance backend must be valid Unicode")),
+                    };
+                }
                 Some(flag) => return Err(verdict(format!("unknown acceptance option `{flag}`"))),
                 None => return Err(verdict("acceptance options must be valid Unicode")),
             }
@@ -62,10 +77,16 @@ impl Cli {
         if smoke && story.is_some() {
             return Err(verdict("--smoke and --story are mutually exclusive"));
         }
+        if matches!(backend, Backend::Wayland(_)) && !smoke {
+            return Err(verdict(
+                "Wayland admits launch-and-capture smoke only; native stories require X11",
+            ));
+        }
         Ok(Self {
             story,
             artifacts,
             smoke,
+            backend,
         })
     }
 }
