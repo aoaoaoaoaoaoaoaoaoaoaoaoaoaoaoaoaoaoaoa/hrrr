@@ -139,13 +139,14 @@ also forge a universal DMG and an NSIS package, install or mount the exact
 artifact, rerun the controller against the packaged executable, and prove
 uninstallation without user-data loss.
 
-The UI vocabulary is a separately published dependency. When it changes,
-release it first with `scripts/release-contract VERSION publish`; only after
-that exact version is visible on crates.io may `scripts/release VERSION
-publish` seal the application. Both release commands require a clean, pushed
-`main` checkout and a valid signed tag at `HEAD`. A version tag publishes the
-installers only after Foundry judges the complete source, security, package,
-host, lifecycle, native-acceptance, and artifact evidence graph.
+The UI vocabulary is a separately versioned dependency.
+`scripts/release-contract VERSION publish` can release it independently;
+`scripts/release VERSION publish` publishes any missing contract version,
+waits for the registry, then publishes the application. Both release commands
+require a clean, pushed `main` checkout and a valid signed tag at `HEAD`. A
+version tag publishes the installers only after Foundry judges the complete
+source, security, package, host, lifecycle, native-acceptance, and artifact
+evidence graph.
 
 ## License
 
