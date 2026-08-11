@@ -96,10 +96,15 @@ mod tests {
     use anyhow::Result;
     use serde::{Deserialize, Serialize};
     use std::{
-        sync::{Arc, Barrier},
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicU64, Ordering},
+        },
         thread,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct Testament {
@@ -112,8 +117,11 @@ mod tests {
     impl TestRoot {
         fn forge() -> Result<Self> {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-            let path =
-                std::env::temp_dir().join(format!("hrrr-persist-{}-{nonce}", std::process::id()));
+            let serial = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "hrrr-persist-{}-{nonce}-{serial}",
+                std::process::id()
+            ));
             std::fs::create_dir(&path)?;
             Ok(Self(path))
         }
