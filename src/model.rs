@@ -721,7 +721,8 @@ impl Default for Viewport {
 
 impl Viewport {
     pub const MIN_ZOOM: f64 = 1.0;
-    pub const MAX_ZOOM: f64 = 24.0;
+    /// About two kilometres across 1,920 points at the default 38.5° latitude.
+    pub const MAX_ZOOM: f64 = 16.85;
 
     pub fn normalize(&mut self) {
         if !self.center_mercator.iter().all(|v| v.is_finite()) {

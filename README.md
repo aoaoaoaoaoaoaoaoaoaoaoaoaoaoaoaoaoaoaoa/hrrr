@@ -65,11 +65,13 @@ run, and the latest 48-hour run. Cumulative fields add a **Base hour** rail;
 their map shows the increment from that hour through the selected forecast
 hour.
 
-Drag to pan and scroll at the pointer to zoom. A left click moves the transient
-probe; `Shift`-left-click creates a persistent probe. Drag a persistent probe
-by its bulb and remove it with its adjacent ×. `Esc` clears the transient
-probe. `Ctrl+Z` undoes probe placement, movement, removal, and transient
-clearing. Map navigation and saved-view operations remain outside that history.
+Drag to pan and scroll at the pointer to zoom. The map scale appears at lower
+left; maximum zoom is roughly two kilometres across a full-HD viewport. A left
+click moves the transient probe; `Shift`-left-click creates a persistent probe.
+Drag a persistent probe by its bulb and remove it with its adjacent ×. `Esc`
+clears the transient probe. `Ctrl+Z` undoes probe placement, movement, removal,
+and transient clearing. Map navigation and saved-view operations remain outside
+that history.
 
 Every map position and persistent-probe set belongs to the active saved view
 and is autosaved. The + control clones the active view. Numeric keys select

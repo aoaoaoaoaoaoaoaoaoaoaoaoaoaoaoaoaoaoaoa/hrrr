@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use egui_tester::{Button, Condition, Key, Modifiers, Result, demand};
+use egui_tester::{Button, Condition, Key, Modifiers, Result, Wheel, demand};
 use serde::Deserialize;
 
 use crate::{
@@ -10,8 +10,8 @@ use crate::{
 
 pub fn run(harness: &Harness<'_>) -> Result<()> {
     let origin = place_and_persist(harness)?;
-    drag_undo_and_persist(harness, origin)?;
-    prove_final_restart(harness, origin)
+    let zoom_ceiling = drag_undo_and_persist(harness, origin)?;
+    prove_final_restart(harness, origin, zoom_ceiling)
 }
 
 fn place_and_persist(harness: &Harness<'_>) -> Result<[f64; 2]> {
@@ -66,7 +66,7 @@ fn place_and_persist(harness: &Harness<'_>) -> Result<[f64; 2]> {
     Ok(origin)
 }
 
-fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<()> {
+fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<f64> {
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
     let _restored = story.wait(shows::pin(0, origin))?;
@@ -109,16 +109,49 @@ fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<()> 
             .capture()?
             .save_png(artifacts.join("map-objects.png"))?;
     }
+    let map = story.anchor(hrrr_contract::Target::Map)?;
+    let zoom_ceiling = batter_zoom_ceiling(&mut story, map.center())?;
+    let _settled = story.wait_stable(
+        Duration::from_secs(4),
+        Duration::from_millis(700),
+        "zoom ceiling to survive the autosave interval",
+        |frame| (frame.state.viewport.zoom.to_bits() == zoom_ceiling.to_bits()).then_some(()),
+    )?;
     app.terminate()?;
     drop(story);
     drop(app);
     demand(
         persisted_pin(harness, 0).is_some_and(|point| near(point, origin)),
         "undo restored the witness but not views.toml",
-    )
+    )?;
+    Ok(zoom_ceiling)
 }
 
-fn prove_final_restart(harness: &Harness<'_>, origin: [f64; 2]) -> Result<()> {
+fn batter_zoom_ceiling(
+    story: &mut crate::harness::HrrrStory<'_, '_>,
+    center: (i16, i16),
+) -> Result<f64> {
+    let wheel = Wheel {
+        tick_duration: Duration::from_millis(2),
+    };
+    let zoomed = story.wheel(center, -64, wheel)?.next_frame()?.into_value();
+    let ceiling = zoomed.state.viewport.zoom;
+    demand(
+        (16.0..=17.0).contains(&ceiling),
+        format!("rapid wheel gesture stopped at implausible zoom {ceiling}"),
+    )?;
+    let battered = story.wheel(center, -64, wheel)?.next_frame()?.into_value();
+    demand(
+        battered.state.viewport.zoom.to_bits() == ceiling.to_bits(),
+        format!(
+            "continued wheel input breached zoom ceiling {ceiling} with {}",
+            battered.state.viewport.zoom
+        ),
+    )?;
+    Ok(ceiling)
+}
+
+fn prove_final_restart(harness: &Harness<'_>, origin: [f64; 2], zoom_ceiling: f64) -> Result<()> {
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
     let restored = story.wait(shows::pin(0, origin))?;
@@ -127,14 +160,14 @@ fn prove_final_restart(harness: &Harness<'_>, origin: [f64; 2]) -> Result<()> {
         "restart resurrected a transient probe",
     )?;
     demand(
-        restored.state.viewport.zoom.is_finite()
+        restored.state.viewport.zoom.to_bits() == zoom_ceiling.to_bits()
             && restored
                 .state
                 .viewport
                 .center
                 .into_iter()
                 .all(f64::is_finite),
-        "restart produced a corrupt viewport",
+        "restart lost or corrupted the saturated viewport",
     )?;
     app.terminate()
 }

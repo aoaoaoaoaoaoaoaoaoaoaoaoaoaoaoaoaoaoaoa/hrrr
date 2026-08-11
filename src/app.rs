@@ -299,6 +299,7 @@ pub struct WeatherApp {
     scales: ScaleAtlas,
     smoke_regime: SmokeRegime,
     smoke_survey: SmokeSurvey,
+    scale_bar: map::ScaleBar,
     water: Surface,
     dirty: Option<Instant>,
     config_dirty: Option<Instant>,
@@ -389,6 +390,7 @@ impl WeatherApp {
             scales: ScaleAtlas::default(),
             smoke_regime: SmokeRegime::default(),
             smoke_survey: SmokeSurvey::default(),
+            scale_bar: map::ScaleBar::default(),
             water,
             dirty: migrated_slate.then(Instant::now),
             config_dirty: had_legacy_views.then(Instant::now),
@@ -860,6 +862,7 @@ impl WeatherApp {
         if let Some(scale) = legend_scale.as_ref() {
             Self::legend(&painter, rect, scale);
         }
+        self.scale_bar.paint(&painter, self.viewport, rect);
         let _edge = painter.rect_stroke(
             rect.shrink(0.5),
             0.0,

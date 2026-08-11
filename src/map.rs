@@ -4,13 +4,63 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const TILE_EDGE: f64 = 256.0;
+const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
 const VISIBLE_SAMPLE_PITCH: f32 = 16.0;
 /// A North American overview: about 59°N to 9°N at the default center.
 const MAX_VERTICAL_WORLD_SPAN: f64 = 0.18;
 const SCALE_CAPACITY: usize = 128;
+
+#[derive(Debug, Default)]
+pub struct ScaleBar {
+    current_m: Option<f64>,
+    born: Option<Instant>,
+    departing: Option<(f64, Instant)>,
+}
+
+impl ScaleBar {
+    pub fn paint(&mut self, painter: &egui::Painter, view: Viewport, rect: egui::Rect) {
+        let meters_per_point = ground_meters_per_point(view);
+        let target = pleasant_length(meters_per_point * 105.0);
+        let current = self.current_m.get_or_insert(target);
+        let current_width = *current / meters_per_point;
+        if current.to_bits() != target.to_bits() && !(72.0..=148.0).contains(&current_width) {
+            self.departing = Some((*current, Instant::now()));
+            *current = target;
+            self.born = Some(Instant::now());
+        }
+
+        let now = Instant::now();
+        if let Some((departing, begun)) = self.departing {
+            let maturity = smooth_transition(now.saturating_duration_since(begun));
+            paint_scale_length(painter, rect, departing, meters_per_point, 1.0 - maturity);
+            if maturity >= 1.0 {
+                self.departing = None;
+            } else {
+                painter.ctx().request_repaint();
+            }
+        }
+        let maturity = self.born.map_or(1.0, |begun| {
+            smooth_transition(now.saturating_duration_since(begun))
+        });
+        paint_scale_length(painter, rect, *current, meters_per_point, maturity);
+        if maturity < 1.0 {
+            painter.ctx().request_repaint();
+        } else {
+            self.born = None;
+        }
+    }
+}
+
+fn smooth_transition(elapsed: Duration) -> f32 {
+    let phase = (elapsed.as_secs_f32() / 0.16).clamp(0.0, 1.0);
+    phase * phase * 2.0_f32.mul_add(-phase, 3.0)
+}
 
 #[derive(Clone)]
 pub struct FieldPaint {
@@ -296,6 +346,11 @@ pub fn world_pixels(view: Viewport) -> f64 {
     TILE_EDGE * view.zoom.exp2()
 }
 
+fn ground_meters_per_point(view: Viewport) -> f64 {
+    let latitude = lon_lat_at(view.center_mercator)[1].to_radians();
+    EARTH_CIRCUMFERENCE_M * latitude.cos() / world_pixels(view)
+}
+
 pub fn minimum_zoom(viewport_height: f32) -> f64 {
     (f64::from(viewport_height.max(1.0)) / (TILE_EDGE * MAX_VERTICAL_WORLD_SPAN))
         .log2()
@@ -367,6 +422,72 @@ pub fn visible_peak(field: &FieldGrid, view: Viewport, rect: egui::Rect) -> Opti
         }
     }
     peak
+}
+
+fn pleasant_length(target: f64) -> f64 {
+    let exponent = target.max(1.0).log10().floor();
+    let magnitude = 10_f64.powf(exponent);
+    let unit = target / magnitude;
+    let step = if unit >= 5.0 {
+        5.0
+    } else if unit >= 2.0 {
+        2.0
+    } else {
+        1.0
+    };
+    step * magnitude
+}
+
+fn paint_scale_length(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    meters: f64,
+    meters_per_point: f64,
+    maturity: f32,
+) {
+    let width = (meters / meters_per_point) as f32;
+    let origin = egui::pos2(rect.left() + 18.0, rect.bottom() - 19.0);
+    let paper = egui::Color32::from_white_alpha(220).gamma_multiply(maturity);
+    let ink = egui::Color32::from_rgb(35, 31, 26).gamma_multiply(maturity);
+    for stroke in [
+        egui::Stroke::new(4.0_f32, paper),
+        egui::Stroke::new(1.5_f32, ink),
+    ] {
+        let _bar = painter.line_segment([origin, origin + egui::vec2(width, 0.0)], stroke);
+        let _left = painter.line_segment(
+            [origin - egui::vec2(0.0, 4.0), origin + egui::vec2(0.0, 4.0)],
+            stroke,
+        );
+        let _right = painter.line_segment(
+            [
+                origin + egui::vec2(width, -4.0),
+                origin + egui::vec2(width, 4.0),
+            ],
+            stroke,
+        );
+    }
+    let label = if meters >= 1_000.0 {
+        format!("{:.0} km", meters / 1_000.0)
+    } else {
+        format!("{meters:.0} m")
+    };
+    let anchor = origin + egui::vec2(width * 0.5, -5.0);
+    let font = egui::FontId::monospace(11.0);
+    for offset in [
+        egui::vec2(-1.0, 0.0),
+        egui::vec2(1.0, 0.0),
+        egui::vec2(0.0, -1.0),
+        egui::vec2(0.0, 1.0),
+    ] {
+        let _halo = painter.text(
+            anchor + offset,
+            egui::Align2::CENTER_BOTTOM,
+            &label,
+            font.clone(),
+            paper,
+        );
+    }
+    let _ink = painter.text(anchor, egui::Align2::CENTER_BOTTOM, label, font, ink);
 }
 
 const WGSL: &str = r"
@@ -501,6 +622,26 @@ mod tests {
         assert!((half_span.mul_add(2.0, -MAX_VERTICAL_WORLD_SPAN)).abs() < 1e-12);
         assert!((58.0..62.0).contains(&north));
         assert!((5.0..15.0).contains(&south));
+    }
+
+    #[test]
+    fn zoom_ceiling_spans_about_two_kilometres_at_the_default_latitude() {
+        let view = Viewport {
+            zoom: Viewport::MAX_ZOOM,
+            ..Viewport::default()
+        };
+        let full_hd_span_m = ground_meters_per_point(view) * 1_920.0;
+        assert!((1_950.0..=2_050.0).contains(&full_hd_span_m));
+    }
+
+    #[test]
+    fn scale_lengths_are_one_two_or_five_decades() {
+        for target in [3.0, 27.0, 650.0, 8_400.0] {
+            let length = pleasant_length(target);
+            let decade = 10_f64.powf(length.log10().floor());
+            assert!([1.0, 2.0, 5.0].contains(&(length / decade)));
+            assert!(length <= target);
+        }
     }
 
     #[test]
