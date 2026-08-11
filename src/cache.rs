@@ -330,15 +330,23 @@ fn reap_blade(blade: &Blade, tally: &mut PurgeTally) -> Result<()> {
 mod tests {
     use super::*;
     use anyhow::anyhow;
-    use std::sync::Barrier;
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
     struct TestRoot(PathBuf);
 
     impl TestRoot {
         fn forge() -> Result<Self> {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-            let path =
-                std::env::temp_dir().join(format!("hrrr-cache-{}-{nonce}", std::process::id()));
+            let serial = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "hrrr-cache-{}-{nonce}-{serial}",
+                std::process::id()
+            ));
             std::fs::create_dir(&path)?;
             Ok(Self(path))
         }
