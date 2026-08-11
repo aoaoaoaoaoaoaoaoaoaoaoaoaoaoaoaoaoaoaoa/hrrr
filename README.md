@@ -147,12 +147,13 @@ uninstallation without user-data loss.
 
 The UI vocabulary is a separately versioned dependency.
 `scripts/release-contract VERSION publish` can release it independently;
-`scripts/release VERSION publish` publishes any missing contract version,
-waits for the registry, then publishes the application. Both release commands
-require a clean, pushed `main` checkout and a valid signed tag at `HEAD`. A
-version tag publishes the installers only after Foundry judges the complete
-source, security, package, host, lifecycle, native-acceptance, and artifact
-evidence graph.
+`scripts/release VERSION publish` proves and publishes any missing contract
+version, waits for the registry boundary, verifies the isolated application
+tarball against that exact dependency, then publishes the application. Both
+release commands require a clean, pushed `main` checkout and a valid signed tag
+at `HEAD`. A version tag publishes the installers only after Foundry judges the
+complete source, security, package, host, lifecycle, native-acceptance, and
+artifact evidence graph.
 
 ## License
 

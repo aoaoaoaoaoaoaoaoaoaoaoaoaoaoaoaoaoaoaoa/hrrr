@@ -65,10 +65,19 @@ scripts/check
 scripts/audit
 scripts/verify-install
 scripts/test-gui
+
+# Cargo verifies a packaged path dependency through its registry declaration.
+# A new contract must therefore cross the registry boundary before the app
+# tarball can be judged in the same isolated manner.
+cargo package --locked --package hrrr-contract
+if [ "$mode" = publish ]; then
+    publish_once hrrr-contract "$contract_version"
+elif ! is_published hrrr-contract "$contract_version"; then
+    die "hrrr-contract@$contract_version must be published before the app package can be verified"
+fi
 scripts/package
 
 if [ "$mode" = publish ]; then
-    publish_once hrrr-contract "$contract_version"
     publish_once hrrr "$version"
     scripts/package
 else
