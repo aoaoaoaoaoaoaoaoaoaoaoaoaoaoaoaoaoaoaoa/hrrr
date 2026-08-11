@@ -834,9 +834,9 @@ dependencies = [
 
 [[package]]
 name = "eternalist-apps"
-version = "0.4.1"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2123c7e9b12cc2c79f58f3440ae106a329f0c9011625fca973821f7157f4aed"
+checksum = "09159850ac48b30652ff07062cfbb43f0719ecb396fb6518232e958343797f6a"
 dependencies = [
  "anyhow",
  "dwemer_poolrooms",
@@ -1249,7 +1249,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hrrr"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "atomic-write-file",
