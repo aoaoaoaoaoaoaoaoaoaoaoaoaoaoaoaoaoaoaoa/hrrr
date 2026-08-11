@@ -16,6 +16,6 @@ jobs:
     name: Foundry
     permissions:
       contents: write
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@5e36ae096ce9f3aaed485d5badad3845766f94b0
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@c56eab169403d94596c0bce8925dcc1938eb74c5
     with:
       publish: ${{ startsWith(github.ref, 'refs/tags/v') }}

@@ -4,5 +4,6 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-cargo package --locked --package hrrr-contract
-cargo package --locked --package hrrr
+cargo package --workspace --locked \
+    --exclude hrrr-acceptance \
+    --exclude hrrr-portability
