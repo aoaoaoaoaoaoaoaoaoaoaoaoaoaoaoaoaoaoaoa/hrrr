@@ -59,11 +59,16 @@ their native tray facilities.
 
 ## Use
 
-Click an active field button again to show only the basemap. The arrow keys,
-forecast rail, `Ctrl+R`, and `Ctrl+Shift+R` select forecast time, the latest
-run, and the latest 48-hour run. Cumulative fields add a **Base hour** rail;
-their map shows the increment from that hour through the selected forecast
-hour.
+Click an active field button again to show only the basemap. Focus a forecast
+rail to adjust it with the arrow keys; a hovered rail also accepts the mouse
+wheel. `Ctrl+R` and `Ctrl+Shift+R` select the latest run and latest 48-hour run.
+Cumulative fields add a **Base hour** rail; their map shows the increment from
+that hour through the selected forecast hour.
+
+Press `F1` or `?` for the generated command guide. `Tab` and `Shift+Tab` move
+within the active inspector panel; `Ctrl+Tab` and `Ctrl+Shift+Tab` cross panels.
+Permanently underlined letters mark conservative `Alt` mnemonics. The guide
+owns keyboard input while open, and `Esc` closes only its topmost layer.
 
 Drag to pan and scroll at the pointer to zoom. The map scale appears at lower
 left; maximum zoom is roughly two kilometres across a full-HD viewport. A left
@@ -124,9 +129,10 @@ Run the non-mutating source gate with `./check.py verify`. `scripts/test-gui`
 builds the optimized product twice, first ordinarily and then with its one-way
 test witness, and runs the complete Linux suite in private X11, XDG, process,
 network, and software-graphics namespaces. The stories prove inert launch;
-field selection and restart restoration; transient and persistent probes; pin
-drag and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence
-is retained under `/tmp/hrrr-acceptance-artifacts` by default.
+generated-help presentation and keyboard containment; panel traversal; field
+selection and restart restoration; transient and persistent probes; pin drag
+and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence is
+retained under `/tmp/hrrr-acceptance-artifacts` by default.
 
 The Foundry contract runs one native runtime proof on Linux/X11,
 Linux/Wayland, macOS arm64, macOS x86_64, and Windows x86_64. The Wayland cell

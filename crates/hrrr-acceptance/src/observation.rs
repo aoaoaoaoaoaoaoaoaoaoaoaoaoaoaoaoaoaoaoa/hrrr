@@ -12,6 +12,8 @@ pub struct Observation {
     pub pins: Vec<[f64; 2]>,
     pub transient_probe: Option<[f64; 2]>,
     pub dragging_pin: Option<usize>,
+    pub guide_open: bool,
+    pub close_minimizes: bool,
     pub viewport: Viewport,
 }
 

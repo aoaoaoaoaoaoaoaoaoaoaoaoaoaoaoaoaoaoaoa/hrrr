@@ -2,7 +2,7 @@ use crate::{
     basemap::{self, Basemap, TileKey, VectorTile},
     cache::Custodian,
     config::{Config, ConfigLoad},
-    fold_ui,
+    decrees::{self, Decree},
     library::EntryName,
     library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
     map::{self, FieldPaint},
@@ -20,6 +20,11 @@ use dwemer_poolrooms::{
     water::{Domain, Frame as WaterFrame, Surface, Wetness},
 };
 use egui::Color32;
+use eternalist_apps::{
+    command_guide::{CommandGuide, GuideGesture, GuideSection, PANEL_IDIOMS, RAIL_IDIOMS},
+    commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
+    panel_navigation::PanelNavigator,
+};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -31,14 +36,44 @@ const FRONTIER_POLL: Duration = Duration::from_mins(1);
 const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
 const FIELD_CAPACITY: usize = 12;
 const VECTOR_CEILING: usize = 512 * 1_048_576;
-const LATEST_RUN: egui::KeyboardShortcut =
-    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::R);
-const LATEST_LONG_RUN: egui::KeyboardShortcut = egui::KeyboardShortcut::new(
-    egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
-    egui::Key::R,
-);
-const UNDO_MAP_OBJECT: egui::KeyboardShortcut =
-    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+const VIEW_SLOT_KEYS: [Shortcut; 10] = [
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('0')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('1')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('2')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('3')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('4')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('5')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('6')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('7')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('8')),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('9')),
+];
+const ASSIGN_VIEW_SLOT_KEYS: [Shortcut; 10] = [
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('0')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('1')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('2')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('3')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('4')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('5')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('6')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('7')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('8')),
+    Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('9')),
+];
+const VIEW_GESTURES: [GuideGesture; 2] = [
+    GuideGesture::new(
+        "Select bound view",
+        "Loads the view assigned to one numeric berth.",
+        &VIEW_SLOT_KEYS,
+    ),
+    GuideGesture::new(
+        "Bind active view",
+        "Assigns the current view to one numeric berth.",
+        &ASSIGN_VIEW_SLOT_KEYS,
+    ),
+];
+const VIEW_IDIOMS: GuideSection = GuideSection::new("VIEW BERTHS", &VIEW_GESTURES);
+const GUIDE_SECTIONS: [GuideSection; 3] = [PANEL_IDIOMS, RAIL_IDIOMS, VIEW_IDIOMS];
 
 #[derive(Clone, Copy)]
 enum TileRejection {
@@ -141,6 +176,12 @@ impl MapUndo {
             let _forgotten = self.reversals.pop_front();
         }
         self.reversals.push_back(reversal);
+    }
+
+    fn has_reversal_for(&self, view: &EntryName) -> bool {
+        self.reversals
+            .iter()
+            .any(|reversal| reversal.belongs_to(view))
     }
 
     fn recoil(
@@ -288,7 +329,8 @@ pub struct WeatherApp {
     presented_basemap: Arc<[Arc<VectorTile>]>,
     tile_inflight: HashSet<TileKey>,
     tile_rejections: HashMap<TileKey, TileRejection>,
-    fold_focus: fold_ui::FoldCage,
+    panels: PanelNavigator,
+    guide: CommandGuide,
     transient_probe: Option<MercatorPoint>,
     pin_tug: Option<PinTug>,
     map_undo: MapUndo,
@@ -379,7 +421,8 @@ impl WeatherApp {
             presented_basemap: Arc::from([]),
             tile_inflight: HashSet::new(),
             tile_rejections: HashMap::new(),
-            fold_focus: fold_ui::FoldCage::default(),
+            panels: PanelNavigator::default(),
+            guide: CommandGuide::default(),
             transient_probe: None,
             pin_tug: None,
             map_undo: MapUndo::default(),
@@ -405,20 +448,39 @@ impl WeatherApp {
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         self.absorb_events(ui.ctx());
         self.tend_survey(ui.ctx());
-        self.fold_focus.take_keys(ui.ctx());
+        let guide_invoked = self.guide.take_shortcuts(ui.ctx());
+        if !guide_invoked
+            && let Some(dispatch) =
+                decrees::canon().route(ui.ctx(), &[], |decree| self.decree_status(decree))
+        {
+            self.apply_decree(dispatch);
+        }
         self.take_keys(ui.ctx());
-        self.fold_focus.begin_pass();
+        let mut panels = std::mem::take(&mut self.panels);
         let inspector = eternalist_apps::Inspector::new("forecast-inspector")
             .scroll_id("forecast-inspector-scroll")
             .scroll_offset(self.slate.inspector_scroll)
-            .show(ui, |ui| self.inspector(ui));
+            .show(ui, |ui| self.inspector(ui, &mut panels));
+        self.panels = panels;
         if inspector.scroll_offset != self.slate.inspector_scroll {
             self.slate.inspector_scroll = inspector.scroll_offset;
             self.mark_dirty();
         }
         self.water.heave(ui.ctx(), inspector.scroll_offset);
         let _center = egui::CentralPanel::default().show_inside(ui, |ui| self.map(ui));
-        self.fold_focus.end_pass();
+        let mut guide = std::mem::take(&mut self.guide);
+        guide.show(
+            ui.ctx(),
+            decrees::canon(),
+            &[],
+            |()| "FORECAST",
+            |decree| self.decree_status(decree),
+            &GUIDE_SECTIONS,
+        );
+        if let Some(rect) = guide.rect() {
+            crate::witness::rect(ui.ctx(), hrrr_contract::Target::CommandGuide, rect);
+        }
+        self.guide = guide;
         self.flush_state(false);
         self.flush_config(false);
         self.flush_views(false);
@@ -443,9 +505,10 @@ impl WeatherApp {
         self.config.close_minimizes
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui) {
+    fn inspector(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
+        let mut panels = navigator.frame(ui.ctx());
         let mut chosen_product = None;
-        let (wake, focus) = fold_ui::section(ui, "product", "field", true, |ui| {
+        let field = panels.section(ui, "product", "field", true, |ui| {
             for &row in Product::ROWS {
                 let _row = ui.horizontal(|ui| {
                     let spacing = ui.spacing().item_spacing.x * row.len().saturating_sub(1) as f32;
@@ -472,33 +535,41 @@ impl WeatherApp {
                 });
             }
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(ui, hrrr_contract::Target::Panel("field"), &field.header);
+        self.water.fold(field.wake);
         if let Some((product, rect)) = chosen_product {
             self.water.select(rect);
             self.strike_overlay(product);
         }
 
-        let (wake, focus) = fold_ui::section(ui, "forecast", "forecast", true, |ui| {
+        let forecast = panels.section(ui, "forecast", "forecast", true, |ui| {
             self.forecast_controls(ui);
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(
+            ui,
+            hrrr_contract::Target::Panel("forecast"),
+            &forecast.header,
+        );
+        self.water.fold(forecast.wake);
 
-        let (wake, focus) = fold_ui::section(ui, "active-view", "active view", true, |ui| {
+        let active_view = panels.section(ui, "active-view", "active view", true, |ui| {
             self.active_view_panel(ui);
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(
+            ui,
+            hrrr_contract::Target::Panel("active-view"),
+            &active_view.header,
+        );
+        self.water.fold(active_view.wake);
 
-        let (wake, focus) = fold_ui::section(ui, "view-library", "views", true, |ui| {
+        let views = panels.section(ui, "view-library", "views", true, |ui| {
             self.view_library_panel(ui);
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(ui, hrrr_contract::Target::Panel("views"), &views.header);
+        self.water.fold(views.wake);
 
         let mut reset = None;
-        let (wake, focus) = fold_ui::section(ui, "navigation", "navigation", true, |ui| {
+        let navigation = panels.section(ui, "navigation", "navigation", true, |ui| {
             let row = ui.horizontal(|ui| {
                 let _label = ui.label(chrome::muted("SCROLL"));
                 let _value = ui.label("zoom at pointer");
@@ -511,13 +582,13 @@ impl WeatherApp {
             let _row = row;
             let response = ui.add_sized(
                 [ui.available_width(), 24.0],
-                egui::Button::new("⌖  RESET CONUS"),
+                egui::Button::new(decrees::canon().spec(Decree::ResetConus).widget_text(ui)),
             );
             chrome::tension(ui, &response);
             if response.hovered() {
                 self.water.hover("reset-view", response.rect);
             }
-            if response.clicked() {
+            if chrome::exact_activation(ui, &response) {
                 reset = Some(response.rect);
             }
             let _select = ui.horizontal(|ui| {
@@ -529,25 +600,33 @@ impl WeatherApp {
                 let _meaning = ui.label("bind active view");
             });
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(
+            ui,
+            hrrr_contract::Target::Panel("navigation"),
+            &navigation.header,
+        );
+        self.water.fold(navigation.wake);
         if let Some(rect) = reset {
-            self.viewport = Viewport::default();
-            self.sync_active_view();
+            self.apply_decree(CommandDispatch::Invoke(Decree::ResetConus));
             self.water.click(rect);
         }
 
         let mut toggle_close = None;
-        let (wake, focus) = fold_ui::section(ui, "application", "application", true, |ui| {
+        let application = panels.section(ui, "application", "application", true, |ui| {
             let response = ui.add_sized(
                 [ui.available_width(), 26.0],
-                egui::Button::new("CLOSE MINIMIZES").selected(self.config.close_minimizes),
+                egui::Button::new(
+                    decrees::canon()
+                        .spec(Decree::ToggleCloseMinimizes)
+                        .widget_text(ui),
+                )
+                .selected(self.config.close_minimizes),
             );
             chrome::tension(ui, &response);
             if response.hovered() {
                 self.water.hover("close-minimizes", response.rect);
             }
-            if response.clicked() {
+            if chrome::exact_activation(ui, &response) {
                 toggle_close = Some(response.rect);
             }
             let law = if self.config.close_minimizes {
@@ -556,22 +635,22 @@ impl WeatherApp {
                 "window close terminates"
             };
             let _law = ui.label(chrome::muted(law));
+            ui.add_space(6.0);
+            let help = self.guide.activator(ui);
+            crate::witness::response(ui, hrrr_contract::Target::Help, &help);
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(
+            ui,
+            hrrr_contract::Target::Panel("application"),
+            &application.header,
+        );
+        self.water.fold(application.wake);
         if let Some(rect) = toggle_close {
-            self.config.close_minimizes = !self.config.close_minimizes;
-            let status = if self.config.close_minimizes {
-                "window close will minimize to tray"
-            } else {
-                "window close will terminate"
-            };
-            status.clone_into(&mut self.status);
-            self.mark_config_dirty();
+            self.apply_decree(CommandDispatch::Invoke(Decree::ToggleCloseMinimizes));
             self.water.select(rect);
         }
 
-        let (wake, focus) = fold_ui::section(ui, "status", "status", true, |ui| {
+        let status = panels.section(ui, "status", "status", true, |ui| {
             let _status = ui.label(chrome::muted(&self.status));
             ui.add_space(3.0);
             let _source = ui.label(chrome::muted(format!(
@@ -579,8 +658,8 @@ impl WeatherApp {
                 self.basemap_status
             )));
         });
-        self.fold_focus.record(focus);
-        self.water.fold(wake);
+        crate::witness::response(ui, hrrr_contract::Target::Panel("status"), &status.header);
+        self.water.fold(status.wake);
     }
 
     fn active_view_panel(&mut self, ui: &mut egui::Ui) {
@@ -730,49 +809,61 @@ impl WeatherApp {
             .latest_run
             .map(|latest| RunSelection::LatestLong.bind(latest));
         let mut run_step = None;
-        let _row = ui.horizontal(|ui| {
-            let older = ui.add(egui::Button::new("−1H"));
-            if older.clicked() {
-                run_step = Some((RunSelection::Fixed(run.hours_ago(1)), older.rect));
-            }
-            let latest = ui
-                .add_enabled(
-                    self.latest_run.is_some(),
-                    egui::Button::new("LATEST").selected(
-                        self.slate.cycle == RunSelection::Latest && self.latest_run == Some(run),
-                    ),
+        let latest = ui
+            .add_enabled_ui(self.latest_run.is_some(), |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 24.0],
+                    egui::Button::new(decrees::canon().spec(Decree::FollowLatest).widget_text(ui))
+                        .shortcut_text(
+                            decrees::canon().shortcuts(Decree::FollowLatest)[0].label(ui.ctx()),
+                        )
+                        .selected(
+                            self.slate.cycle == RunSelection::Latest
+                                && self.latest_run == Some(run),
+                        ),
                 )
-                .on_hover_text(format!(
-                    "Latest run · {}",
-                    ui.ctx().format_shortcut(&LATEST_RUN)
-                ));
-            if latest.clicked() {
-                run_step = Some((RunSelection::Latest, latest.rect));
-            }
-            let latest_long = ui
-                .add_enabled(
-                    latest_extended.is_some(),
-                    egui::Button::new("LATEST LONG").selected(
+            })
+            .inner;
+        if chrome::exact_activation(ui, &latest) {
+            run_step = Some((RunSelection::Latest, latest.rect));
+        }
+        let latest_long = ui
+            .add_enabled_ui(latest_extended.is_some(), |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 24.0],
+                    egui::Button::new(
+                        decrees::canon()
+                            .spec(Decree::FollowLatestLong)
+                            .widget_text(ui),
+                    )
+                    .shortcut_text(
+                        decrees::canon().shortcuts(Decree::FollowLatestLong)[0].label(ui.ctx()),
+                    )
+                    .selected(
                         self.slate.cycle == RunSelection::LatestLong
                             && latest_extended == Some(run),
                     ),
                 )
-                .on_hover_text(format!(
-                    "Latest extended run · {}",
-                    ui.ctx().format_shortcut(&LATEST_LONG_RUN)
-                ));
-            if latest_long.clicked() {
-                run_step = Some((RunSelection::LatestLong, latest_long.rect));
+            })
+            .inner;
+        if chrome::exact_activation(ui, &latest_long) {
+            run_step = Some((RunSelection::LatestLong, latest_long.rect));
+        }
+        let _step = ui.horizontal(|ui| {
+            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            let older = ui.add_sized([width, 22.0], egui::Button::new("−1H"));
+            if older.clicked() {
+                run_step = Some((RunSelection::Fixed(run.hours_ago(1)), older.rect));
             }
-            let newer = ui.add_enabled(
+            let newer = ui.add_enabled_ui(
                 self.latest_run.is_some_and(|latest_run| run < latest_run),
-                egui::Button::new("+1H"),
+                |ui| ui.add_sized([width, 22.0], egui::Button::new("+1H")),
             );
-            if newer.clicked() {
+            if newer.inner.clicked() {
                 let candidate = run.hours_after(1);
                 run_step = self
                     .latest_run
-                    .map(|latest| (RunSelection::Fixed(candidate.min(latest)), newer.rect));
+                    .map(|latest| (RunSelection::Fixed(candidate.min(latest)), newer.inner.rect));
             }
         });
         if let Some((selection, rect)) = run_step {
@@ -1119,6 +1210,8 @@ impl WeatherApp {
             pins: self.pins.iter().map(|pin| pin.world()).collect(),
             transient_probe: self.transient_probe.map(MercatorPoint::world),
             dragging_pin: self.pin_tug.map(|tug| tug.slot),
+            guide_open: self.guide.is_open(),
+            close_minimizes: self.config.close_minimizes,
             viewport: crate::witness::Viewport {
                 center: self.viewport.center_mercator,
                 zoom: self.viewport.zoom,
@@ -1470,17 +1563,65 @@ impl WeatherApp {
         }
     }
 
+    fn decree_status(&self, decree: Decree) -> CommandStatus<'static> {
+        match decree {
+            Decree::FollowLatest if self.latest_run.is_none() => {
+                CommandStatus::Disabled("the publication frontier is not known yet")
+            }
+            Decree::FollowLatestLong
+                if self
+                    .latest_run
+                    .map(|latest| RunSelection::LatestLong.bind(latest))
+                    .is_none() =>
+            {
+                CommandStatus::Disabled("no extended-horizon cycle is known yet")
+            }
+            Decree::UndoMapChange if !self.map_undo.has_reversal_for(&self.active_view) => {
+                CommandStatus::Disabled("the active view has no map change to undo")
+            }
+            Decree::FollowLatest
+            | Decree::FollowLatestLong
+            | Decree::UndoMapChange
+            | Decree::ResetConus
+            | Decree::ToggleCloseMinimizes => CommandStatus::Enabled,
+        }
+    }
+
+    fn apply_decree(&mut self, dispatch: CommandDispatch<'_, Decree>) {
+        let decree = match dispatch {
+            CommandDispatch::Invoke(decree) => decree,
+            CommandDispatch::Refused { reason, .. } => {
+                self.status = format!("unavailable: {reason}");
+                return;
+            }
+        };
+        match decree {
+            Decree::FollowLatest => self.follow_cycle(RunSelection::Latest),
+            Decree::FollowLatestLong => self.follow_cycle(RunSelection::LatestLong),
+            Decree::UndoMapChange => self.undo_map_object(),
+            Decree::ResetConus => {
+                self.viewport = Viewport::default();
+                self.sync_active_view();
+                "restored the CONUS overview".clone_into(&mut self.status);
+            }
+            Decree::ToggleCloseMinimizes => {
+                self.config.close_minimizes = !self.config.close_minimizes;
+                let status = if self.config.close_minimizes {
+                    "window close will minimize to tray"
+                } else {
+                    "window close will terminate"
+                };
+                status.clone_into(&mut self.status);
+                self.mark_config_dirty();
+            }
+        }
+    }
+
     fn take_keys(&mut self, ctx: &egui::Context) {
+        if self.guide.is_open() || ctx.memory(|memory| memory.top_modal_layer().is_some()) {
+            return;
+        }
         let text_edit_focused = ctx.text_edit_focused();
-        let latest_long = ctx.input_mut(|input| input.consume_shortcut(&LATEST_LONG_RUN));
-        if latest_long {
-            self.follow_cycle(RunSelection::LatestLong);
-        } else if ctx.input_mut(|input| input.consume_shortcut(&LATEST_RUN)) {
-            self.follow_cycle(RunSelection::Latest);
-        }
-        if !text_edit_focused && ctx.input_mut(|input| input.consume_shortcut(&UNDO_MAP_OBJECT)) {
-            self.undo_map_object();
-        }
         if !text_edit_focused {
             while let Some((slot, assign)) = consume_view_slot(ctx) {
                 if assign {
@@ -1496,17 +1637,6 @@ impl WeatherApp {
         {
             self.remember_probe();
             self.transient_probe = None;
-        }
-        let frontier = self.run.and_then(|run| self.run_extents.get(&run)).copied();
-        if frontier.is_some()
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
-        {
-            self.choose_lead(self.slate.lead.saturating_previous());
-        }
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
-            && let Some(frontier) = frontier
-        {
-            self.choose_lead(self.slate.lead.saturating_next(frontier));
         }
     }
 

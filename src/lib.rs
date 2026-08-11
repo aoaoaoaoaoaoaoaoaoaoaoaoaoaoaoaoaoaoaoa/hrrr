@@ -6,7 +6,7 @@ mod basemap_artifact;
 mod cache;
 mod config;
 mod decode;
-mod fold_ui;
+mod decrees;
 mod host;
 mod library;
 mod library_ui;

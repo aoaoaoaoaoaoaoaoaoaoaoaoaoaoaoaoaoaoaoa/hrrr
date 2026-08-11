@@ -14,6 +14,17 @@ pub fn anchor(ui: &Ui, name: impl Display, rect: Rect) {
 }
 
 #[inline]
+pub fn response(ui: &Ui, name: impl Display, response: &egui::Response) {
+    #[cfg(feature = "egui-test")]
+    egui_tester_witness::egui::record_response(ui, name.to_string(), response);
+    #[cfg(not(feature = "egui-test"))]
+    {
+        let _ = (ui, response);
+        drop(name);
+    }
+}
+
+#[inline]
 pub fn rect(ctx: &egui::Context, name: impl Display, rect: Rect) {
     #[cfg(feature = "egui-test")]
     egui_tester_witness::egui::record_rect(ctx, name.to_string(), rect);
@@ -42,6 +53,8 @@ mod active {
         pub pins: Vec<[f64; 2]>,
         pub transient_probe: Option<[f64; 2]>,
         pub dragging_pin: Option<usize>,
+        pub guide_open: bool,
+        pub close_minimizes: bool,
         pub viewport: Viewport,
     }
 
@@ -63,6 +76,8 @@ mod active {
                 pins: Vec::new(),
                 transient_probe: None,
                 dragging_pin: None,
+                guide_open: false,
+                close_minimizes: false,
                 viewport: Viewport {
                     center: [0.0; 2],
                     zoom: 0.0,

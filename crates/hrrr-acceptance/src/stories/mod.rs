@@ -1,4 +1,5 @@
 mod fields;
+mod keyboard;
 mod map_objects;
 mod tray;
 
@@ -76,12 +77,13 @@ fn visible(frame: &Frame) -> bool {
 pub fn run(harness: &Harness<'_>, selected: Option<&str>) -> Result<()> {
     match selected.unwrap_or("map-objects") {
         "fields" => fields::run(harness)?,
+        "keyboard" => keyboard::run(harness)?,
         "map-objects" => map_objects::run(harness)?,
         "tray" => tray::run(harness)?,
         unknown => {
             return Err(egui_tester::Error::Verdict {
                 detail: format!(
-                    "unknown HRRR story `{unknown}`; expected fields, map-objects, or tray"
+                    "unknown HRRR story `{unknown}`; expected fields, keyboard, map-objects, or tray"
                 ),
             });
         }
