@@ -29,6 +29,7 @@ windows = "unsigned-incubation"
 name = "source"
 laws = ["source"]
 run = ["./scripts/check"]
+setup = "wayland"
 timeout-minutes = 45
 
 [[proofs]]
@@ -41,6 +42,7 @@ timeout-minutes = 15
 name = "source-package"
 laws = ["source-package"]
 run = ["./scripts/package"]
+setup = "wayland"
 timeout-minutes = 45
 
 [[proofs]]
