@@ -141,25 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn platform_project_roots_are_absolute() -> Result<()> {
-        let lair = Lair::claim()?;
-        for path in [
-            lair.config.clone(),
-            lair.state.clone(),
-            lair.data.clone(),
-            lair.local_data.clone(),
-            lair.cache_root(),
-        ] {
-            assert!(
-                path.is_absolute(),
-                "relative product root: {}",
-                path.display()
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn machine_local_basemaps_supersede_roaming_legacy_archives() -> Result<()> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let root =

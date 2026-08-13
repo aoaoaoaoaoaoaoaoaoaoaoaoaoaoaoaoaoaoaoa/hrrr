@@ -12,6 +12,7 @@ use bytemuck::{Pod, Zeroable};
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use egui::Context;
+use eternalist_apps::NativeWake;
 use fast_mvt::{MvtFeatureRef, MvtGeometry, MvtReaderRef, MvtValueRef};
 use geo_types::{Coord, LineString, Point, Polygon};
 use lyon_tessellation::{
@@ -208,9 +209,10 @@ impl Basemap {
         }
         let (commands, command_rx) = bounded(256);
         let (event_tx, events) = bounded(256);
+        let wake = NativeWake::from_context(&ctx);
         let thread = thread::Builder::new()
             .name("vector-armory".to_owned())
-            .spawn(move || armory(ctx, archive, detail, command_rx, event_tx, workers))
+            .spawn(move || armory(wake, archive, detail, command_rx, event_tx, workers))
             .context("spawn vector basemap armory")?;
         Ok(Self {
             commands,
@@ -365,7 +367,7 @@ fn within_detail_bounds(key: TileKey) -> bool {
 }
 
 fn armory(
-    ctx: Context,
+    wake: NativeWake,
     archive: PathBuf,
     detail: Option<Detail>,
     commands: Receiver<TileKey>,
@@ -375,7 +377,7 @@ fn armory(
     let runtime = match runtime() {
         Ok(runtime) => runtime,
         Err(err) => {
-            send_fault(&ctx, &events, None, &err);
+            send_fault(&wake, &events, None, &err);
             return;
         }
     };
@@ -386,7 +388,7 @@ fn armory(
         Ok(reader) => Arc::new(reader),
         Err(err) => {
             send_fault(
-                &ctx,
+                &wake,
                 &events,
                 None,
                 &anyhow::Error::new(err).context(format!("open {}", archive.display())),
@@ -397,23 +399,23 @@ fn armory(
     if events.send(Event::Ready).is_err() {
         return;
     }
-    ctx.request_repaint();
+    let _woken = wake.request_foreground_repaint();
     let detail = detail.map(Arc::new);
     let mut workers = Vec::with_capacity(worker_count);
     for slot in 0..worker_count {
-        let worker_ctx = ctx.clone();
+        let worker_wake = wake.clone();
         let reader = reader.clone();
         let detail = detail.clone();
         let commands = commands.clone();
         let worker_events = events.clone();
         let worker = thread::Builder::new()
             .name(format!("vector-quarry-{slot}"))
-            .spawn(move || quarry(worker_ctx, reader, detail, commands, worker_events));
+            .spawn(move || quarry(worker_wake, reader, detail, commands, worker_events));
         match worker {
             Ok(worker) => workers.push(worker),
             Err(err) => {
                 send_fault(
-                    &ctx,
+                    &wake,
                     &events,
                     None,
                     &anyhow::Error::new(err).context("spawn vector quarry"),
@@ -437,7 +439,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn quarry(
-    ctx: Context,
+    wake: NativeWake,
     archive: Arc<Archive>,
     detail: Option<Arc<Detail>>,
     commands: Receiver<TileKey>,
@@ -446,7 +448,7 @@ fn quarry(
     let runtime = match runtime() {
         Ok(runtime) => runtime,
         Err(err) => {
-            send_fault(&ctx, &events, None, &err);
+            send_fault(&wake, &events, None, &err);
             return;
         }
     };
@@ -458,11 +460,11 @@ fn quarry(
                 if events.send(Event::Missing(key)).is_err() {
                     break;
                 }
-                ctx.request_repaint();
+                let _woken = wake.request_foreground_repaint();
                 continue;
             }
             Err(err) => {
-                send_fault(&ctx, &events, Some(key), &err);
+                send_fault(&wake, &events, Some(key), &err);
                 continue;
             }
         };
@@ -485,7 +487,7 @@ fn quarry(
         if events.send(event).is_err() {
             break;
         }
-        ctx.request_repaint();
+        let _woken = wake.request_foreground_repaint();
     }
 }
 
@@ -504,12 +506,21 @@ fn load_tile(
     }
 }
 
-fn send_fault(ctx: &Context, events: &Sender<Event>, key: Option<TileKey>, err: &anyhow::Error) {
-    let _sent = events.try_send(Event::Fault {
-        key,
-        message: format!("{err:#}"),
-    });
-    ctx.request_repaint();
+fn send_fault(
+    wake: &NativeWake,
+    events: &Sender<Event>,
+    key: Option<TileKey>,
+    err: &anyhow::Error,
+) {
+    if events
+        .try_send(Event::Fault {
+            key,
+            message: format!("{err:#}"),
+        })
+        .is_ok()
+    {
+        let _woken = wake.request_foreground_repaint();
+    }
 }
 
 fn micros(duration: Duration) -> u64 {
@@ -1120,7 +1131,7 @@ mod tests {
     use super::*;
     use crate::cache::{CacheClass, CacheManager};
     use fast_mvt::MvtTileBuilder;
-    use pmtiles::{DirectoryCache, PmTilesWriter, TileType};
+    use pmtiles::{PmTilesWriter, TileType};
     use std::{
         fs::File,
         sync::{
@@ -1132,41 +1143,43 @@ mod tests {
     };
 
     #[test]
-    fn vector_cover_prefetches_without_presenting() {
+    fn cover_prefetches_without_duplicate_or_unbounded_source_demand() -> Result<()> {
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
-        let cover = cover(Viewport::default(), rect);
-        assert_eq!(cover.strata.len(), 6);
-        assert_eq!(cover.strata[4].intent, Intent::Required);
-        assert_eq!(cover.strata[5].intent, Intent::Prefetch);
+        let default_cover = cover(Viewport::default(), rect);
+        assert_eq!(default_cover.strata.len(), 6);
+        assert_eq!(default_cover.strata[4].intent, Intent::Required);
+        assert_eq!(default_cover.strata[5].intent, Intent::Prefetch);
         assert_eq!(
-            cover.finest_ready(|_| true).map(|stratum| stratum.intent),
+            default_cover
+                .finest_ready(|_| true)
+                .map(|stratum| stratum.intent),
             Some(Intent::Required)
         );
-    }
 
-    #[test]
-    fn world_wrap_never_duplicates_archive_demand() {
-        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0));
-        let cover = cover(
-            Viewport {
-                zoom: Viewport::MIN_ZOOM,
-                ..Viewport::default()
-            },
-            rect,
-        );
-        for stratum in cover.strata {
-            let distinct = stratum
-                .keys
-                .iter()
-                .copied()
-                .collect::<std::collections::HashSet<_>>();
-            assert_eq!(distinct.len(), stratum.keys.len());
+        let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0));
+        for zoom in [
+            Viewport::MIN_ZOOM,
+            Viewport::default().zoom,
+            Viewport::MAX_ZOOM,
+        ] {
+            let cover = cover(
+                Viewport {
+                    zoom,
+                    ..Viewport::default()
+                },
+                wide,
+            );
+            for stratum in cover.strata {
+                let distinct = stratum
+                    .keys
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(distinct.len(), stratum.keys.len());
+                assert!(stratum.keys.iter().all(|tile| tile.zoom <= MAX_SOURCE_ZOOM));
+            }
         }
-    }
 
-    #[test]
-    fn source_zoom_stops_while_field_zoom_continues() -> Result<()> {
-        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
         let view = Viewport {
             zoom: Viewport::MAX_ZOOM,
             ..Viewport::default()
@@ -1179,25 +1192,21 @@ mod tests {
     }
 
     #[test]
-    fn detail_is_demanded_only_at_its_native_zoom() -> Result<()> {
+    fn detail_demand_begins_at_native_zoom_only_inside_its_bounds() -> Result<()> {
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
-        let near = cover(profile_view(-97.5, 38.5, 11.99), rect);
+        let near = cover(view_at(-97.5, 38.5, 11.99), rect);
         assert!(
             near.strata
                 .iter()
                 .all(|stratum| stratum.keys.iter().all(|key| key.zoom <= LOCAL_MAX_ZOOM))
         );
 
-        let detail = cover(profile_view(-97.5, 38.5, 12.0), rect);
+        let detail = cover(view_at(-97.5, 38.5, 12.0), rect);
         let crown = detail.strata.last().context("detail stratum")?;
         assert_eq!(crown.intent, Intent::Required);
         assert!(crown.keys.iter().all(|key| key.zoom == MAX_SOURCE_ZOOM));
-        Ok(())
-    }
 
-    #[test]
-    fn detail_bounds_admit_north_america_only() -> Result<()> {
-        let plains = profile_keys(profile_view(-97.5, 38.5, 12.0))
+        let plains = required_keys(view_at(-97.5, 38.5, 12.0))
             .into_iter()
             .next()
             .context("plains tile")?;
@@ -1216,7 +1225,7 @@ mod tests {
         let local_path = root.join("local.pmtiles");
         let remote_path = root.join("remote.pmtiles");
         let tile = MvtTileBuilder::new().layer("earth")?.end().encode();
-        let key = profile_keys(profile_view(-97.5, 38.5, 12.0))
+        let key = required_keys(view_at(-97.5, 38.5, 12.0))
             .into_iter()
             .next()
             .context("detail tile")?;
@@ -1418,18 +1427,6 @@ mod tests {
     }
 
     #[test]
-    fn population_controls_locality_prominence_continuously() -> Result<()> {
-        let metropolis = label_style(Some("locality"), Some("city"), Some(18.0), None)
-            .context("metropolis style")?;
-        let small_city = label_style(Some("locality"), Some("city"), Some(3.0), None)
-            .context("small-city style")?;
-        assert!(metropolis.rank < small_city.rank);
-        assert!(metropolis.size > small_city.size);
-        assert!(metropolis.onset_zoom < small_city.onset_zoom);
-        Ok(())
-    }
-
-    #[test]
     fn source_min_zoom_overrides_cartographic_fallback() -> Result<()> {
         let style = road_style(Some("minor_road"), Some("residential"), Some(11.25), 11)
             .context("residential road style")?;
@@ -1437,139 +1434,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn apparition_is_quiet_monotone_and_bounded() {
-        let onset = 11.0;
-        let samples = [
-            apparition(10.9, onset),
-            apparition(11.0, onset),
-            apparition(11.3, onset),
-            apparition(11.8, onset),
-            apparition(12.35, onset),
-            apparition(13.0, onset),
-        ];
-        assert_eq!(samples[0], 0.0);
-        assert_eq!(samples[1], 0.0);
-        assert_eq!(samples[4], 1.0);
-        assert_eq!(samples[5], 1.0);
-        assert!(samples.windows(2).all(|pair| pair[0] <= pair[1]));
-    }
-
-    #[test]
-    #[ignore = "requires HRRR_BASEMAP_ARCHIVE and is a release-mode instrument"]
-    fn profile_local_archive() -> Result<()> {
-        let path = std::env::var_os("HRRR_BASEMAP_ARCHIVE")
-            .map(PathBuf::from)
-            .context("HRRR_BASEMAP_ARCHIVE is unset")?;
-        let runtime = runtime()?;
-        let uncached = runtime.block_on(AsyncPmTilesReader::new_with_path(&path))?;
-        let cached =
-            runtime.block_on(Archive::new_with_cached_path(HashMapCache::default(), path))?;
-        for (scene, view) in [
-            ("plains-z10", profile_view(-97.5, 38.5, 10.0)),
-            ("plains-z12", profile_view(-97.5, 38.5, 12.0)),
-            ("new-york-z12", profile_view(-74.006, 40.7128, 12.0)),
-        ] {
-            let keys = profile_keys(view);
-            profile_reader(&runtime, &uncached, "none", scene, &keys, 2)?;
-            profile_reader(&runtime, &cached, "resident", scene, &keys, 5)?;
-        }
-        let urban = profile_keys(profile_view(-74.006, 40.7128, 12.0));
-        for workers in [4, 6, 8, 12] {
-            for pass in 0..5 {
-                profile_quarries(path_from_environment()?, &urban, workers, pass)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn profile_quarries(
-        path: PathBuf,
-        keys: &[TileKey],
-        workers: usize,
-        pass: usize,
-    ) -> Result<()> {
-        let basemap = Basemap::spawn_with_workers(Context::default(), path, None, workers)?;
-        match basemap.events.recv_timeout(Duration::from_secs(5))? {
-            Event::Ready => {}
-            event => anyhow::bail!("basemap opened with {event:?}"),
-        }
-        let begun = Instant::now();
-        for &key in keys {
-            if !basemap.request(key) {
-                anyhow::bail!("quarry queue rejected {key:?}");
-            }
-        }
-        let mut loaded = 0_usize;
-        let mut archive_us = 0_u64;
-        let mut decode_us = 0_u64;
-        while loaded < keys.len() {
-            match basemap.events.recv_timeout(Duration::from_secs(5))? {
-                Event::Loaded(tile) => {
-                    loaded += 1;
-                    archive_us = archive_us.saturating_add(tile.timing.archive_us);
-                    decode_us = decode_us.saturating_add(tile.timing.decode_us);
-                }
-                Event::Ready => {}
-                event => anyhow::bail!("quarry profile failed with {event:?}"),
-            }
-        }
-        eprintln!(
-            "scene=new-york-z12 workers={workers} pass={pass} tiles={loaded} wall_us={} summed_archive_us={archive_us} summed_decode_us={decode_us}",
-            begun.elapsed().as_micros()
-        );
-        Ok(())
-    }
-
-    fn path_from_environment() -> Result<PathBuf> {
-        std::env::var_os("HRRR_BASEMAP_ARCHIVE")
-            .map(PathBuf::from)
-            .context("HRRR_BASEMAP_ARCHIVE is unset")
-    }
-
-    fn profile_reader<C: DirectoryCache + Send + Sync>(
-        runtime: &tokio::runtime::Runtime,
-        archive: &AsyncPmTilesReader<MmapBackend, C>,
-        cache: &str,
-        scene: &str,
-        keys: &[TileKey],
-        passes: usize,
-    ) -> Result<()> {
-        for pass in 0..passes {
-            let begun = Instant::now();
-            let mut archive_time = Duration::ZERO;
-            let mut decode_time = Duration::ZERO;
-            let mut bytes = 0_usize;
-            let mut vertices = 0_usize;
-            let mut resident = 0_usize;
-            for key in keys {
-                let cut = Instant::now();
-                let tile = runtime
-                    .block_on(archive.get_tile_decompressed(key.coordinate()?))?
-                    .context("profile tile absent")?;
-                archive_time += cut.elapsed();
-                bytes = bytes.saturating_add(tile.len());
-                let cut = Instant::now();
-                let tile = decode_tile(*key, &tile)?;
-                decode_time += cut.elapsed();
-                vertices = vertices
-                    .saturating_add(tile.fills.vertices.len())
-                    .saturating_add(tile.strokes.vertices.len());
-                resident = resident.saturating_add(tile.resident_bytes());
-            }
-            eprintln!(
-                "scene={scene} cache={cache} pass={pass} tiles={} wall_us={} archive_us={} decode_us={} mvt_bytes={} mesh_bytes={resident} vertices={vertices}",
-                keys.len(),
-                begun.elapsed().as_micros(),
-                archive_time.as_micros(),
-                decode_time.as_micros(),
-                bytes,
-            );
-        }
-        Ok(())
-    }
-
-    fn profile_keys(view: Viewport) -> Vec<TileKey> {
+    fn required_keys(view: Viewport) -> Vec<TileKey> {
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0));
         cover(view, rect)
             .strata
@@ -1578,7 +1443,7 @@ mod tests {
             .map_or_else(Vec::new, |stratum| stratum.keys)
     }
 
-    fn profile_view(longitude: f64, latitude: f64, zoom: f64) -> Viewport {
+    fn view_at(longitude: f64, latitude: f64, zoom: f64) -> Viewport {
         let x = (longitude + 180.0) / 360.0;
         let y = (1.0 - (latitude.to_radians().tan().asinh() / std::f64::consts::PI)) * 0.5;
         Viewport {

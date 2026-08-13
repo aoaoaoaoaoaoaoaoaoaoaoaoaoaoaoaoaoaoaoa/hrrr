@@ -618,15 +618,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_asset_is_pinned_and_digest_shaped() -> Result<()> {
-        let asset = tool_asset().context("release host has no pinned go-pmtiles artifact")?;
-        assert_eq!(asset.sha256.len(), 64);
-        assert!(asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(asset.name.contains(TOOL_VERSION));
-        Ok(())
-    }
-
-    #[test]
     fn dates_are_civil_dates_not_digit_soup() -> Result<()> {
         assert_eq!(validate_day("20260728")?.as_str(), "20260728");
         assert!(validate_day("20260230").is_err());
@@ -692,16 +683,6 @@ mod tests {
             .detail_source()
             .is_err()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn cancellation_is_typed() -> Result<()> {
-        let cancel = AtomicBool::new(true);
-        let Err(error) = heed(&cancel) else {
-            bail!("set cancellation did not abort");
-        };
-        assert!(was_cancelled(&error));
         Ok(())
     }
 

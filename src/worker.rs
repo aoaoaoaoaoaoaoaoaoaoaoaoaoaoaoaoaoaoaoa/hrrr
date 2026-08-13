@@ -1,7 +1,10 @@
 use crate::{decode, model::*, source::Source, xdg::Lair};
 use anyhow::{Context as _, Result, anyhow};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
-use egui::Context;
+use eternalist_apps::{
+    NativeWake,
+    responsiveness::{SupersedingReceiver, SupersedingSender, superseding_channel},
+};
 use jiff::Timestamp;
 use std::{
     collections::{HashMap, VecDeque},
@@ -42,13 +45,6 @@ pub enum Command {
     Load(LoadDemand),
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ForgeCommand {
-    Survey(RunId),
-    Load(LoadDemand),
-    Shutdown,
-}
-
 #[derive(Debug)]
 pub enum Event {
     Discovered(RunExtent),
@@ -69,31 +65,47 @@ pub enum Event {
 }
 
 pub struct Worker {
-    forge: Sender<ForgeCommand>,
+    surveys: SupersedingSender<RunId>,
+    loads: SupersedingSender<LoadDemand>,
+    shutdown: Sender<()>,
     scout: Sender<()>,
     pub events: Receiver<Event>,
     _threads: [thread::JoinHandle<()>; 2],
 }
 
 impl Worker {
-    pub fn spawn(ctx: Context, lair: &Lair) -> Result<Self> {
-        let (forge, forge_rx) = bounded(32);
+    pub fn spawn(ctx: egui::Context, lair: &Lair) -> Result<Self> {
+        let (surveys, survey_rx) = superseding_channel();
+        let (loads, load_rx) = superseding_channel();
+        let (shutdown, shutdown_rx) = bounded(1);
         let (scout, scout_rx) = bounded(1);
         let (event_tx, events) = bounded(32);
         let forge_source = Source::new(lair);
         let forge_events = event_tx.clone();
-        let forge_ctx = ctx.clone();
+        let wake = NativeWake::from_context(&ctx);
+        let forge_wake = wake.clone();
         let forge_thread = thread::Builder::new()
             .name("hrrr-forge".to_owned())
-            .spawn(move || labor(forge_ctx, forge_source, forge_rx, forge_events))
+            .spawn(move || {
+                labor(
+                    forge_wake,
+                    forge_source,
+                    shutdown_rx,
+                    survey_rx,
+                    load_rx,
+                    forge_events,
+                );
+            })
             .context("spawn HRRR field forge")?;
         let scout_source = Source::new(lair);
         let scout_thread = thread::Builder::new()
             .name("hrrr-scout".to_owned())
-            .spawn(move || scout_cycles(ctx, scout_source, scout_rx, event_tx))
+            .spawn(move || scout_cycles(wake, scout_source, scout_rx, event_tx))
             .context("spawn HRRR cycle scout")?;
         Ok(Self {
-            forge,
+            surveys,
+            loads,
+            shutdown,
             scout,
             events,
             _threads: [forge_thread, scout_thread],
@@ -107,57 +119,80 @@ impl Worker {
                 Err(TrySendError::Disconnected(())) => Err(anyhow!("HRRR cycle scout has fallen")),
             },
             Command::Survey(run) => self
-                .forge
-                .send(ForgeCommand::Survey(run))
-                .context("send HRRR frontier survey"),
+                .surveys
+                .offer(run)
+                .map(|_superseded| ())
+                .map_err(|_| anyhow!("HRRR field forge has fallen")),
             Command::Load(demand) => self
-                .forge
-                .send(ForgeCommand::Load(demand))
-                .context("send HRRR field demand"),
+                .loads
+                .offer(demand)
+                .map(|_superseded| ())
+                .map_err(|_| anyhow!("HRRR field forge has fallen")),
         }
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _sent = self.forge.try_send(ForgeCommand::Shutdown);
+        let _sent = self.shutdown.try_send(());
     }
 }
 
-fn labor(ctx: Context, source: Source, commands: Receiver<ForgeCommand>, events: Sender<Event>) {
-    let mut deferred = None;
+fn labor(
+    wake: NativeWake,
+    source: Source,
+    shutdown: Receiver<()>,
+    surveys: SupersedingReceiver<RunId>,
+    loads: SupersedingReceiver<LoadDemand>,
+    events: Sender<Event>,
+) {
     let mut blades = BladeBank::new(BLADE_CAPACITY);
-    while let Some(command) = deferred.take().or_else(|| commands.recv().ok()) {
-        let command = coalesce_load(command, &commands, &mut deferred);
-        let event =
-            match command {
-                ForgeCommand::Survey(run) => source
+    loop {
+        let demand = crossbeam_channel::select_biased! {
+            recv(shutdown) -> _ => break,
+            recv(surveys.channel()) -> survey => match survey {
+                Ok(run) => ForgeDemand::Survey(run),
+                Err(_) => break,
+            },
+            recv(loads.channel()) -> load => match load {
+                Ok(load) => ForgeDemand::Load(load),
+                Err(_) => break,
+            },
+        };
+        let event = match demand {
+            ForgeDemand::Survey(run) => {
+                source
                     .survey(run)
                     .map(Event::Surveyed)
                     .unwrap_or_else(|err| Event::SurveyFault {
                         run,
                         message: format!("{err:#}"),
-                    }),
-                ForgeCommand::Load(demand) => {
-                    let began = Instant::now();
-                    forge_frame(&source, &mut blades, demand.key)
-                        .map(|field| Event::Loaded {
-                            demand,
-                            field,
-                            elapsed_ms: began.elapsed().as_millis(),
-                        })
-                        .unwrap_or_else(|err| Event::Fault {
-                            demand: Some(demand),
-                            message: format!("{err:#}"),
-                        })
-                }
-                ForgeCommand::Shutdown => break,
-            };
+                    })
+            }
+            ForgeDemand::Load(demand) => {
+                let began = Instant::now();
+                forge_frame(&source, &mut blades, demand.key)
+                    .map(|field| Event::Loaded {
+                        demand,
+                        field,
+                        elapsed_ms: began.elapsed().as_millis(),
+                    })
+                    .unwrap_or_else(|err| Event::Fault {
+                        demand: Some(demand),
+                        message: format!("{err:#}"),
+                    })
+            }
+        };
         if events.send(event).is_err() {
             break;
         }
-        ctx.request_repaint();
+        let _woken = wake.request_foreground_repaint();
     }
+}
+
+enum ForgeDemand {
+    Survey(RunId),
+    Load(LoadDemand),
 }
 
 fn forge_frame(source: &Source, blades: &mut BladeBank, key: FrameKey) -> Result<Arc<FieldGrid>> {
@@ -214,7 +249,7 @@ impl BladeBank {
     }
 }
 
-fn scout_cycles(ctx: Context, source: Source, summons: Receiver<()>, events: Sender<Event>) {
+fn scout_cycles(wake: NativeWake, source: Source, summons: Receiver<()>, events: Sender<Event>) {
     let mut next_discovery = Instant::now() + DISCOVERY_POLL;
     loop {
         match summons.recv_timeout(next_discovery.saturating_duration_since(Instant::now())) {
@@ -236,28 +271,6 @@ fn scout_cycles(ctx: Context, source: Source, summons: Receiver<()>, events: Sen
         if events.send(event).is_err() {
             break;
         }
-        ctx.request_repaint();
+        let _woken = wake.request_foreground_repaint();
     }
-}
-
-fn coalesce_load(
-    command: ForgeCommand,
-    commands: &Receiver<ForgeCommand>,
-    deferred: &mut Option<ForgeCommand>,
-) -> ForgeCommand {
-    let ForgeCommand::Load(_) = command else {
-        return command;
-    };
-    let mut newest = command;
-    while let Ok(next) = commands.try_recv() {
-        match next {
-            ForgeCommand::Load(_) => newest = next,
-            ForgeCommand::Shutdown => return ForgeCommand::Shutdown,
-            ForgeCommand::Survey(_) => {
-                *deferred = Some(next);
-                break;
-            }
-        }
-    }
-    newest
 }

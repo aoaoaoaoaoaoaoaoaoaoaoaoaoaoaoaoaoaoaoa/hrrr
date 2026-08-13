@@ -103,6 +103,7 @@ pub struct MapGpu {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
+    uniform_value: Option<Uniform>,
     texture: wgpu::Texture,
     bind: wgpu::BindGroup,
     resident: Option<FrameKey>,
@@ -182,6 +183,7 @@ impl MapGpu {
             pipeline,
             layout,
             uniform,
+            uniform_value: None,
             texture,
             bind,
             resident: None,
@@ -219,7 +221,14 @@ impl MapGpu {
             );
             self.resident = Some(paint.key);
         }
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&Uniform::forge(paint)));
+        let uniform = Uniform::forge(paint);
+        if self
+            .uniform_value
+            .is_none_or(|current| bytemuck::bytes_of(&current) != bytemuck::bytes_of(&uniform))
+        {
+            queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+            self.uniform_value = Some(uniform);
+        }
     }
 }
 
@@ -599,18 +608,13 @@ fn fragment(in: VertexOut) -> @location(0) vec4f {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::{Context as _, Result};
-    use std::{hint::black_box, time::Instant};
 
     #[test]
-    fn default_view_is_centered_on_the_conus() {
+    fn viewport_envelope_frames_the_conus_from_continent_to_street() {
         let [longitude, latitude] = lon_lat_at(Viewport::default().center_mercator);
         assert!((longitude + 97.5).abs() < 0.01);
         assert!((latitude - 38.5).abs() < 0.01);
-    }
 
-    #[test]
-    fn zoom_floor_frames_north_america() {
         let height = 920.0;
         let view = Viewport {
             zoom: minimum_zoom(height),
@@ -622,10 +626,7 @@ mod tests {
         assert!((half_span.mul_add(2.0, -MAX_VERTICAL_WORLD_SPAN)).abs() < 1e-12);
         assert!((58.0..62.0).contains(&north));
         assert!((5.0..15.0).contains(&south));
-    }
 
-    #[test]
-    fn zoom_ceiling_spans_about_two_kilometres_at_the_default_latitude() {
         let view = Viewport {
             zoom: Viewport::MAX_ZOOM,
             ..Viewport::default()
@@ -642,34 +643,5 @@ mod tests {
             assert!([1.0, 2.0, 5.0].contains(&(length / decade)));
             assert!(length <= target);
         }
-    }
-
-    #[test]
-    #[ignore = "release-mode microprofile"]
-    fn profile_visible_peak() -> Result<()> {
-        let projection = LambertGrid::forge(
-            6_371_229.0,
-            21.138,
-            237.28,
-            38.5,
-            262.5,
-            [38.5, 38.5],
-            [3_000.0, 3_000.0],
-        )?;
-        let field = FieldGrid::forge(vec![1.0e-9; 1_799 * 1_059], 1_799, 1_059, projection)?;
-        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1_146.0, 920.0));
-        let begun = Instant::now();
-        let iterations = 100;
-        for _ in 0..iterations {
-            let peak = visible_peak(black_box(&field), Viewport::default(), rect)
-                .context("visible HRRR sample")?;
-            let _peak = black_box(peak);
-        }
-        eprintln!(
-            "visible-peak samples={} mean_us={}",
-            iterations,
-            begun.elapsed().as_micros() / iterations
-        );
-        Ok(())
     }
 }

@@ -2,6 +2,7 @@ use anyhow::{Context as _, Result, bail};
 use atomic_write_file::AtomicWriteFile;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use egui::Context;
+use eternalist_apps::NativeWake;
 use std::{
     fs::{File, OpenOptions},
     io::{Read as _, Write as _},
@@ -202,9 +203,10 @@ impl Custodian {
     pub fn spawn(ctx: Context, manager: CacheManager) -> Result<Self> {
         let (shutdown, orders) = bounded(1);
         let (fault_tx, faults) = bounded(1);
+        let wake = NativeWake::from_context(&ctx);
         let thread = thread::Builder::new()
             .name("cache-custodian".to_owned())
-            .spawn(move || tend_cache(ctx, manager, orders, fault_tx))
+            .spawn(move || tend_cache(wake, manager, orders, fault_tx))
             .context("spawn cache custodian")?;
         Ok(Self {
             shutdown,
@@ -220,11 +222,19 @@ impl Drop for Custodian {
     }
 }
 
-fn tend_cache(ctx: Context, manager: CacheManager, orders: Receiver<()>, faults: Sender<String>) {
+fn tend_cache(
+    wake: NativeWake,
+    manager: CacheManager,
+    orders: Receiver<()>,
+    faults: Sender<String>,
+) {
     loop {
-        if let Err(err) = manager.purge() {
-            let _sent = faults.try_send(format!("cache purge failed: {err:#}"));
-            ctx.request_repaint();
+        if let Err(err) = manager.purge()
+            && faults
+                .try_send(format!("cache purge failed: {err:#}"))
+                .is_ok()
+        {
+            let _woken = wake.request_foreground_repaint();
         }
         match orders.recv_timeout(REAP_INTERVAL) {
             Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

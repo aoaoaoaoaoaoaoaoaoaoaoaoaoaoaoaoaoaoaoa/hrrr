@@ -54,7 +54,7 @@ mod active {
         pub transient_probe: Option<[f64; 2]>,
         pub dragging_pin: Option<usize>,
         pub guide_open: bool,
-        pub close_minimizes: bool,
+        pub close_to_tray: bool,
         pub viewport: Viewport,
     }
 
@@ -77,7 +77,7 @@ mod active {
                 transient_probe: None,
                 dragging_pin: None,
                 guide_open: false,
-                close_minimizes: false,
+                close_to_tray: false,
                 viewport: Viewport {
                     center: [0.0; 2],
                     zoom: 0.0,

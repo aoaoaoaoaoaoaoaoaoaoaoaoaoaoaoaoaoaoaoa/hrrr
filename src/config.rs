@@ -127,13 +127,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_close_preference_preserves_tray_minimization() -> Result<()> {
-        let config = toml::from_str::<Config>("")?;
-        assert!(config.close_minimizes);
-        Ok(())
-    }
-
-    #[test]
     fn legacy_duplicate_slots_are_disarmed_without_losing_views() -> Result<()> {
         let root = TestRoot::forge()?;
         let path = root.0.join("views.toml");

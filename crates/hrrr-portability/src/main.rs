@@ -414,7 +414,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn readiness_requires_contract_surface_and_map() -> Result<()> {
+    fn surface_verdict_requires_presentation_contract_phase_and_expected_anchor() -> Result<()> {
         let ready = json!({
             "surface_sequence": 1,
             "anchors": [{ "name": "map.canvas", "rect": [0.0, 0.0, 1.0, 1.0] }],
@@ -429,11 +429,7 @@ mod tests {
             }),
             Surface::Map
         )?);
-        Ok(())
-    }
 
-    #[test]
-    fn first_contact_requires_install_affordance() -> Result<()> {
         let frame = json!({
             "surface_sequence": 1,
             "anchors": [{ "name": "basemap.install" }],
@@ -444,17 +440,14 @@ mod tests {
         });
         assert!(presented_hrrr_frame(&frame, Surface::FirstContact)?);
         assert!(!presented_hrrr_frame(&frame, Surface::Map)?);
-        Ok(())
-    }
 
-    #[test]
-    fn alien_contract_is_fatal() {
         let alien = json!({
             "surface_sequence": 1,
             "anchors": [{ "name": "map.canvas" }],
             "state": { "contract": "hrrr.ui/alien" },
         });
         assert!(presented_hrrr_frame(&alien, Surface::Map).is_err());
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]

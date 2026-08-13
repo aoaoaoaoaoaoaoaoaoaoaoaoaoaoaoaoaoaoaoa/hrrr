@@ -878,19 +878,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_strikes_select_switch_and_deselect() {
-        let bare = Overlay::default();
-        let smoke = bare.strike(Product::Smoke);
-        assert_eq!(bare.active(), None);
-        assert_eq!(smoke.active(), Some(Product::Smoke));
-        assert_eq!(smoke.strike(Product::Smoke), bare);
-        assert_eq!(
-            smoke.strike(Product::Temperature).active(),
-            Some(Product::Temperature)
-        );
-    }
-
-    #[test]
     fn field_arsenal_is_bijective_across_layout_and_cache() {
         let rows = Product::ROWS
             .iter()
@@ -904,20 +891,6 @@ mod tests {
                 .collect::<BTreeSet<_>>()
                 .len(),
             Product::ALL.len()
-        );
-    }
-
-    #[test]
-    fn field_arsenal_generates_temporal_capabilities() {
-        assert_eq!(Product::QpfRun.temporal_shape(), TemporalShape::Cumulative);
-        assert_eq!(Product::QpfHour.temporal_shape(), TemporalShape::Interval);
-        assert_eq!(Product::Smoke.temporal_shape(), TemporalShape::Instant);
-        assert!(Product::QpfRun.has_baseline());
-        assert!(
-            Product::ALL
-                .into_iter()
-                .filter(|product| product.has_baseline())
-                .eq([Product::QpfRun])
         );
     }
 

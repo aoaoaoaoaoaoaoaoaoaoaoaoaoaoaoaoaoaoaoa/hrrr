@@ -230,26 +230,17 @@ mod tests {
 94:900:d=2026071912:DPT:2 m above ground:2 hour fcst:\n";
 
     #[test]
-    fn qpf_selectors_sever_run_and_hour_accumulations() -> Result<()> {
+    fn inventory_selectors_distinguish_products_and_accumulation_windows() -> Result<()> {
         assert_eq!(select_range(INDEX, Product::QpfRun)?, 200..=259);
         assert_eq!(select_range(INDEX, Product::QpfHour)?, 300..=349);
-        Ok(())
-    }
+        assert_eq!(select_range(INDEX, Product::Smoke)?, 350..=499);
+        assert_eq!(select_range(INDEX, Product::Temperature)?, 500..=799);
+        assert_eq!(select_range(INDEX, Product::CloudCover)?, 800..=899);
 
-    #[test]
-    fn both_qpf_products_admit_the_zero_hour_field() -> Result<()> {
         const ZERO: &str = "84:200:d=2026071912:APCP:surface:0-0 day acc fcst:\n\
 85:260:d=2026071912:WEASD:surface:0-0 day acc fcst:\n";
         assert_eq!(select_range(ZERO, Product::QpfRun)?, 200..=259);
         assert_eq!(select_range(ZERO, Product::QpfHour)?, 200..=259);
-        Ok(())
-    }
-
-    #[test]
-    fn exact_level_selectors_cut_the_right_messages() -> Result<()> {
-        assert_eq!(select_range(INDEX, Product::Smoke)?, 350..=499);
-        assert_eq!(select_range(INDEX, Product::Temperature)?, 500..=799);
-        assert_eq!(select_range(INDEX, Product::CloudCover)?, 800..=899);
         Ok(())
     }
 

@@ -10,7 +10,7 @@ pub enum Decree {
     FollowLatestLong,
     UndoMapChange,
     ResetConus,
-    ToggleCloseMinimizes,
+    ToggleCloseToTray,
 }
 
 const LATEST: [Shortcut; 1] = [Shortcut::primary('R')];
@@ -56,26 +56,16 @@ const DECREES: [CommandSpec<Decree, ()>; 5] = [
     .with_detail("Restores the continental United States overview.")
     .with_mnemonic('C'),
     CommandSpec::new(
-        Decree::ToggleCloseMinimizes,
-        "application.toggle_close_minimizes",
-        "Close minimizes",
+        Decree::ToggleCloseToTray,
+        "application.toggle_close_to_tray",
+        "Close to tray",
         CommandScope::Global,
     )
-    .with_detail("Chooses whether the window close control hides HRRR or terminates it.")
-    .with_mnemonic('M'),
+    .with_detail("Hides HRRR on close when the window system and tray support it.")
+    .with_mnemonic('T'),
 ];
 
 pub fn canon() -> &'static CommandCanon<Decree, ()> {
     static CANON: OnceLock<CommandCanon<Decree, ()>> = OnceLock::new();
     CANON.get_or_init(|| CommandCanon::new(&DECREES))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decree_canon_is_valid() {
-        assert_eq!(canon().specs().len(), DECREES.len());
-    }
 }

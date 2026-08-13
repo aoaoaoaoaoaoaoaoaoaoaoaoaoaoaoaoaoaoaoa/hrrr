@@ -14,7 +14,7 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
         "command guide closed",
         |state: &Observation| !state.guide_open,
     ))?;
-    let initial_close = initial.state.close_minimizes;
+    let initial_close = initial.state.close_to_tray;
 
     let before = story.capture()?;
     let _opened = story.key(Key::Function(1))?.until(Condition::new(
@@ -38,12 +38,12 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     }
 
     let blocked = story
-        .chord(Modifiers::ALT, Key::Character('m'))?
+        .chord(Modifiers::ALT, Key::Character('t'))?
         .next_frame()?
         .into_value();
     demand(
-        blocked.state.guide_open && blocked.state.close_minimizes == initial_close,
-        "Alt+M escaped through the open command guide",
+        blocked.state.guide_open && blocked.state.close_to_tray == initial_close,
+        "Alt+T escaped through the open command guide",
     )?;
     let _closed = story.key(Key::Escape)?.until(Condition::new(
         "command guide closed",
@@ -70,16 +70,16 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
 
     let toggled = !initial_close;
     let _toggled = story
-        .chord(Modifiers::ALT, Key::Character('m'))?
+        .chord(Modifiers::ALT, Key::Character('t'))?
         .until(Condition::new(
-            "close-minimizes mnemonic applied",
-            move |state: &Observation| state.close_minimizes == toggled,
+            "close-to-tray mnemonic applied",
+            move |state: &Observation| state.close_to_tray == toggled,
         ))?;
     let _persisted = story.wait_stable(
         Duration::from_secs(3),
         Duration::from_millis(700),
-        "close-minimizes preference persisted",
-        move |frame| (frame.state.close_minimizes == toggled).then_some(()),
+        "close-to-tray preference persisted",
+        move |frame| (frame.state.close_to_tray == toggled).then_some(()),
     )?;
     app.terminate()?;
     drop(story);
@@ -88,8 +88,8 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
     let _restored = story.wait(Condition::new(
-        "close-minimizes mnemonic survived restart",
-        move |state: &Observation| state.close_minimizes == toggled,
+        "close-to-tray mnemonic survived restart",
+        move |state: &Observation| state.close_to_tray == toggled,
     ))?;
     app.terminate()
 }

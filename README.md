@@ -81,9 +81,14 @@ that history.
 Every map position and persistent-probe set belongs to the active saved view
 and is autosaved. The + control clones the active view. Numeric keys select
 bound views; `Shift` plus a numeric key binds that slot to the active view.
+Autosave settlement is a semantic deadline rather than a repaint clock, and
+durable writes run on the shared Eternalist background scribe.
+Forecast-frontier surveys and basemap retry backoff use that same host service
+clock, so rendering can stop completely without suspending domain time.
 
-Closing the window hides it only when **Close minimizes** is enabled and a tray
-is available. Left-click the tray icon to reveal the window; its context menu
+Closing the window hides it only when **Close to tray** is enabled and both the
+native window system and tray support concealment. Otherwise close terminates
+the process. Left-click the tray icon to reveal the window; its context menu
 quits the process.
 
 ## Storage

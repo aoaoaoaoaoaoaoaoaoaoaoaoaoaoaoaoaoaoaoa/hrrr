@@ -21,9 +21,11 @@ use dwemer_poolrooms::{
 };
 use egui::Color32;
 use eternalist_apps::{
+    ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideSection, PANEL_IDIOMS, RAIL_IDIOMS},
     commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     panel_navigation::PanelNavigator,
+    responsiveness::DrainBudget,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -34,6 +36,7 @@ use std::{
 const STATE_SETTLE: Duration = Duration::from_millis(450);
 const FRONTIER_POLL: Duration = Duration::from_mins(1);
 const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
+const EVENT_DRAIN: DrainBudget = DrainBudget::new(64, Duration::from_millis(3));
 const FIELD_CAPACITY: usize = 12;
 const VECTOR_CEILING: usize = 512 * 1_048_576;
 const VIEW_SLOT_KEYS: [Shortcut; 10] = [
@@ -302,8 +305,52 @@ impl SmokeSurvey {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct DirtyState {
+    slate: bool,
+    config: bool,
+    views: bool,
+}
+
+impl DirtyState {
+    const fn any(self) -> bool {
+        self.slate || self.config || self.views
+    }
+}
+
+struct DurableState {
+    slate: Option<Slate>,
+    config: Option<Config>,
+    views: Option<ViewLibrary>,
+}
+
+impl DurableState {
+    fn save(self, lair: &Lair) -> Result<()> {
+        let mut faults = Vec::new();
+        if let Some(slate) = self.slate
+            && let Err(error) = slate.save(&lair.slate_path())
+        {
+            faults.push(format!("session state: {error:#}"));
+        }
+        if let Some(config) = self.config
+            && let Err(error) = config.save(&lair.config_path())
+        {
+            faults.push(format!("preferences: {error:#}"));
+        }
+        if let Some(views) = self.views
+            && let Err(error) = views.save(&lair.views_path())
+        {
+            faults.push(format!("saved views: {error:#}"));
+        }
+        if faults.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(faults.join("; ")))
+        }
+    }
+}
+
 pub struct WeatherApp {
-    lair: Lair,
     _instance: InstanceGuard,
     config: Config,
     views: ViewLibrary,
@@ -343,9 +390,8 @@ pub struct WeatherApp {
     smoke_survey: SmokeSurvey,
     scale_bar: map::ScaleBar,
     water: Surface,
-    dirty: Option<Instant>,
-    config_dirty: Option<Instant>,
-    views_dirty: Option<Instant>,
+    scribe: SettledScribe<DurableState>,
+    dirty: DirtyState,
     status: String,
     basemap_status: String,
 }
@@ -394,8 +440,22 @@ impl WeatherApp {
             agitation.scroll_coupling = 0.006;
             agitation.pond_impulse = 0.4;
         }
+        let scribe_lair = lair.clone();
+        let mut scribe = SettledScribe::spawn(
+            "hrrr-state-scribe",
+            ctx,
+            STATE_SETTLE,
+            move |state: DurableState| state.save(&scribe_lair),
+        )?;
+        let dirty = DirtyState {
+            slate: migrated_slate,
+            config: had_legacy_views,
+            views: migrated_views,
+        };
+        if dirty.any() {
+            scribe.mark();
+        }
         let app = Self {
-            lair,
             _instance: instance,
             config,
             views,
@@ -435,9 +495,8 @@ impl WeatherApp {
             smoke_survey: SmokeSurvey::default(),
             scale_bar: map::ScaleBar::default(),
             water,
-            dirty: migrated_slate.then(Instant::now),
-            config_dirty: had_legacy_views.then(Instant::now),
-            views_dirty: migrated_views.then(Instant::now),
+            scribe,
+            dirty,
             status: "finding the newest complete HRRR cycle…".to_owned(),
             basemap_status: "OPENING PROTOMAPS ARCHIVE".to_owned(),
         };
@@ -447,7 +506,7 @@ impl WeatherApp {
 
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         self.absorb_events(ui.ctx());
-        self.tend_survey(ui.ctx());
+        self.absorb_persistence();
         let guide_invoked = self.guide.take_shortcuts(ui.ctx());
         if !guide_invoked
             && let Some(dispatch) =
@@ -481,9 +540,54 @@ impl WeatherApp {
             crate::witness::rect(ui.ctx(), hrrr_contract::Target::CommandGuide, rect);
         }
         self.guide = guide;
-        self.flush_state(false);
-        self.flush_config(false);
-        self.flush_views(false);
+    }
+
+    pub fn service_deadline(&self, _now: Instant) -> Option<Instant> {
+        self.scribe
+            .deadline()
+            .into_iter()
+            .chain(self.survey_deadline())
+            .chain(self.tile_rejections.values().filter_map(|rejection| {
+                if let TileRejection::RetryAt(deadline) = rejection {
+                    Some(*deadline)
+                } else {
+                    None
+                }
+            }))
+            .min()
+    }
+
+    pub fn service_deadline_reached(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        self.tile_rejections.retain(|_key, rejection| {
+            let expired = matches!(rejection, TileRejection::RetryAt(deadline) if *deadline <= now);
+            changed |= expired;
+            !expired
+        });
+        if self
+            .survey_deadline()
+            .is_some_and(|deadline| deadline <= now)
+            && let Some(run) = self.run
+        {
+            self.request_survey(run);
+            changed = true;
+        }
+        if self
+            .scribe
+            .deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            let snapshot = self.durable_state();
+            match self.scribe.tend(now, || snapshot) {
+                Ok(Some(_sequence)) => self.dirty = DirtyState::default(),
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = format!("state scribe failed: {error:#}");
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub fn water_frame(
@@ -495,13 +599,14 @@ impl WeatherApp {
         self.water.frame(ctx, pixels_per_point, tooltip_rects, None)
     }
 
-    pub fn retire(&mut self) {
-        self.flush_config(true);
-        self.flush_state(true);
-        self.flush_views(true);
+    fn retire(&mut self) {
+        if let Err(error) = self.scribe.flush(self.durable_state_all()) {
+            eprintln!("could not persist HRRR state during retirement: {error:#}");
+        }
+        self.dirty = DirtyState::default();
     }
 
-    pub const fn close_minimizes(&self) -> bool {
+    pub const fn close_to_tray_enabled(&self) -> bool {
         self.config.close_minimizes
     }
 
@@ -617,7 +722,7 @@ impl WeatherApp {
                 [ui.available_width(), 26.0],
                 egui::Button::new(
                     decrees::canon()
-                        .spec(Decree::ToggleCloseMinimizes)
+                        .spec(Decree::ToggleCloseToTray)
                         .widget_text(ui),
                 )
                 .selected(self.config.close_minimizes),
@@ -630,7 +735,7 @@ impl WeatherApp {
                 toggle_close = Some(response.rect);
             }
             let law = if self.config.close_minimizes {
-                "window close hides to tray"
+                "window close uses the tray when supported"
             } else {
                 "window close terminates"
             };
@@ -646,7 +751,7 @@ impl WeatherApp {
         );
         self.water.fold(application.wake);
         if let Some(rect) = toggle_close {
-            self.apply_decree(CommandDispatch::Invoke(Decree::ToggleCloseMinimizes));
+            self.apply_decree(CommandDispatch::Invoke(Decree::ToggleCloseToTray));
             self.water.select(rect);
         }
 
@@ -1211,7 +1316,7 @@ impl WeatherApp {
             transient_probe: self.transient_probe.map(MercatorPoint::world),
             dragging_pin: self.pin_tug.map(|tug| tug.slot),
             guide_open: self.guide.is_open(),
-            close_minimizes: self.config.close_minimizes,
+            close_to_tray: self.config.close_minimizes,
             viewport: crate::witness::Viewport {
                 center: self.viewport.center_mercator,
                 zoom: self.viewport.zoom,
@@ -1376,10 +1481,11 @@ impl WeatherApp {
     }
 
     fn absorb_events(&mut self, ctx: &egui::Context) {
-        while let Ok(message) = self.custodian.faults.try_recv() {
+        let mut drain = EVENT_DRAIN.arm();
+        while let Some(message) = drain.receive(&self.custodian.faults) {
             self.status = message;
         }
-        while let Ok(event) = self.worker.events.try_recv() {
+        while let Some(event) = drain.receive(&self.worker.events) {
             match event {
                 Event::Discovered(extent) => {
                     let latest = extent.run();
@@ -1474,7 +1580,7 @@ impl WeatherApp {
                 }
             }
         }
-        while let Ok(event) = self.basemap.events.try_recv() {
+        while let Some(event) = drain.receive(&self.basemap.events) {
             match event {
                 basemap::Event::Ready => {
                     "PROTOMAPS · © OPENSTREETMAP".clone_into(&mut self.basemap_status);
@@ -1503,7 +1609,6 @@ impl WeatherApp {
                             key,
                             TileRejection::RetryAt(Instant::now() + TILE_RETRY_DELAY),
                         );
-                        ctx.request_repaint_after(TILE_RETRY_DELAY);
                     }
                     self.basemap_status = if detail {
                         format!("Z12 DETAIL OFFLINE · Z11 RETAINED · {message}")
@@ -1513,40 +1618,32 @@ impl WeatherApp {
                 }
             }
         }
+        if !self.custodian.faults.is_empty()
+            || !self.worker.events.is_empty()
+            || !self.basemap.events.is_empty()
+        {
+            ctx.request_repaint();
+        }
     }
 
-    fn tend_survey(&mut self, ctx: &egui::Context) {
-        let Some(run) = self.run else {
-            return;
-        };
+    fn survey_deadline(&self) -> Option<Instant> {
+        let run = self.run?;
         let incomplete = self
             .run_extents
             .get(&run)
             .is_some_and(|published| run.horizon().is_ok_and(|horizon| *published < horizon));
-        if !incomplete {
-            return;
-        }
-        let now = Instant::now();
-        if now >= self.next_survey && self.surveying_run.is_none() && self.loading.is_none() {
-            self.request_survey(run);
-        } else if self.surveying_run.is_none() {
-            let delay = if now >= self.next_survey {
-                Duration::from_secs(1)
-            } else {
-                self.next_survey.duration_since(now)
-            };
-            ctx.request_repaint_after(delay);
-        }
+        (incomplete && self.surveying_run.is_none() && self.loading.is_none())
+            .then_some(self.next_survey)
     }
 
     fn request_survey(&mut self, run: RunId) {
         if self.surveying_run == Some(run) {
             return;
         }
+        self.next_survey = Instant::now() + FRONTIER_POLL;
         match self.worker.send(Command::Survey(run)) {
             Ok(()) => {
                 self.surveying_run = Some(run);
-                self.next_survey = Instant::now() + FRONTIER_POLL;
                 "surveying HRRR publication frontier…".clone_into(&mut self.status);
             }
             Err(err) => self.status = err.to_string(),
@@ -1583,7 +1680,7 @@ impl WeatherApp {
             | Decree::FollowLatestLong
             | Decree::UndoMapChange
             | Decree::ResetConus
-            | Decree::ToggleCloseMinimizes => CommandStatus::Enabled,
+            | Decree::ToggleCloseToTray => CommandStatus::Enabled,
         }
     }
 
@@ -1604,10 +1701,10 @@ impl WeatherApp {
                 self.sync_active_view();
                 "restored the CONUS overview".clone_into(&mut self.status);
             }
-            Decree::ToggleCloseMinimizes => {
+            Decree::ToggleCloseToTray => {
                 self.config.close_minimizes = !self.config.close_minimizes;
                 let status = if self.config.close_minimizes {
-                    "window close will minimize to tray"
+                    "window close will use the tray when supported"
                 } else {
                     "window close will terminate"
                 };
@@ -2222,62 +2319,51 @@ impl WeatherApp {
     }
 
     fn mark_dirty(&mut self) {
-        self.dirty = Some(Instant::now());
+        self.dirty.slate = true;
+        self.scribe.mark();
     }
 
     fn mark_config_dirty(&mut self) {
-        self.config_dirty = Some(Instant::now());
+        self.dirty.config = true;
+        self.scribe.mark();
     }
 
     fn mark_views_dirty(&mut self) {
-        self.views_dirty = Some(Instant::now());
+        self.dirty.views = true;
+        self.scribe.mark();
     }
 
-    fn flush_state(&mut self, force: bool) {
-        let ready = self
-            .dirty
-            .is_some_and(|dirty| force || dirty.elapsed() >= STATE_SETTLE);
-        if !ready {
-            return;
-        }
-        match self.slate.save(&self.lair.slate_path()) {
-            Ok(()) => self.dirty = None,
-            Err(err) => self.status = format!("state save failed: {err:#}"),
+    fn durable_state(&self) -> DurableState {
+        DurableState {
+            slate: self.dirty.slate.then(|| self.slate.clone()),
+            config: self.dirty.config.then(|| self.config.clone()),
+            views: self.dirty.views.then(|| self.views.clone()),
         }
     }
 
-    fn flush_config(&mut self, force: bool) {
-        let ready = self
-            .config_dirty
-            .is_some_and(|dirty| force || dirty.elapsed() >= STATE_SETTLE);
-        if !ready {
-            return;
-        }
-        match self.config.save(&self.lair.config_path()) {
-            Ok(()) => self.config_dirty = None,
-            Err(err) => self.status = format!("config save failed: {err:#}"),
+    fn durable_state_all(&self) -> DurableState {
+        DurableState {
+            slate: Some(self.slate.clone()),
+            config: Some(self.config.clone()),
+            views: Some(self.views.clone()),
         }
     }
 
-    fn flush_views(&mut self, force: bool) {
-        let ready = self
-            .views_dirty
-            .is_some_and(|dirty| force || dirty.elapsed() >= STATE_SETTLE);
-        if !ready {
-            return;
-        }
-        match self.views.save(&self.lair.views_path()) {
-            Ok(()) => self.views_dirty = None,
-            Err(err) => self.status = format!("view save failed: {err:#}"),
+    fn absorb_persistence(&mut self) {
+        if let Some(ScribeOutcome::Fault { message, .. }) = self.scribe.take_outcome() {
+            self.dirty = DirtyState {
+                slate: true,
+                config: true,
+                views: true,
+            };
+            self.status = format!("state save failed: {message}");
         }
     }
 }
 
 impl Drop for WeatherApp {
     fn drop(&mut self) {
-        self.flush_state(true);
-        self.flush_config(true);
-        self.flush_views(true);
+        self.retire();
     }
 }
 
@@ -2547,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn plaque_phalanx_flips_a_colliding_label_left() {
+    fn plaque_phalanx_uses_the_clear_flank_then_keeps_anchor_adjacency() {
         let mut phalanx = PlaquePhalanx::forge(egui::Rect::from_min_max(
             egui::pos2(0.0, 0.0),
             egui::pos2(500.0, 300.0),
@@ -2562,23 +2648,18 @@ mod tests {
         assert_eq!(second.pivot, egui::Align2::RIGHT_TOP);
         assert_eq!(second.rect(size).right(), 200.0);
         assert!(!first.rect(size).intersects(second.rect(size)));
-    }
 
-    #[test]
-    fn plaque_phalanx_keeps_adjacency_when_both_flanks_are_blocked() {
-        let mut phalanx = PlaquePhalanx::forge(egui::Rect::from_min_max(
+        let mut blocked = PlaquePhalanx::forge(egui::Rect::from_min_max(
             egui::pos2(0.0, 0.0),
             egui::pos2(500.0, 300.0),
         ));
-        let size = egui::vec2(120.0, 60.0);
         let anchor = egui::pos2(250.0, 100.0);
-        let gap = egui::vec2(10.0, 5.0);
-        phalanx.occupy(egui::Rect::from_min_max(
+        blocked.occupy(egui::Rect::from_min_max(
             egui::pos2(0.0, 90.0),
             egui::pos2(500.0, 180.0),
         ));
 
-        let berth = phalanx.berth(anchor, size, gap);
+        let berth = blocked.berth(anchor, size, gap);
         assert_eq!(berth.pivot, egui::Align2::LEFT_TOP);
         assert_eq!(berth.rect(size).left(), anchor.x + gap.x);
     }

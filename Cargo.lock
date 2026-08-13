@@ -660,9 +660,9 @@ dependencies = [
 
 [[package]]
 name = "dwemer_poolrooms"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "217390668982d3b56ca9087e2f787484a3d20d24d313fb554faff3a521598f2b"
+checksum = "675280fdf26997f8035687d43d61d1c049298b4e50d5b60a3247fc00dbcbb4d8"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -701,9 +701,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73d0ee1fa088038856cfcf040921ed3291f9e32987d941a9b3893acfa6929ebf"
+checksum = "697da5961e29b1dfda7eb09a9d8ace71dfdc9695ce525fb3e0e277e77edd7bcf"
 dependencies = [
  "bitflags 2.13.1",
  "egui-tester-witness",
@@ -719,9 +719,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-witness"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3372d84a09625191caecc3f8d601ca68d80b44125b29a558dfad9ba42cee656"
+checksum = "1cd5ff230f462f7cbe9458312117df419b94f80bcc4807b2d47ac4d2583e9af8"
 dependencies = [
  "egui",
  "rustix 1.1.4",
@@ -834,11 +834,12 @@ dependencies = [
 
 [[package]]
 name = "eternalist-apps"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09159850ac48b30652ff07062cfbb43f0719ecb396fb6518232e958343797f6a"
+checksum = "94090541e54de06c0da597fb3b32000f36961ee9993fbf40fe2ac44b11214f1d"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "dwemer_poolrooms",
  "egui",
  "egui-tester-witness",
@@ -1249,7 +1250,7 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hrrr"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "atomic-write-file",

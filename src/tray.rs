@@ -648,7 +648,7 @@ mod platform {
         ];
 
         #[test]
-        fn tray_menu_is_imprisoned_on_the_icons_monitor() {
+        fn tray_menu_stays_on_the_icons_monitor_at_both_vertical_edges() {
             let middle = nearest_monitor(&LIVE_TOPOLOGY, [2988, 1368]);
             assert_eq!(middle, Some(LIVE_TOPOLOGY[1]));
             let origin = popup_origin(
@@ -662,10 +662,7 @@ mod platform {
                 [106, 32],
             );
             assert_eq!(origin, [2894, 1320]);
-        }
 
-        #[test]
-        fn tray_menu_falls_below_a_top_edge_icon() {
             assert_eq!(
                 popup_origin(
                     LIVE_TOPOLOGY[1],

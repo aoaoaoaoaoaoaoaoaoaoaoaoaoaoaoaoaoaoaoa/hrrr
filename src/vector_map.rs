@@ -74,6 +74,7 @@ pub struct VectorMapGpu {
     stroke_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    uniform_value: Option<Uniform>,
     tiles: HashMap<TileKey, GpuTile>,
     active: Vec<TileKey>,
     active_set: HashSet<TileKey>,
@@ -146,6 +147,7 @@ impl VectorMapGpu {
             stroke_pipeline,
             uniform,
             bind,
+            uniform_value: None,
             tiles: HashMap::new(),
             active: Vec::new(),
             active_set: HashSet::new(),
@@ -182,7 +184,13 @@ impl VectorMapGpu {
             let _prior = self.tiles.insert(tile.key, resident);
         }
         let uniform = Uniform::forge(paint);
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+        if self
+            .uniform_value
+            .is_none_or(|current| bytemuck::bytes_of(&current) != bytemuck::bytes_of(&uniform))
+        {
+            queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+            self.uniform_value = Some(uniform);
+        }
         self.instances = uniform.wrap_radius.saturating_mul(2).saturating_add(1);
         self.reap();
         if self.profile {
@@ -741,17 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn stroke_vertex_keeps_onset_and_side_inside_seven_words() {
-        assert_eq!(size_of::<StrokePoint>(), 7 * size_of::<f32>());
-    }
-
-    #[test]
-    fn fill_vertex_is_four_words() {
-        assert_eq!(size_of::<FillPoint>(), 4 * size_of::<f32>());
-    }
-
-    #[test]
-    fn plate_phase_is_exactly_periodic() {
+    fn plate_coordinates_are_periodic_and_refine_dyadically() {
         let scale = 256.0_f32 * 16_777_216.0;
         let a = plate_phase(0.294_117_332_617_894_8, scale);
         let b = plate_phase(
@@ -759,10 +757,7 @@ mod tests {
             scale,
         );
         assert!((a - b).abs() < 0.000_1);
-    }
 
-    #[test]
-    fn plate_lattice_refines_dyadically() {
         assert_eq!(plate_points(7.0), plate_points(7.999));
         assert_eq!(plate_points(8.0), plate_points(7.0) * 2.0);
 

@@ -8,12 +8,12 @@ use crate::{
     xdg::{InstanceGuard, Lair},
 };
 use anyhow::{Context as _, Result};
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::{Receiver, bounded};
 use dwemer_poolrooms::{
     chrome,
     water::{Frame as WaterFrame, Surface, Wetness},
 };
-use eternalist_apps::{CloseDisposition, LivingWait, NativeApp, WindowSpec};
+use eternalist_apps::{CloseDisposition, LivingWait, NativeApp, NativeWake, WindowSpec};
 use std::{
     path::PathBuf,
     sync::{
@@ -21,6 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 const TITLE: &str = "HRRR · native forecast fields";
@@ -33,6 +34,7 @@ struct ForecastViewer {
     body: Body,
     tray: Option<Tray>,
     tray_armed: bool,
+    reveal: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
     wait: LivingWait,
     launch_water: Surface,
@@ -44,6 +46,7 @@ impl ForecastViewer {
             body: Body::open(ctx)?,
             tray: None,
             tray_armed: false,
+            reveal: Arc::new(AtomicBool::new(false)),
             quit: Arc::new(AtomicBool::new(false)),
             wait: LivingWait::default(),
             launch_water: Surface::new(Wetness::Wet),
@@ -55,18 +58,17 @@ impl ForecastViewer {
             return;
         }
         self.tray_armed = true;
-        let ctx = ctx.clone();
+        let wake = NativeWake::from_context(ctx);
+        let reveal = Arc::clone(&self.reveal);
         let quit = Arc::clone(&self.quit);
         match Tray::raise(move |signal| match signal {
             TraySignal::Reveal => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                ctx.request_repaint();
+                reveal.store(true, Ordering::Release);
+                let _woken = wake.wake();
             }
             TraySignal::Quit => {
                 quit.store(true, Ordering::Release);
-                ctx.request_repaint();
+                let _woken = wake.wake();
             }
         }) {
             Ok(tray) => self.tray = Some(tray),
@@ -95,9 +97,10 @@ impl NativeApp for ForecastViewer {
     fn close_requested(&mut self) -> CloseDisposition {
         match &mut self.body {
             Body::Ready(weather) => {
-                weather.retire();
-                if weather.close_minimizes() && self.tray.as_ref().is_some_and(Tray::available) {
-                    CloseDisposition::Hide
+                if weather.close_to_tray_enabled()
+                    && self.tray.as_ref().is_some_and(Tray::available)
+                {
+                    CloseDisposition::HideOrExit
                 } else {
                     CloseDisposition::Exit
                 }
@@ -111,6 +114,24 @@ impl NativeApp for ForecastViewer {
 
     fn exit_requested(&self) -> bool {
         self.quit.load(Ordering::Acquire)
+    }
+
+    fn take_reveal_request(&mut self) -> bool {
+        self.reveal.swap(false, Ordering::AcqRel)
+    }
+
+    fn service_deadline(&self, now: Instant) -> Option<Instant> {
+        match &self.body {
+            Body::Ready(weather) => weather.service_deadline(now),
+            _ => None,
+        }
+    }
+
+    fn service_deadline_reached(&mut self, now: Instant) -> bool {
+        match &mut self.body {
+            Body::Ready(weather) => weather.service_deadline_reached(now),
+            _ => false,
+        }
     }
 
     fn after_present(&mut self) -> bool {
@@ -512,19 +533,23 @@ impl Installer {
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
         let lair = lair.clone();
-        let ctx = ctx.clone();
-        let (send, events) = unbounded();
+        let wake = NativeWake::from_context(ctx);
+        let (send, events) = bounded(1);
         let progress_send = send.clone();
         let thread = thread::Builder::new()
             .name("hrrr-basemap-install".to_owned())
             .spawn(move || {
                 let result =
                     basemap_artifact::install_attended(&lair, None, &thread_cancel, |progress| {
-                        let _sent = progress_send.send(InstallEvent::Progress(progress));
-                        ctx.request_repaint();
+                        if progress_send
+                            .try_send(InstallEvent::Progress(progress))
+                            .is_ok()
+                        {
+                            let _woken = wake.request_foreground_repaint();
+                        }
                     });
                 let _sent = send.send(InstallEvent::Settled(result));
-                ctx.request_repaint();
+                let _woken = wake.request_foreground_repaint();
             })
             .context("spawn basemap installer")?;
         Ok(Self {

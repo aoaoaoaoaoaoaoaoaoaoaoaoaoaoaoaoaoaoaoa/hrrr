@@ -46,35 +46,32 @@ impl fmt::Display for Target {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
-    fn indexed_map_objects_have_disjoint_wire_identity() {
-        assert_ne!(Target::Pin(0).wire(), Target::Pin(1).wire());
-        assert_ne!(Target::Pin(0).wire(), Target::TransientProbe.wire());
-    }
-
-    #[test]
-    fn fields_have_stable_disjoint_wire_identity() {
-        assert_eq!(Target::Field("cloud-cover").wire(), "field/cloud-cover");
-        assert_ne!(
-            Target::Field("cloud-cover").wire(),
-            Target::Field("smoke").wire()
-        );
-        assert_ne!(Target::BaseHour.wire(), Target::ForecastHour.wire());
-    }
-
-    #[test]
-    fn first_contact_is_disjoint_from_the_ready_map() {
-        assert_eq!(Target::BasemapInstall.wire(), "basemap.install");
-        assert_ne!(Target::BasemapInstall.wire(), Target::Map.wire());
-    }
-
-    #[test]
-    fn command_chrome_has_stable_identity() {
-        assert_eq!(Target::Help.wire(), "application.help");
-        assert_eq!(Target::CommandGuide.wire(), "application.command-guide");
-        assert_eq!(Target::Panel("forecast").wire(), "panel/forecast");
-        assert_ne!(Target::Help.wire(), Target::CommandGuide.wire());
-        assert_ne!(Target::Help.wire(), Target::Panel("application").wire());
+    fn wire_vocabulary_is_stable_and_disjoint() {
+        let vocabulary = [
+            (Target::BasemapInstall, "basemap.install"),
+            (Target::BaseHour, "forecast.base-hour"),
+            (Target::CommandGuide, "application.command-guide"),
+            (Target::Field("cloud-cover"), "field/cloud-cover"),
+            (Target::Field("smoke"), "field/smoke"),
+            (Target::ForecastHour, "forecast.valid-hour"),
+            (Target::Help, "application.help"),
+            (Target::Map, "map.canvas"),
+            (Target::Panel("forecast"), "panel/forecast"),
+            (Target::Pin(0), "map.pin/0"),
+            (Target::Pin(1), "map.pin/1"),
+            (Target::TransientProbe, "map.probe/transient"),
+        ];
+        let wires = vocabulary
+            .iter()
+            .map(|(target, expected)| {
+                let wire = target.wire();
+                assert_eq!(wire, *expected);
+                wire.into_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(wires.len(), vocabulary.len());
     }
 }

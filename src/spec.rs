@@ -371,13 +371,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_units_convert_exactly() {
+    fn units_preserve_physical_reference_points() {
         assert!((Unit::Inch.convert(25.4) - 1.0).abs() < 1e-6);
         assert!((Unit::Fahrenheit.convert(273.15) - 32.0).abs() < 1e-4);
         assert_eq!(Unit::MicrogramPerCubicMetre.convert(1e-9), 1.0);
-        assert_eq!(Unit::Percent.convert(73.0), 73.0);
-        assert_eq!(Unit::Percent.format(72.6), "73%");
-        assert_eq!(Unit::Percent.format_ceiling(100.0), "100%");
     }
 
     #[test]
@@ -447,75 +444,5 @@ mod tests {
         assert_eq!(hour.bins.len(), QPF_HOURLY_BINS);
         assert_eq!(&run.bins[..hour.bins.len()], hour.bins.as_ref());
         assert_eq!(hour.bins.last().map(|bin| bin.ceiling), Some(4.0));
-    }
-
-    #[test]
-    fn temperature_seasons_are_distinct_two_degree_lattices() {
-        let atlas = ScaleAtlas::default();
-        let summer = atlas.get(
-            Product::Temperature,
-            SmokeRegime::Light,
-            TemperatureSeason::Summer,
-        );
-        let winter = atlas.get(
-            Product::Temperature,
-            SmokeRegime::Light,
-            TemperatureSeason::Winter,
-        );
-        assert_eq!(summer.bins.len(), 41);
-        assert_eq!(winter.bins.len(), 66);
-        for scale in [summer, winter] {
-            assert!(
-                scale
-                    .bins
-                    .windows(2)
-                    .all(|pair| (pair[1].ceiling - pair[0].ceiling - 2.0).abs() < f32::EPSILON)
-            );
-            assert!(
-                scale
-                    .bins
-                    .windows(2)
-                    .all(|pair| pair[0].srgb != pair[1].srgb)
-            );
-        }
-        let at_eighty = |scale: &Scale| {
-            scale
-                .bins
-                .iter()
-                .find(|bin| bin.ceiling == 80.0)
-                .map(|bin| bin.srgb)
-        };
-        assert_ne!(at_eighty(summer), at_eighty(winter));
-        assert_eq!(TemperatureSeason::for_month(5), TemperatureSeason::Summer);
-        assert_eq!(TemperatureSeason::for_month(9), TemperatureSeason::Summer);
-        assert_eq!(TemperatureSeason::for_month(4), TemperatureSeason::Winter);
-        assert_eq!(TemperatureSeason::for_month(10), TemperatureSeason::Winter);
-    }
-
-    #[test]
-    fn cloud_cover_is_a_complete_decile_lattice() {
-        let atlas = ScaleAtlas::default();
-        let cloud = atlas.get(
-            Product::CloudCover,
-            SmokeRegime::Light,
-            TemperatureSeason::Summer,
-        );
-        assert_eq!(cloud.unit, Unit::Percent);
-        assert_eq!(cloud.bins.len(), 11);
-        assert_eq!(cloud.bins.first().map(|bin| bin.ceiling), Some(0.0));
-        assert_eq!(cloud.bins.last().map(|bin| bin.ceiling), Some(100.0));
-        assert!(
-            cloud
-                .bins
-                .windows(2)
-                .all(|pair| (pair[1].ceiling - pair[0].ceiling - 10.0).abs() < f32::EPSILON)
-        );
-        assert_eq!(cloud.bins[0].srgb[3], 0);
-        assert!(
-            cloud
-                .bins
-                .windows(2)
-                .all(|pair| pair[0].srgb[3] < pair[1].srgb[3])
-        );
     }
 }

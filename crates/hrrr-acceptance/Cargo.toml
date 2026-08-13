@@ -9,7 +9,7 @@ rust-version = "1.96"
 publish = false
 
 [dependencies]
-egui-tester = "0.7.0"
+egui-tester = "0.7.1"
 fast-mvt = { version = "0.6.1", default-features = false, features = ["writer"] }
 geo-types = "0.7.19"
 hrrr-contract = { path = "../hrrr-contract", version = "0.5.0" }

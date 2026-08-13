@@ -193,23 +193,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_qpf_state_rectifies_to_run_accumulation() -> Result<()> {
+    fn state_versions_rectify_legacy_qpf_and_introduce_the_base_hour() -> Result<()> {
         let wire = toml::from_str::<SlateWire>("product = \"qpf\"")?;
         let SlateWire::Legacy(wire) = wire else {
             bail!("legacy state parsed as current state");
         };
         let slate = Slate::from_legacy(wire)?;
         assert_eq!(slate.overlay.active(), Some(Product::QpfRun));
+
+        let prior = toml::from_str::<VersionedSlate>(
+            "schema = 1\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nclosed_folders = []\n",
+        )?;
+        assert_eq!(prior.base, LeadHour::ZERO);
+        let current = Slate::from_versioned(toml::from_str::<VersionedSlate>(
+            "schema = 2\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\n",
+        )?)?;
+        assert_eq!(current.base, LeadHour::forge(3)?);
         Ok(())
     }
 
     #[test]
-    fn fixed_selection_cannot_exist_without_a_cycle() {
+    fn persisted_selection_rejects_missing_cycles_and_illegal_leads() {
         assert!(refine_cycle(CycleMode::Fixed, None).is_err());
-    }
-
-    #[test]
-    fn illegal_persisted_leads_are_rejected() {
         let text = "\
 schema = 1
 overlay = \"smoke\"
@@ -228,19 +233,6 @@ closed_folders = []
         assert_eq!(slate.inspector_scroll, 0.0);
         slate.inspector_scroll = lawful_scroll(-8.0);
         assert_eq!(slate.inspector_scroll, 0.0);
-        Ok(())
-    }
-
-    #[test]
-    fn versioned_state_migrates_and_persists_the_base_hour() -> Result<()> {
-        let prior = toml::from_str::<VersionedSlate>(
-            "schema = 1\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nclosed_folders = []\n",
-        )?;
-        assert_eq!(prior.base, LeadHour::ZERO);
-        let current = Slate::from_versioned(toml::from_str::<VersionedSlate>(
-            "schema = 2\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\n",
-        )?)?;
-        assert_eq!(current.base, LeadHour::forge(3)?);
         Ok(())
     }
 }
