@@ -9,7 +9,6 @@ pub enum Decree {
     FollowLatest,
     FollowLatestLong,
     UndoMapChange,
-    ResetConus,
     ToggleCloseToTray,
 }
 
@@ -20,7 +19,7 @@ const LATEST_LONG: [Shortcut; 1] = [Shortcut::new(
 )];
 const UNDO: [Shortcut; 1] = [Shortcut::primary('Z')];
 
-const DECREES: [CommandSpec<Decree, ()>; 5] = [
+const DECREES: [CommandSpec<Decree, ()>; 4] = [
     CommandSpec::new(
         Decree::FollowLatest,
         "forecast.follow_latest",
@@ -47,14 +46,6 @@ const DECREES: [CommandSpec<Decree, ()>; 5] = [
     )
     .with_detail("Restores the last probe or pin arrangement for the active view.")
     .with_default_shortcuts(&UNDO),
-    CommandSpec::new(
-        Decree::ResetConus,
-        "map.reset_conus",
-        "Reset CONUS",
-        CommandScope::Global,
-    )
-    .with_detail("Restores the continental United States overview.")
-    .with_mnemonic('C'),
     CommandSpec::new(
         Decree::ToggleCloseToTray,
         "application.toggle_close_to_tray",

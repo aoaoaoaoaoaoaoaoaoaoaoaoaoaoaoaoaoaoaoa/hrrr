@@ -12,4 +12,4 @@ domain types. User-authored configuration belongs under XDG config, disposable
 forecast bytes under XDG cache, and ephemeral view state under XDG state.
 
 New UI mechanisms remain local until their design is polished enough to
-promote into `dwemer_poolrooms`.
+promote into `brass_poolrooms`.

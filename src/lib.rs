@@ -56,7 +56,7 @@ pub fn run() -> Result<()> {
 /// Returns native-host, storage, or application startup failures.
 pub fn run_gui() -> Result<()> {
     let ctx = egui::Context::default();
-    dwemer_poolrooms::chrome::install(&ctx);
+    brass_poolrooms::chrome::install(&ctx);
     let trace = eternalist_apps::TraceGuard::arm()?;
     let result = host::run(ctx);
     trace.flush();

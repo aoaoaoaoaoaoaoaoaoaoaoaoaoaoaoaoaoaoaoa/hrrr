@@ -232,7 +232,7 @@ fn pipeline(
     fragment_entry: &'static str,
     vertex: wgpu::VertexBufferLayout<'static>,
 ) -> wgpu::RenderPipeline {
-    let buffers = [vertex, tile_layout()];
+    let buffers = [Some(vertex), Some(tile_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),

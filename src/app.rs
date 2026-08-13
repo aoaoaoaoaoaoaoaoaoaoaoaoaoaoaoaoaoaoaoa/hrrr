@@ -15,7 +15,7 @@ use crate::{
     xdg::{InstanceGuard, Lair},
 };
 use anyhow::Result;
-use dwemer_poolrooms::{
+use brass_poolrooms::{
     chrome,
     water::{Domain, Frame as WaterFrame, Surface, Wetness},
 };
@@ -673,49 +673,6 @@ impl WeatherApp {
         crate::witness::response(ui, hrrr_contract::Target::Panel("views"), &views.header);
         self.water.fold(views.wake);
 
-        let mut reset = None;
-        let navigation = panels.section(ui, "navigation", "navigation", true, |ui| {
-            let row = ui.horizontal(|ui| {
-                let _label = ui.label(chrome::muted("SCROLL"));
-                let _value = ui.label("zoom at pointer");
-            });
-            let _row = row;
-            let row = ui.horizontal(|ui| {
-                let _label = ui.label(chrome::muted("DRAG"));
-                let _value = ui.label("pan map");
-            });
-            let _row = row;
-            let response = ui.add_sized(
-                [ui.available_width(), 24.0],
-                egui::Button::new(decrees::canon().spec(Decree::ResetConus).widget_text(ui)),
-            );
-            chrome::tension(ui, &response);
-            if response.hovered() {
-                self.water.hover("reset-view", response.rect);
-            }
-            if chrome::exact_activation(ui, &response) {
-                reset = Some(response.rect);
-            }
-            let _select = ui.horizontal(|ui| {
-                let _key = ui.label(chrome::muted("0–9"));
-                let _meaning = ui.label("select bound view");
-            });
-            let _assign = ui.horizontal(|ui| {
-                let _key = ui.label(chrome::muted("SHIFT+0–9"));
-                let _meaning = ui.label("bind active view");
-            });
-        });
-        crate::witness::response(
-            ui,
-            hrrr_contract::Target::Panel("navigation"),
-            &navigation.header,
-        );
-        self.water.fold(navigation.wake);
-        if let Some(rect) = reset {
-            self.apply_decree(CommandDispatch::Invoke(Decree::ResetConus));
-            self.water.click(rect);
-        }
-
         let mut toggle_close = None;
         let application = panels.section(ui, "application", "application", true, |ui| {
             let response = ui.add_sized(
@@ -734,12 +691,6 @@ impl WeatherApp {
             if chrome::exact_activation(ui, &response) {
                 toggle_close = Some(response.rect);
             }
-            let law = if self.config.close_minimizes {
-                "window close uses the tray when supported"
-            } else {
-                "window close terminates"
-            };
-            let _law = ui.label(chrome::muted(law));
             ui.add_space(6.0);
             let help = self.guide.activator(ui);
             crate::witness::response(ui, hrrr_contract::Target::Help, &help);
@@ -810,7 +761,6 @@ impl WeatherApp {
             .valid_local_label(self.slate.lead)
             .unwrap_or_else(|_| "invalid valid time".to_owned());
         let _run = ui.label(chrome::eyebrow(format!("RUN · {run_label}")));
-        let _valid = ui.label(chrome::section_title(valid_label));
         ui.add_space(3.0);
 
         let horizon = run.horizon().unwrap_or(LeadHour::ZERO);
@@ -837,12 +787,7 @@ impl WeatherApp {
             if previous.clicked() {
                 step = Some((self.slate.lead.saturating_previous(), previous.rect));
             }
-            let _lead = ui.label(chrome::section_title(format!(
-                "{} · F{:02}/F{:02}",
-                self.slate.lead,
-                gate.get(),
-                horizon.get()
-            )));
+            let _lead = ui.label(chrome::section_title(&valid_label));
             let next = ui.add_enabled(lead_ready && self.slate.lead < gate, egui::Button::new("▶"));
             chrome::tension(ui, &next);
             if next.clicked() {
@@ -884,9 +829,12 @@ impl WeatherApp {
 
         if cumulative {
             ui.add_space(4.0);
+            let base_label = run
+                .valid_local_label(self.slate.base)
+                .unwrap_or_else(|_| "invalid base time".to_owned());
             let _base = ui.horizontal(|ui| {
                 let _label = ui.label(chrome::muted("BASE HOUR"));
-                let _value = ui.label(chrome::section_title(self.slate.base.to_string()));
+                let _value = ui.label(chrome::section_title(base_label));
             });
             let base_ceiling = self.slate.lead.saturating_previous();
             let mut raw_base = u16::from(self.slate.base.get());
@@ -1532,7 +1480,7 @@ impl WeatherApp {
                         {
                             self.demand_active();
                         } else if prior != Some(extent.published()) {
-                            self.status = format!("{} publication frontier", extent.published());
+                            "publication frontier advanced".clone_into(&mut self.status);
                         }
                     }
                 }
@@ -1558,7 +1506,7 @@ impl WeatherApp {
                     }
                     self.fields.insert(demand.key, field);
                     if foreground {
-                        self.status = format!("{} decoded in {elapsed_ms} ms", demand.key);
+                        self.status = format!("forecast decoded in {elapsed_ms} ms");
                     }
                     self.kick_prefetch();
                 }
@@ -1679,7 +1627,6 @@ impl WeatherApp {
             Decree::FollowLatest
             | Decree::FollowLatestLong
             | Decree::UndoMapChange
-            | Decree::ResetConus
             | Decree::ToggleCloseToTray => CommandStatus::Enabled,
         }
     }
@@ -1696,11 +1643,6 @@ impl WeatherApp {
             Decree::FollowLatest => self.follow_cycle(RunSelection::Latest),
             Decree::FollowLatestLong => self.follow_cycle(RunSelection::LatestLong),
             Decree::UndoMapChange => self.undo_map_object(),
-            Decree::ResetConus => {
-                self.viewport = Viewport::default();
-                self.sync_active_view();
-                "restored the CONUS overview".clone_into(&mut self.status);
-            }
             Decree::ToggleCloseToTray => {
                 self.config.close_minimizes = !self.config.close_minimizes;
                 let status = if self.config.close_minimizes {
@@ -2261,7 +2203,7 @@ impl WeatherApp {
         if self.fields.get(key).is_some() {
             self.loading = None;
             self.displayed_field = self.fields.get(key).map(|field| (key, field.clone()));
-            self.status = format!("{key} ready");
+            "forecast ready".clone_into(&mut self.status);
             self.kick_prefetch();
         } else {
             let demand = LoadDemand {
@@ -2269,7 +2211,7 @@ impl WeatherApp {
                 key,
             };
             self.loading = Some(demand);
-            self.status = format!("cutting {key}…");
+            "loading forecast…".clone_into(&mut self.status);
             if let Err(err) = self.worker.send(Command::Load(demand)) {
                 self.loading = None;
                 self.status = err.to_string();

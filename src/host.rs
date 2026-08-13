@@ -8,11 +8,11 @@ use crate::{
     xdg::{InstanceGuard, Lair},
 };
 use anyhow::{Context as _, Result};
-use crossbeam_channel::{Receiver, bounded};
-use dwemer_poolrooms::{
+use brass_poolrooms::{
     chrome,
     water::{Frame as WaterFrame, Surface, Wetness},
 };
+use crossbeam_channel::{Receiver, bounded};
 use eternalist_apps::{CloseDisposition, LivingWait, NativeApp, NativeWake, WindowSpec};
 use std::{
     path::PathBuf,

@@ -1,5 +1,5 @@
 use crate::library::{Berth, EntryName, Library, Named, ShelfBerth};
-use dwemer_poolrooms::{
+use brass_poolrooms::{
     chrome::{self, MechanismSize, Monoglyph, Symbol},
     water::Surface,
 };
