@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use egui_tester::{Button, Condition, Key, Modifiers, Result, Wheel, demand};
+use egui_tester::{Button, Condition, Key, Modifiers, Motion, Result, Wheel, demand};
 use serde::Deserialize;
 
 use crate::{
@@ -77,9 +77,8 @@ fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<f64>
         .session()
         .button_down(from.0, from.1, Button::Primary)?;
     let _pressed = story.reaction(press).next_frame()?;
-    let motion = story.session().move_to(to.0, to.1)?;
     let moved = story
-        .reaction(motion)
+        .motion_to(to, Motion::default())?
         .until(
             shows::dragging(Some(0))
                 & Condition::new("pin 0 moved", move |state: &Observation| {
