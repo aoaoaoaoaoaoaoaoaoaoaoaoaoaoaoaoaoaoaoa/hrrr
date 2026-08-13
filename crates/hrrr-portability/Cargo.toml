@@ -9,8 +9,8 @@ rust-version = "1.96"
 publish = false
 
 [dependencies]
-anyhow = "1.0.102"
-egui-tester-witness = "0.7.1"
+anyhow = "1.0.104"
+egui-tester-witness = "0.8.0"
 hrrr-contract = { path = "../hrrr-contract", version = "0.5.0" }
 serde_json = "1.0.151"
 tempfile = "3.27.0"

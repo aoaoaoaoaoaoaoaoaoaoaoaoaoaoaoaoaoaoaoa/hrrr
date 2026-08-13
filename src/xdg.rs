@@ -1,7 +1,6 @@
 use crate::cache::{CacheClass, CacheManager, CacheStore};
 use anyhow::{Context as _, Result, bail};
 use directories::ProjectDirs;
-use fs4::fs_std::FileExt as _;
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -117,7 +116,7 @@ impl InstanceGuard {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        file.try_lock_exclusive()
+        file.try_lock()
             .context("another HRRR instance already owns the application state")?;
         Ok(InstanceGuard { _file: file })
     }

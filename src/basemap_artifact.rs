@@ -425,7 +425,13 @@ fn verify_sha256(path: &Path, expected: &str, cancel: &AtomicBool) -> Result<()>
         }
         digest.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", digest.finalize());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let actual = digest
+        .finalize()
+        .iter()
+        .flat_map(|byte| [HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]])
+        .map(char::from)
+        .collect::<String>();
     if actual != expected {
         bail!(
             "SHA-256 mismatch for {}: expected {expected}, got {actual}",

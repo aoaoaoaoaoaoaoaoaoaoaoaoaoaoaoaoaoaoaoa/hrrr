@@ -526,7 +526,7 @@ impl WeatherApp {
             self.mark_dirty();
         }
         self.water.heave(ui.ctx(), inspector.scroll_offset);
-        let _center = egui::CentralPanel::default().show_inside(ui, |ui| self.map(ui));
+        let _center = egui::CentralPanel::default().show(ui, |ui| self.map(ui));
         let mut guide = std::mem::take(&mut self.guide);
         guide.show(
             ui.ctx(),

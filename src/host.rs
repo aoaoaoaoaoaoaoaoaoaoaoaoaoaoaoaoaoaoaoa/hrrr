@@ -443,7 +443,7 @@ fn launch_card(
     action: Option<LaunchAction>,
 ) -> (Option<BodyEvent>, egui::Rect) {
     let mut event = None;
-    let panel = egui::CentralPanel::default().show_inside(ui, |ui| {
+    let panel = egui::CentralPanel::default().show(ui, |ui| {
         let top = ((ui.available_height() - 250.0) * 0.5).max(24.0);
         ui.add_space(top);
         let centered = ui.vertical_centered(|ui| {
