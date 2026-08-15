@@ -13,7 +13,9 @@ use brass_poolrooms::{
     water::{Frame as WaterFrame, Surface, Wetness},
 };
 use crossbeam_channel::{Receiver, bounded};
-use eternalist_apps::{CloseDisposition, LivingWait, NativeApp, NativeWake, WindowSpec};
+use eternalist_apps::{
+    CloseDisposition, CrashProduct, CrashReportSpec, LivingWait, NativeApp, NativeWake, WindowSpec,
+};
 use std::{
     path::PathBuf,
     sync::{
@@ -27,7 +29,7 @@ use std::{
 const TITLE: &str = "HRRR · native forecast fields";
 
 pub fn run(ctx: egui::Context) -> Result<()> {
-    eternalist_apps::run(ctx.clone(), ForecastViewer::open(&ctx)?)
+    eternalist_apps::run_with(ctx, ForecastViewer::open)
 }
 
 struct ForecastViewer {
@@ -88,6 +90,12 @@ impl ForecastViewer {
 
 impl NativeApp for ForecastViewer {
     const WINDOW: WindowSpec = WindowSpec::new(TITLE, [1_440.0, 920.0]);
+
+    fn crash_reports() -> Option<CrashReportSpec> {
+        Lair::claim().ok().map(|lair| {
+            CrashReportSpec::new(CrashProduct::Hrrr, env!("CARGO_PKG_VERSION"), lair.state)
+        })
+    }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.arm_tray(ui.ctx());

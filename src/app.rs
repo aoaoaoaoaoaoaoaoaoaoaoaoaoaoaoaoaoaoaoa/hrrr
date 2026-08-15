@@ -34,6 +34,7 @@ use std::{
 };
 
 const STATE_SETTLE: Duration = Duration::from_millis(450);
+const SCALE_SETTLE: Duration = Duration::from_millis(180);
 const FRONTIER_POLL: Duration = Duration::from_mins(1);
 const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
 const EVENT_DRAIN: DrainBudget = DrainBudget::new(64, Duration::from_millis(3));
@@ -108,6 +109,53 @@ struct SmokeScene {
 struct SmokeSurvey {
     scene: Option<SmokeScene>,
     peak: Option<f32>,
+}
+
+struct ScaleLatch<S> {
+    settled: S,
+    contender: Option<(S, Instant)>,
+}
+
+impl<S: Default> Default for ScaleLatch<S> {
+    fn default() -> Self {
+        Self {
+            settled: S::default(),
+            contender: None,
+        }
+    }
+}
+
+impl<S: Copy + Eq> ScaleLatch<S> {
+    const fn settled(&self) -> S {
+        self.settled
+    }
+
+    fn observe(&mut self, proposed: S, now: Instant) -> Option<Duration> {
+        if proposed == self.settled {
+            self.contender = None;
+            return None;
+        }
+        let Some((contender, born)) = self.contender else {
+            self.contender = Some((proposed, now));
+            return Some(SCALE_SETTLE);
+        };
+        if contender != proposed {
+            self.contender = Some((proposed, now));
+            return Some(SCALE_SETTLE);
+        }
+        let age = now.saturating_duration_since(born);
+        if age >= SCALE_SETTLE {
+            self.settled = proposed;
+            self.contender = None;
+            None
+        } else {
+            Some(SCALE_SETTLE.saturating_sub(age))
+        }
+    }
+
+    fn arrest(&mut self) {
+        self.contender = None;
+    }
 }
 
 #[derive(Default)]
@@ -386,7 +434,7 @@ pub struct WeatherApp {
     shelf_edit: Option<ShelfEdit>,
     entry_edit: Option<EntryEdit>,
     scales: ScaleAtlas,
-    smoke_regime: SmokeRegime,
+    smoke_scale: ScaleLatch<SmokeRegime>,
     smoke_survey: SmokeSurvey,
     scale_bar: map::ScaleBar,
     water: Surface,
@@ -491,7 +539,7 @@ impl WeatherApp {
             shelf_edit: None,
             entry_edit: None,
             scales: ScaleAtlas::default(),
-            smoke_regime: SmokeRegime::default(),
+            smoke_scale: ScaleLatch::default(),
             smoke_survey: SmokeSurvey::default(),
             scale_bar: map::ScaleBar::default(),
             water,
@@ -931,7 +979,7 @@ impl WeatherApp {
         crate::witness::anchor(ui, hrrr_contract::Target::Map, response.rect);
         self.water.begin(Domain::shelf(rect));
         let pins = self.tug_pins(ui, rect);
-        self.navigate(ui, &response, rect, pins.captured);
+        let navigating = self.navigate(ui, &response, rect, pins.captured);
         let painter = ui.painter_at(rect);
         let _ground = painter.rect_filled(
             rect,
@@ -982,13 +1030,27 @@ impl WeatherApp {
 
         let painted_field = self.active_field().or_else(|| self.displayed_field.clone());
         let mut legend_scale = None;
+        let paints_smoke = painted_field
+            .as_ref()
+            .is_some_and(|(key, _field)| key.product == Product::Smoke);
+        if !paints_smoke {
+            self.smoke_scale.arrest();
+        }
         if let Some((key, field)) = painted_field {
             if key.product == Product::Smoke {
-                let peak = self
-                    .smoke_survey
-                    .discern(key, &field, self.viewport, rect)
-                    .map(|raw| self.scale_for(key).unit.convert(raw));
-                self.smoke_regime = self.smoke_regime.reckon(peak);
+                if navigating {
+                    self.smoke_scale.arrest();
+                } else {
+                    let peak = self
+                        .smoke_survey
+                        .discern(key, &field, self.viewport, rect)
+                        .map(|raw| self.scale_for(key).unit.convert(raw));
+                    let proposed = self.smoke_scale.settled().reckon(peak);
+                    if let Some(repaint_after) = self.smoke_scale.observe(proposed, Instant::now())
+                    {
+                        ui.ctx().request_repaint_after(repaint_after);
+                    }
+                }
             }
             let scale = self.scale_for(key).clone();
             legend_scale = Some(scale.clone());
@@ -1030,24 +1092,28 @@ impl WeatherApp {
         response: &egui::Response,
         rect: egui::Rect,
         pin_captured: bool,
-    ) {
+    ) -> bool {
         let before = self.viewport;
         let minimum_zoom = map::minimum_zoom(rect.height());
         self.viewport.zoom = self.viewport.zoom.max(minimum_zoom);
-        if !pin_captured && response.dragged_by(egui::PointerButton::Primary) {
+        let dragging = !pin_captured && response.dragged_by(egui::PointerButton::Primary);
+        if dragging {
             let delta = ui.input(|input| input.pointer.delta());
             let scale = map::world_pixels(self.viewport);
             self.viewport.center_mercator[0] -= f64::from(delta.x) / scale;
             self.viewport.center_mercator[1] -= f64::from(delta.y) / scale;
             self.water.drag(rect, delta.y);
         }
-        if let Some((scroll, pointer)) = ui.input(|input| {
+        let scroll = ui.input(|input| {
             input
                 .pointer
                 .hover_pos()
                 .filter(|pointer| rect.contains(*pointer))
                 .map(|pointer| (input.smooth_scroll_delta.y, pointer))
-        }) && scroll.abs() > f32::EPSILON
+        });
+        let scrolling = scroll.is_some_and(|(scroll, _pointer)| scroll.abs() > f32::EPSILON);
+        if let Some((scroll, pointer)) =
+            scroll.filter(|(scroll, _pointer)| scroll.abs() > f32::EPSILON)
         {
             let anchor = map::world_at(self.viewport, rect, pointer);
             self.viewport.zoom = (self.viewport.zoom + f64::from(scroll) * 0.008)
@@ -1078,6 +1144,7 @@ impl WeatherApp {
                 egui::Vec2::splat(18.0),
             ));
         }
+        dragging || scrolling
     }
 
     fn tug_pins(&mut self, ui: &egui::Ui, map_rect: egui::Rect) -> PinGesture {
@@ -2077,8 +2144,11 @@ impl WeatherApp {
     }
 
     fn scale_for(&self, key: FrameKey) -> &Scale {
-        self.scales
-            .get(key.product, self.smoke_regime, TemperatureSeason::at(key))
+        self.scales.get(
+            key.product,
+            self.smoke_scale.settled(),
+            TemperatureSeason::at(key),
+        )
     }
 
     fn demand_cover(&mut self, cover: &basemap::Cover) {
@@ -2494,6 +2564,35 @@ mod tests {
 
     fn view(name: &str) -> Result<EntryName> {
         EntryName::forge(name).context("test view name")
+    }
+
+    #[test]
+    fn scale_latch_requires_quiet_after_navigation() {
+        // A pan can cross both smoke thresholds in one frame. Value hysteresis
+        // alone therefore cannot keep the field and legend stable under drag.
+        let begun = Instant::now();
+        let mut latch = ScaleLatch::<SmokeRegime>::default();
+
+        assert_eq!(latch.observe(SmokeRegime::Heavy, begun), Some(SCALE_SETTLE));
+        latch.arrest();
+        let released = begun + SCALE_SETTLE;
+        assert_eq!(
+            latch.observe(SmokeRegime::Heavy, released),
+            Some(SCALE_SETTLE)
+        );
+        assert_eq!(
+            latch.observe(
+                SmokeRegime::Heavy,
+                released + SCALE_SETTLE.saturating_sub(Duration::from_millis(1)),
+            ),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(latch.settled(), SmokeRegime::Light);
+        assert_eq!(
+            latch.observe(SmokeRegime::Heavy, released + SCALE_SETTLE),
+            None
+        );
+        assert_eq!(latch.settled(), SmokeRegime::Heavy);
     }
 
     #[test]
