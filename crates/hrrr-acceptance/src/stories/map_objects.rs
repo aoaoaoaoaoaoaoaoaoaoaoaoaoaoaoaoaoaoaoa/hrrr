@@ -50,19 +50,13 @@ fn place_and_persist(harness: &Harness<'_>) -> Result<[f64; 2]> {
     let release = story.session().key_up(Key::Shift)?;
     let _released = story.reaction(release).next_frame()?;
     let origin = placed.state.pins[0];
-    let _settled = story.wait_stable(
-        Duration::from_secs(4),
-        Duration::from_millis(700),
-        "persistent pin to survive the autosave interval",
-        |frame| (frame.state.pins.as_slice() == [origin]).then_some(()),
-    )?;
+    app.wait_until(Duration::from_secs(4), "pin to reach views.toml", || {
+        Ok(persisted_view(harness)
+            .is_some_and(|view| view.pins.first().is_some_and(|point| near(*point, origin))))
+    })?;
     app.terminate()?;
     drop(story);
     drop(app);
-    demand(
-        persisted_pin(harness, 0).is_some_and(|point| near(point, origin)),
-        "persistent pin witness advanced before views.toml",
-    )?;
     Ok(origin)
 }
 
@@ -97,12 +91,6 @@ fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<f64>
     let _undone = story
         .chord(Modifiers::CTRL, Key::Character('z'))?
         .until(shows::pin(0, origin))?;
-    let _settled = story.wait_stable(
-        Duration::from_secs(4),
-        Duration::from_millis(700),
-        "undone pin drag to survive the autosave interval",
-        |frame| (frame.state.pins.as_slice() == [origin]).then_some(()),
-    )?;
     if let Some(artifacts) = harness.artifacts {
         story
             .capture()?
@@ -110,19 +98,19 @@ fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<f64>
     }
     let map = story.anchor(hrrr_contract::Target::Map)?;
     let zoom_ceiling = batter_zoom_ceiling(&mut story, map.center())?;
-    let _settled = story.wait_stable(
+    app.wait_until(
         Duration::from_secs(4),
-        Duration::from_millis(700),
-        "zoom ceiling to survive the autosave interval",
-        |frame| (frame.state.viewport.zoom.to_bits() == zoom_ceiling.to_bits()).then_some(()),
+        "undone pin and zoom ceiling to reach views.toml",
+        || {
+            Ok(persisted_view(harness).is_some_and(|view| {
+                view.pins.first().is_some_and(|point| near(*point, origin))
+                    && view.viewport.zoom.to_bits() == zoom_ceiling.to_bits()
+            }))
+        },
     )?;
     app.terminate()?;
     drop(story);
     drop(app);
-    demand(
-        persisted_pin(harness, 0).is_some_and(|point| near(point, origin)),
-        "undo restored the witness but not views.toml",
-    )?;
     Ok(zoom_ceiling)
 }
 
@@ -171,10 +159,10 @@ fn prove_final_restart(harness: &Harness<'_>, origin: [f64; 2], zoom_ceiling: f6
     app.terminate()
 }
 
-fn persisted_pin(harness: &Harness<'_>, slot: usize) -> Option<[f64; 2]> {
+fn persisted_view(harness: &Harness<'_>) -> Option<SavedView> {
     let raw = harness.testbed.read_private_to_string(VIEWS).ok()?;
     let views = toml::from_str::<ViewLibrary>(&raw).ok()?;
-    views.saved.first()?.pins.get(slot).copied()
+    views.saved.into_iter().next()
 }
 
 #[derive(Deserialize)]
@@ -184,5 +172,11 @@ struct ViewLibrary {
 
 #[derive(Deserialize)]
 struct SavedView {
+    viewport: SavedViewport,
     pins: Vec<[f64; 2]>,
+}
+
+#[derive(Deserialize)]
+struct SavedViewport {
+    zoom: f64,
 }
