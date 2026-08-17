@@ -19,7 +19,7 @@ mod state;
 mod tray;
 mod vector_map;
 mod view;
-mod wind_quill;
+mod wind_barb;
 mod witness;
 mod worker;
 mod xdg;

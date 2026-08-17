@@ -11,7 +11,7 @@ use crate::{
     state::Slate,
     vector_map::VectorPaint,
     view::{SavedView, ViewLibrary, ViewSlot},
-    wind_quill,
+    wind_barb,
     worker::{Command, DemandId, Event, LoadDemand, LoadIntent, Worker},
     xdg::{InstanceGuard, Lair},
 };
@@ -1065,7 +1065,7 @@ impl WeatherApp {
                 },
             ));
             if key.product == Product::Wind {
-                wind_quill::paint(&painter, &field, self.viewport, rect);
+                wind_barb::paint(&painter, &field, self.viewport, rect);
             }
         }
         self.paint_labels(&painter, rect);

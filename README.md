@@ -3,8 +3,8 @@
 HRRR is a native viewer for NOAA High-Resolution Rapid Refresh forecast
 fields. It renders surface smoke, two-metre temperature, ten-metre wind, total
 cloud cover, total precipitation, and one-hour precipitation over a locally
-indexed vector basemap. Wind direction is stamped from an application-owned 3D
-bronze-quill die by the same build-time Foundry that makes Poolrooms chrome.
+indexed vector basemap. Standard wind barbs are stamped from application-owned
+3D bronze dies by the same build-time Foundry that makes Poolrooms chrome.
 Forecast animation, map navigation, probes, and saved views remain responsive
 while network, GRIB, PMTiles, and mesh work run outside the UI thread.
 
