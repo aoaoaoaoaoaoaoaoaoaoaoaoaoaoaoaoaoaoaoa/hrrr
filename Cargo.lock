@@ -254,12 +254,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "brass_poolrooms"
-version = "0.13.1"
+name = "brass_foundry"
+version = "0.13.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e74044916f8544c87db16420277af63349d918dd02e1f38da32f212eb6ac3183"
+checksum = "9d5fec59258fd060f4ace26d2f3f539655e348d43b182d10702441f97d9ed8be"
+
+[[package]]
+name = "brass_poolrooms"
+version = "0.13.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "595bccd6dcb60ee4c654e6b0ff0b9fbc351124d26b4b7137f8ddc8cb96d6ba21"
 dependencies = [
  "anyhow",
+ "brass_foundry",
  "bytemuck",
  "egui",
  "egui-wgpu",
@@ -1360,6 +1367,7 @@ version = "1.2.8"
 dependencies = [
  "anyhow",
  "atomic-write-file",
+ "brass_foundry",
  "brass_poolrooms",
  "bytemuck",
  "bytes",

@@ -19,7 +19,7 @@ repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr"
 homepage = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr"
 keywords = ["hrrr", "weather", "egui", "wgpu", "grib"]
 categories = ["gui", "science::geo"]
-include = ["assets/**", "build.rs", "src/**", "README.md", "LICENSE"]
+include = ["assets/**", "build/**", "build.rs", "src/**", "README.md", "LICENSE"]
 
 [features]
 desktop-launcher = []
@@ -37,7 +37,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.13.1"
+brass_poolrooms = "0.13.7"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-tester-witness = { version = "0.9.6", optional = true, features = ["egui"] }
@@ -59,6 +59,9 @@ ureq = "3.4.0"
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader", "writer"] }
 pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
 tiny_http = "0.12.0"
+
+[build-dependencies]
+brass_foundry = "0.13.7"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"

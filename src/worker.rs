@@ -196,15 +196,43 @@ enum ForgeDemand {
 }
 
 fn forge_frame(source: &Source, blades: &mut BladeBank, key: FrameKey) -> Result<Arc<FieldGrid>> {
-    let crown = blades.load(source, key.blade())?;
-    let Some(baseline) = key.baseline_blade() else {
+    let crown = forge_recipe(source, blades, key, key.valid)?;
+    let Some(baseline) = key.baseline() else {
         return Ok(crown);
     };
-    if baseline.lead == LeadHour::ZERO {
+    if baseline == LeadHour::ZERO {
         return Ok(crown);
     }
-    let root = blades.load(source, baseline)?;
+    let root = forge_recipe(source, blades, key, baseline)?;
     Ok(Arc::new(crown.increment_since(&root)?))
+}
+
+fn forge_recipe(
+    source: &Source,
+    blades: &mut BladeBank,
+    key: FrameKey,
+    lead: LeadHour,
+) -> Result<Arc<FieldGrid>> {
+    match key.product.shape() {
+        FieldShape::Scalar => blades.load(
+            source,
+            key.blade_at(lead, Ingredient::Scalar)
+                .context("scalar recipe has no scalar blade")?,
+        ),
+        FieldShape::Vector => {
+            let eastward = blades.load(
+                source,
+                key.blade_at(lead, Ingredient::Eastward)
+                    .context("vector recipe has no eastward blade")?,
+            )?;
+            let northward = blades.load(
+                source,
+                key.blade_at(lead, Ingredient::Northward)
+                    .context("vector recipe has no northward blade")?,
+            )?;
+            Ok(Arc::new(FieldGrid::forge_vector(&eastward, &northward)?))
+        }
+    }
 }
 
 struct BladeBank {

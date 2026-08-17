@@ -83,6 +83,84 @@ enum InventoryLaw {
     Contains(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Ingredient {
+    Scalar,
+    Eastward,
+    Northward,
+}
+
+const SCALAR_INGREDIENTS: &[Ingredient] = &[Ingredient::Scalar];
+const VECTOR_INGREDIENTS: &[Ingredient] = &[Ingredient::Eastward, Ingredient::Northward];
+
+#[derive(Clone, Copy)]
+struct IngredientLaw {
+    cache_suffix: &'static str,
+    inventory: InventoryLaw,
+    grib: GribLaw,
+}
+
+impl IngredientLaw {
+    const fn new(cache_suffix: &'static str, inventory: InventoryLaw, grib: GribLaw) -> Self {
+        Self {
+            cache_suffix,
+            inventory,
+            grib,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FieldRecipe {
+    Scalar(IngredientLaw),
+    Vector {
+        eastward: IngredientLaw,
+        northward: IngredientLaw,
+    },
+}
+
+impl FieldRecipe {
+    const fn scalar(inventory: InventoryLaw, grib: GribLaw) -> Self {
+        Self::Scalar(IngredientLaw::new("", inventory, grib))
+    }
+
+    const fn ingredients(self) -> &'static [Ingredient] {
+        match self {
+            Self::Scalar(_) => SCALAR_INGREDIENTS,
+            Self::Vector { .. } => VECTOR_INGREDIENTS,
+        }
+    }
+
+    const fn law(self, ingredient: Ingredient) -> Option<IngredientLaw> {
+        match (self, ingredient) {
+            (Self::Scalar(law), Ingredient::Scalar) => Some(law),
+            (Self::Vector { eastward, .. }, Ingredient::Eastward) => Some(eastward),
+            (Self::Vector { northward, .. }, Ingredient::Northward) => Some(northward),
+            _ => None,
+        }
+    }
+
+    const fn shape(self) -> FieldShape {
+        match self {
+            Self::Scalar(_) => FieldShape::Scalar,
+            Self::Vector { .. } => FieldShape::Vector,
+        }
+    }
+
+    const fn temporal_shape(self) -> TemporalShape {
+        let law = match self {
+            Self::Scalar(law) | Self::Vector { eastward: law, .. } => law,
+        };
+        law.grib.time.temporal_shape()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FieldShape {
+    Scalar,
+    Vector,
+}
+
 impl InventoryLaw {
     fn matches(self, descriptor: &str) -> bool {
         match self {
@@ -101,8 +179,7 @@ impl InventoryLaw {
 struct ProductLaw {
     label: &'static str,
     cache_name: &'static str,
-    inventory: InventoryLaw,
-    grib: GribLaw,
+    recipe: FieldRecipe,
 }
 
 macro_rules! field_arsenal {
@@ -114,8 +191,7 @@ macro_rules! field_arsenal {
                     $variant:ident {
                         label: $label:literal,
                         cache: $cache:literal,
-                        inventory: $inventory:expr,
-                        grib: $grib:expr $(,)?
+                        recipe: $recipe:expr $(,)?
                     }
                 ),+ $(,)?
             ]
@@ -150,8 +226,7 @@ macro_rules! field_arsenal {
                             Self::$variant => ProductLaw {
                                 label: $label,
                                 cache_name: $cache,
-                                inventory: $inventory,
-                                grib: $grib,
+                                recipe: $recipe,
                             },
                         )+
                     )+
@@ -166,16 +241,20 @@ macro_rules! field_arsenal {
                 self.law().cache_name
             }
 
-            pub(crate) fn index_match(self, descriptor: &str) -> bool {
-                self.law().inventory.matches(descriptor)
+            pub(crate) const fn ingredients(self) -> &'static [Ingredient] {
+                self.law().recipe.ingredients()
             }
 
-            pub(crate) const fn grib_law(self) -> GribLaw {
-                self.law().grib
+            pub(crate) const fn shape(self) -> FieldShape {
+                self.law().recipe.shape()
+            }
+
+            const fn ingredient_law(self, ingredient: Ingredient) -> Option<IngredientLaw> {
+                self.law().recipe.law(ingredient)
             }
 
             pub const fn temporal_shape(self) -> TemporalShape {
-                self.law().grib.time.temporal_shape()
+                self.law().recipe.temporal_shape()
             }
 
             pub const fn has_baseline(self) -> bool {
@@ -198,14 +277,18 @@ field_arsenal! {
         QpfRun {
             label: "QPF · TOTAL",
             cache: "qpf",
-            inventory: InventoryLaw::AccumulationFromRun,
-            grib: GribLaw::accumulation(GribTimeLaw::AccumulationFromRun),
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::AccumulationFromRun,
+                GribLaw::accumulation(GribTimeLaw::AccumulationFromRun),
+            ),
         },
         QpfHour {
             label: "QPF · 1 HOUR",
             cache: "qpf-hour",
-            inventory: InventoryLaw::HourlyAccumulation,
-            grib: GribLaw::accumulation(GribTimeLaw::HourlyAccumulation),
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::HourlyAccumulation,
+                GribLaw::accumulation(GribTimeLaw::HourlyAccumulation),
+            ),
         },
     ],
     [
@@ -213,24 +296,48 @@ field_arsenal! {
         Smoke {
             label: "SURFACE SMOKE · 8 M AGL",
             cache: "smoke",
-            inventory: InventoryLaw::Contains(":MASSDEN:8 m above ground:"),
-            grib: GribLaw::instant(20, 0, FixedSurfaceLaw::metres_above_ground(8)),
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::Contains(":MASSDEN:8 m above ground:"),
+                GribLaw::instant(20, 0, FixedSurfaceLaw::metres_above_ground(8)),
+            ),
         },
     ],
     [
         Temperature {
             label: "TEMPERATURE · 2 M AGL",
             cache: "temperature",
-            inventory: InventoryLaw::Contains(":TMP:2 m above ground:"),
-            grib: GribLaw::instant(0, 0, FixedSurfaceLaw::metres_above_ground(2)),
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::Contains(":TMP:2 m above ground:"),
+                GribLaw::instant(0, 0, FixedSurfaceLaw::metres_above_ground(2)),
+            ),
         },
     ],
     [
         CloudCover {
             label: "CLOUD COVER",
             cache: "cloud-cover",
-            inventory: InventoryLaw::Contains(":TCDC:entire atmosphere:"),
-            grib: GribLaw::instant(6, 1, FixedSurfaceLaw::ENTIRE_ATMOSPHERE),
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::Contains(":TCDC:entire atmosphere:"),
+                GribLaw::instant(6, 1, FixedSurfaceLaw::ENTIRE_ATMOSPHERE),
+            ),
+        },
+    ],
+    [
+        Wind {
+            label: "WIND · 10 M AGL",
+            cache: "wind",
+            recipe: FieldRecipe::Vector {
+                eastward: IngredientLaw::new(
+                    "eastward",
+                    InventoryLaw::Contains(":UGRD:10 m above ground:"),
+                    GribLaw::instant(2, 2, FixedSurfaceLaw::metres_above_ground(10)),
+                ),
+                northward: IngredientLaw::new(
+                    "northward",
+                    InventoryLaw::Contains(":VGRD:10 m above ground:"),
+                    GribLaw::instant(2, 3, FixedSurfaceLaw::metres_above_ground(10)),
+                ),
+            },
         },
     ],
 }
@@ -546,6 +653,54 @@ pub(crate) struct BladeKey {
     pub run: RunId,
     pub lead: LeadHour,
     pub product: Product,
+    ingredient: Ingredient,
+}
+
+impl BladeKey {
+    pub(crate) fn forge(
+        run: RunId,
+        lead: LeadHour,
+        product: Product,
+        ingredient: Ingredient,
+    ) -> Option<Self> {
+        product.ingredient_law(ingredient).map(|_law| Self {
+            run,
+            lead,
+            product,
+            ingredient,
+        })
+    }
+
+    pub(crate) fn index_match(self, descriptor: &str) -> bool {
+        self.law()
+            .is_some_and(|law| law.inventory.matches(descriptor))
+    }
+
+    pub(crate) fn cache_name(self) -> Option<String> {
+        self.law().map(|law| {
+            if law.cache_suffix.is_empty() {
+                self.product.cache_name().to_owned()
+            } else {
+                format!("{}-{}", self.product.cache_name(), law.cache_suffix)
+            }
+        })
+    }
+
+    pub(crate) fn grib_law(self) -> Option<GribLaw> {
+        self.law().map(|law| law.grib)
+    }
+
+    pub(crate) const fn ingredient(self) -> Ingredient {
+        self.ingredient
+    }
+
+    pub(crate) const fn is_vector_component(self) -> bool {
+        matches!(self.product.shape(), FieldShape::Vector)
+    }
+
+    const fn law(self) -> Option<IngredientLaw> {
+        self.product.ingredient_law(self.ingredient)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -580,20 +735,8 @@ impl FrameKey {
         self.baseline
     }
 
-    pub(crate) const fn blade(self) -> BladeKey {
-        BladeKey {
-            run: self.run,
-            lead: self.valid,
-            product: self.product,
-        }
-    }
-
-    pub(crate) fn baseline_blade(self) -> Option<BladeKey> {
-        self.baseline.map(|lead| BladeKey {
-            run: self.run,
-            lead,
-            product: self.product,
-        })
+    pub(crate) fn blade_at(self, lead: LeadHour, ingredient: Ingredient) -> Option<BladeKey> {
+        BladeKey::forge(self.run, lead, self.product, ingredient)
     }
 
     pub fn with_valid(self, valid: LeadHour) -> Option<Self> {
@@ -699,6 +842,37 @@ impl LambertGrid {
             (y - self.first_xy[1]) / self.spacing[1],
         ]
     }
+
+    pub fn lon_lat_at_grid(self, i: f64, j: f64) -> [f64; 2] {
+        let x = i.mul_add(self.spacing[0], self.first_xy[0]);
+        let y = j.mul_add(self.spacing[1], self.first_xy[1]);
+        let poleward = self.origin_rho - y;
+        let rho = x.hypot(poleward);
+        let latitude = 2.0 * (self.radius_factor / rho).powf(1.0 / self.cone).atan()
+            - std::f64::consts::FRAC_PI_2;
+        let longitude = (self.central_lon + x.atan2(poleward) / self.cone).to_degrees();
+        [
+            (longitude + 180.0).rem_euclid(360.0) - 180.0,
+            latitude.to_degrees(),
+        ]
+    }
+
+    fn earth_vector_at_grid(self, i: u32, j: u32, [x, y]: [f32; 2]) -> [f32; 2] {
+        let grid_x = f64::from(i).mul_add(self.spacing[0], self.first_xy[0]);
+        let grid_y = f64::from(j).mul_add(self.spacing[1], self.first_xy[1]);
+        let convergence = grid_x.atan2(self.origin_rho - grid_y);
+        let (sin, cos) = convergence.sin_cos();
+        [
+            f64::from(x).mul_add(cos, f64::from(y) * sin) as f32,
+            (-f64::from(x)).mul_add(sin, f64::from(y) * cos) as f32,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VectorFrame {
+    Earth,
+    Grid,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -806,6 +980,14 @@ pub struct FieldGrid {
     pub width: u32,
     pub height: u32,
     pub projection: LambertGrid,
+    vector_frame: Option<VectorFrame>,
+    vector: Option<VectorGrid>,
+}
+
+#[derive(Clone, Debug)]
+struct VectorGrid {
+    eastward: Arc<[f32]>,
+    northward: Arc<[f32]>,
 }
 
 impl FieldGrid {
@@ -814,6 +996,16 @@ impl FieldGrid {
         width: usize,
         height: usize,
         projection: LambertGrid,
+    ) -> Result<Self> {
+        Self::forge_blade(values, width, height, projection, None)
+    }
+
+    pub(crate) fn forge_blade(
+        values: Vec<f32>,
+        width: usize,
+        height: usize,
+        projection: LambertGrid,
+        vector_frame: Option<VectorFrame>,
     ) -> Result<Self> {
         if values.len() != width.saturating_mul(height) {
             bail!(
@@ -828,6 +1020,59 @@ impl FieldGrid {
             width,
             height,
             projection,
+            vector_frame,
+            vector: None,
+        })
+    }
+
+    pub fn forge_vector(eastward: &Self, northward: &Self) -> Result<Self> {
+        if eastward.width != northward.width
+            || eastward.height != northward.height
+            || eastward.projection != northward.projection
+        {
+            bail!("vector components do not share one grid law");
+        }
+        if eastward.vector.is_some() || northward.vector.is_some() {
+            bail!("vector components must be scalar GRIB blades");
+        }
+        let Some(frame) = eastward.vector_frame else {
+            bail!("eastward blade has no vector coordinate frame");
+        };
+        if northward.vector_frame != Some(frame) {
+            bail!("vector components do not share one coordinate frame");
+        }
+        let mut east = Vec::with_capacity(eastward.values.len());
+        let mut north = Vec::with_capacity(northward.values.len());
+        let mut values = Vec::with_capacity(eastward.values.len());
+        let width = usize::try_from(eastward.width)?;
+        for (slot, (&x, &y)) in eastward
+            .values
+            .iter()
+            .zip(northward.values.iter())
+            .enumerate()
+        {
+            let vector = match frame {
+                VectorFrame::Earth => [x, y],
+                VectorFrame::Grid => eastward.projection.earth_vector_at_grid(
+                    u32::try_from(slot % width)?,
+                    u32::try_from(slot / width)?,
+                    [x, y],
+                ),
+            };
+            east.push(vector[0]);
+            north.push(vector[1]);
+            values.push(vector[0].hypot(vector[1]));
+        }
+        Ok(Self {
+            values: values.into(),
+            width: eastward.width,
+            height: eastward.height,
+            projection: eastward.projection,
+            vector_frame: None,
+            vector: Some(VectorGrid {
+                eastward: east.into(),
+                northward: north.into(),
+            }),
         })
     }
 
@@ -838,7 +1083,19 @@ impl FieldGrid {
         self.values.get((j * self.width + i) as usize).copied()
     }
 
+    pub fn vector_at(&self, i: u32, j: u32) -> Option<[f32; 2]> {
+        if i >= self.width || j >= self.height {
+            return None;
+        }
+        let vector = self.vector.as_ref()?;
+        let slot = (j * self.width + i) as usize;
+        Some([*vector.eastward.get(slot)?, *vector.northward.get(slot)?])
+    }
+
     pub fn increment_since(&self, baseline: &Self) -> Result<Self> {
+        if self.vector.is_some() || baseline.vector.is_some() {
+            bail!("vector fields cannot form cumulative increments");
+        }
         if self.width != baseline.width
             || self.height != baseline.height
             || self.projection != baseline.projection
@@ -901,8 +1158,19 @@ mod tests {
         let valid = LeadHour::forge(8)?;
         let frame = FrameKey::forge(run, Product::QpfRun, base, valid).context("QPF span")?;
         assert_eq!(frame.baseline(), Some(base));
-        assert_eq!(frame.blade().lead, valid);
-        assert_eq!(frame.baseline_blade().map(|blade| blade.lead), Some(base));
+        assert_eq!(
+            frame
+                .blade_at(valid, Ingredient::Scalar)
+                .context("QPF scalar blade")?
+                .lead,
+            valid
+        );
+        assert_eq!(
+            frame
+                .blade_at(base, Ingredient::Scalar)
+                .map(|blade| blade.lead),
+            Some(base)
+        );
         assert_eq!(frame.to_string(), "F03–F08");
         assert!(FrameKey::forge(run, Product::QpfRun, valid, valid).is_none());
 
@@ -931,6 +1199,44 @@ mod tests {
 
         let alien = FieldGrid::forge(vec![0.0], 1, 1, projection)?;
         assert!(crown.increment_since(&alien).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn vector_recipe_resolves_its_coordinate_frame_before_scalar_projection() -> Result<()> {
+        let projection = LambertGrid {
+            cone: 1.0,
+            radius_factor: 1.0,
+            origin_rho: 1.0,
+            central_lon: 0.0,
+            first_xy: [0.0; 2],
+            spacing: [1.0; 2],
+        };
+        let eastward =
+            FieldGrid::forge_blade(vec![3.0, 0.0], 2, 1, projection, Some(VectorFrame::Earth))?;
+        let northward =
+            FieldGrid::forge_blade(vec![4.0, -2.0], 2, 1, projection, Some(VectorFrame::Earth))?;
+        let wind = FieldGrid::forge_vector(&eastward, &northward)?;
+        assert_eq!(&wind.values[..], &[5.0, 2.0]);
+        assert_eq!(wind.vector_at(0, 0), Some([3.0, 4.0]));
+        assert_eq!(wind.vector_at(1, 0), Some([0.0, -2.0]));
+
+        let converged = LambertGrid {
+            first_xy: [1.0, 0.0],
+            ..projection
+        };
+        let x = FieldGrid::forge_blade(
+            vec![std::f32::consts::SQRT_2],
+            1,
+            1,
+            converged,
+            Some(VectorFrame::Grid),
+        )?;
+        let y = FieldGrid::forge_blade(vec![0.0], 1, 1, converged, Some(VectorFrame::Grid))?;
+        let rotated = FieldGrid::forge_vector(&x, &y)?;
+        let [east, north] = rotated.vector_at(0, 0).context("resolved vector")?;
+        assert!((east - 1.0).abs() < 1.0e-6);
+        assert!((north + 1.0).abs() < 1.0e-6);
         Ok(())
     }
 

@@ -11,6 +11,7 @@ use crate::{
     state::Slate,
     vector_map::VectorPaint,
     view::{SavedView, ViewLibrary, ViewSlot},
+    wind_quill,
     worker::{Command, DemandId, Event, LoadDemand, LoadIntent, Worker},
     xdg::{InstanceGuard, Lair},
 };
@@ -1058,11 +1059,14 @@ impl WeatherApp {
                 rect,
                 FieldPaint {
                     key,
-                    field,
+                    field: field.clone(),
                     scale,
                     world_bounds: bounds,
                 },
             ));
+            if key.product == Product::Wind {
+                wind_quill::paint(&painter, &field, self.viewport, rect);
+            }
         }
         self.paint_labels(&painter, rect);
         if let Some(scale) = legend_scale.as_ref() {

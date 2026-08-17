@@ -34,10 +34,13 @@ impl Source {
             let Ok(index) = self.index(run, LeadHour::ZERO) else {
                 continue;
             };
-            if Product::ALL
-                .iter()
-                .all(|product| select_range(&index, *product).is_ok())
-            {
+            let complete = Product::ALL.iter().all(|&product| {
+                product.ingredients().iter().all(|&ingredient| {
+                    BladeKey::forge(run, LeadHour::ZERO, product, ingredient)
+                        .is_some_and(|key| select_range(&index, key).is_ok())
+                })
+            });
+            if complete {
                 return Ok(extent);
             }
         }
@@ -71,7 +74,7 @@ impl Source {
             |bytes| decode::validate(key, bytes).is_ok(),
             || {
                 let index = self.index(key.run, key.lead)?;
-                let range = select_range(&index, key.product)?;
+                let range = select_range(&index, key)?;
                 let url = data_url(key.run, key.lead)?;
                 let mut response = self
                     .agent
@@ -127,7 +130,10 @@ fn frame_chamber(run: RunId, lead: LeadHour) -> Result<PathBuf> {
 }
 
 fn field_blade(key: BladeKey) -> Result<PathBuf> {
-    Ok(frame_chamber(key.run, key.lead)?.join(format!("{}.grib2", key.product.cache_name())))
+    let cache_name = key
+        .cache_name()
+        .context("blade key escaped its product recipe")?;
+    Ok(frame_chamber(key.run, key.lead)?.join(format!("{cache_name}.grib2")))
 }
 
 fn index_blade(run: RunId, lead: LeadHour) -> Result<PathBuf> {
@@ -179,20 +185,28 @@ struct IndexEntry<'a> {
     descriptor: &'a str,
 }
 
-fn select_range(index: &str, product: Product) -> Result<RangeInclusive<u64>> {
+fn select_range(index: &str, key: BladeKey) -> Result<RangeInclusive<u64>> {
     let entries = index.lines().map(parse_entry).collect::<Result<Vec<_>>>()?;
     let Some((slot, entry)) = entries
         .iter()
         .enumerate()
-        .find(|(_, entry)| product.index_match(entry.descriptor))
+        .find(|(_, entry)| key.index_match(entry.descriptor))
     else {
-        bail!("{product:?} absent from HRRR surface index");
+        bail!(
+            "{:?} {:?} absent from HRRR surface index",
+            key.product,
+            key.ingredient()
+        );
     };
     let Some(next) = entries.get(slot + 1) else {
-        bail!("{product:?} is terminal in HRRR index; byte extent is unknown");
+        bail!(
+            "{:?} {:?} is terminal in HRRR index; byte extent is unknown",
+            key.product,
+            key.ingredient()
+        );
     };
     let Some(last) = next.offset.checked_sub(1) else {
-        bail!("invalid zero-length byte range for {product:?}");
+        bail!("invalid zero-length byte range for {:?}", key.product);
     };
     Ok(entry.offset..=last)
 }
@@ -227,20 +241,56 @@ mod tests {
 91:350:d=2026071912:MASSDEN:8 m above ground:2 hour fcst:\n\
 92:500:d=2026071912:TMP:2 m above ground:2 hour fcst:\n\
 93:800:d=2026071912:TCDC:entire atmosphere:2 hour fcst:\n\
-94:900:d=2026071912:DPT:2 m above ground:2 hour fcst:\n";
+94:900:d=2026071912:UGRD:10 m above ground:2 hour fcst:\n\
+95:1000:d=2026071912:VGRD:10 m above ground:2 hour fcst:\n\
+96:1100:d=2026071912:DPT:2 m above ground:2 hour fcst:\n";
 
     #[test]
     fn inventory_selectors_distinguish_products_and_accumulation_windows() -> Result<()> {
-        assert_eq!(select_range(INDEX, Product::QpfRun)?, 200..=259);
-        assert_eq!(select_range(INDEX, Product::QpfHour)?, 300..=349);
-        assert_eq!(select_range(INDEX, Product::Smoke)?, 350..=499);
-        assert_eq!(select_range(INDEX, Product::Temperature)?, 500..=799);
-        assert_eq!(select_range(INDEX, Product::CloudCover)?, 800..=899);
+        use crate::model::Ingredient::*;
+        let run = RunId::forge(1_785_272_400)?;
+        let key = |product, ingredient| {
+            BladeKey::forge(run, LeadHour::ZERO, product, ingredient).context("lawful test blade")
+        };
+        assert_eq!(
+            select_range(INDEX, key(Product::QpfRun, Scalar)?)?,
+            200..=259
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::QpfHour, Scalar)?)?,
+            300..=349
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::Smoke, Scalar)?)?,
+            350..=499
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::Temperature, Scalar)?)?,
+            500..=799
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::CloudCover, Scalar)?)?,
+            800..=899
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::Wind, Eastward)?)?,
+            900..=999
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::Wind, Northward)?)?,
+            1000..=1099
+        );
 
         const ZERO: &str = "84:200:d=2026071912:APCP:surface:0-0 day acc fcst:\n\
 85:260:d=2026071912:WEASD:surface:0-0 day acc fcst:\n";
-        assert_eq!(select_range(ZERO, Product::QpfRun)?, 200..=259);
-        assert_eq!(select_range(ZERO, Product::QpfHour)?, 200..=259);
+        assert_eq!(
+            select_range(ZERO, key(Product::QpfRun, Scalar)?)?,
+            200..=259
+        );
+        assert_eq!(
+            select_range(ZERO, key(Product::QpfHour, Scalar)?)?,
+            200..=259
+        );
         Ok(())
     }
 

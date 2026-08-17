@@ -1,4 +1,4 @@
-use crate::model::{BladeKey, FieldGrid, GribTimeLaw, LambertGrid};
+use crate::model::{BladeKey, FieldGrid, GribTimeLaw, LambertGrid, VectorFrame};
 use anyhow::{Context as _, Result, bail};
 use grib::{
     Grib2SubmessageDecoder, GridDefinitionTemplateValues, Name, codetables::grib2::Table4_4,
@@ -14,7 +14,7 @@ pub fn field(key: BladeKey, bytes: &[u8]) -> Result<FieldGrid> {
         .context("GRIB blade contains no submessage")?;
     let (width, height) = index_message.grid_shape().context("read GRIB grid shape")?;
     let indices = index_message.ij().context("read GRIB scanning law")?;
-    let projection = projection(&index_message)?;
+    let (projection, vector_frame) = projection(key, &index_message)?;
 
     let value_grib = grib::from_bytes(bytes).context("parse GRIB values")?;
     let (_, value_message) = value_grib
@@ -38,7 +38,7 @@ pub fn field(key: BladeKey, bytes: &[u8]) -> Result<FieldGrid> {
             grid.len()
         );
     }
-    FieldGrid::forge(grid, width, height, projection)
+    FieldGrid::forge_blade(grid, width, height, projection, vector_frame)
 }
 
 pub fn validate(key: BladeKey, bytes: &[u8]) -> Result<()> {
@@ -57,7 +57,9 @@ fn validate_identity<R: std::io::Read>(
     key: BladeKey,
     message: &grib::SubMessage<'_, R>,
 ) -> Result<()> {
-    let law = key.product.grib_law();
+    let law = key
+        .grib_law()
+        .context("blade key escaped its product recipe")?;
     let product = message.prod_def();
     if message.indicator().discipline != 0
         || product.prod_tmpl_num() != law.template
@@ -144,7 +146,10 @@ fn validate_accumulation(key: BladeKey, product: &[u8]) -> Result<()> {
         ],
         "accumulation end",
     )?;
-    let expected_span = match key.product.grib_law().time {
+    let law = key
+        .grib_law()
+        .context("blade key escaped its product recipe")?;
+    let expected_span = match law.time {
         GribTimeLaw::AccumulationFromRun => u32::from(key.lead.get()),
         GribTimeLaw::HourlyAccumulation => u32::from(key.lead.get().min(1)),
         GribTimeLaw::Instant => 0,
@@ -180,12 +185,22 @@ fn validate_time(expected: Timestamp, actual: [u16; 6], role: &str) -> Result<()
     Ok(())
 }
 
-fn projection<R: std::io::Read>(message: &grib::SubMessage<'_, R>) -> Result<LambertGrid> {
+fn projection<R: std::io::Read>(
+    key: BladeKey,
+    message: &grib::SubMessage<'_, R>,
+) -> Result<(LambertGrid, Option<VectorFrame>)> {
     let definition = GridDefinitionTemplateValues::try_from(message.grid_def())
         .context("decode GRIB grid definition")?;
     let GridDefinitionTemplateValues::Template30(lambert) = definition else {
         bail!("HRRR field does not use Lambert conformal template 3.30");
     };
+    let vector_frame = key.is_vector_component().then_some({
+        if lambert.resolution_and_component_flags.0 & 0b0000_1000 == 0 {
+            VectorFrame::Earth
+        } else {
+            VectorFrame::Grid
+        }
+    });
     let (major, minor) = lambert
         .earth_shape
         .radii()
@@ -195,7 +210,7 @@ fn projection<R: std::io::Read>(message: &grib::SubMessage<'_, R>) -> Result<Lam
     }
     let degrees = |microdegrees: i32| f64::from(microdegrees) * 1.0e-6;
     let unsigned_degrees = |microdegrees: u32| f64::from(microdegrees) * 1.0e-6;
-    LambertGrid::forge(
+    let projection = LambertGrid::forge(
         major,
         degrees(lambert.first_point_lat),
         unsigned_degrees(lambert.first_point_lon),
@@ -206,41 +221,40 @@ fn projection<R: std::io::Read>(message: &grib::SubMessage<'_, R>) -> Result<Lam
             f64::from(lambert.dx) * 1.0e-3,
             f64::from(lambert.dy) * 1.0e-3,
         ],
-    )
+    )?;
+    Ok((projection, vector_frame))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{LeadHour, Product, RunId};
+    use crate::model::{Ingredient, LeadHour, Product, RunId};
 
     #[test]
     fn grib_identity_is_bound_to_every_frame_axis() -> Result<()> {
         let run = RunId::forge(1_785_272_400)?;
         let lead = LeadHour::forge(20)?;
         for product in Product::ALL {
-            let key = BladeKey { run, lead, product };
-            let blade = synthetic_blade(key)?;
-            validate(key, &blade)?;
-            let wrong_lead = BladeKey {
-                lead: LeadHour::forge(19)?,
-                ..key
-            };
-            assert!(validate(wrong_lead, &blade).is_err());
-            let wrong_run = BladeKey {
-                run: run.hours_ago(1),
-                ..key
-            };
-            assert!(validate(wrong_run, &blade).is_err());
-            let wrong_product = BladeKey {
-                product: if product == Product::Smoke {
+            for &ingredient in product.ingredients() {
+                let key = BladeKey::forge(run, lead, product, ingredient)
+                    .context("lawful product ingredient")?;
+                let blade = synthetic_blade(key)?;
+                validate(key, &blade)?;
+                let wrong_lead = BladeKey::forge(run, LeadHour::forge(19)?, product, ingredient)
+                    .context("lawful wrong-lead ingredient")?;
+                assert!(validate(wrong_lead, &blade).is_err());
+                let wrong_run = BladeKey::forge(run.hours_ago(1), lead, product, ingredient)
+                    .context("lawful wrong-run ingredient")?;
+                assert!(validate(wrong_run, &blade).is_err());
+                let alien = if product == Product::Smoke {
                     Product::Temperature
                 } else {
                     Product::Smoke
-                },
-                ..key
-            };
-            assert!(validate(wrong_product, &blade).is_err());
+                };
+                let wrong_product = BladeKey::forge(run, lead, alien, Ingredient::Scalar)
+                    .context("lawful alien product")?;
+                assert!(validate(wrong_product, &blade).is_err());
+            }
         }
         Ok(())
     }
@@ -252,11 +266,11 @@ mod tests {
         identification[6] = 1;
         stamp(&mut identification[7..14], &reference)?;
 
-        let mut product = match key.product.grib_law().time {
+        let law = key.grib_law().context("lawful synthetic blade recipe")?;
+        let mut product = match law.time {
             GribTimeLaw::Instant => vec![0_u8; 29],
             GribTimeLaw::AccumulationFromRun | GribTimeLaw::HourlyAccumulation => vec![0_u8; 53],
         };
-        let law = key.product.grib_law();
         product[2..4].copy_from_slice(&law.template.to_be_bytes());
         product[4] = law.category;
         product[5] = law.parameter;
