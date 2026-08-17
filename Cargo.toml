@@ -41,7 +41,7 @@ brass_poolrooms = "0.13.7"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-tester-witness = { version = "0.9.6", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.7.3", features = ["serde"] }
+eternalist-apps = { version = "0.7.8", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.17.1", default-features = false }
