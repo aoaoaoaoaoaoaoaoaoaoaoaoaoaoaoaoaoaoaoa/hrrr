@@ -50,15 +50,15 @@ fn emit_rose(out: &mut impl Write, name: &str, die: &Model) -> io::Result<()> {
 }
 
 fn staff() -> Model {
-    bar([0.0, 0.0], [0.0, -32.0], 1.9)
+    bar([0.0, 0.0], [0.0, -32.0], 3.2)
 }
 
 fn full_barb() -> Model {
-    bar([0.0, 0.0], [10.2, -6.1], 1.8)
+    bar([0.0, 0.0], [10.2, -6.1], 3.0)
 }
 
 fn half_barb() -> Model {
-    bar([0.0, 0.0], [6.0, -3.6], 1.8)
+    bar([0.0, 0.0], [6.0, -3.6], 3.0)
 }
 
 fn pennant() -> Model {
@@ -67,8 +67,8 @@ fn pennant() -> Model {
 
 fn calm() -> Model {
     const SEGMENTS: usize = 24;
-    const INNER: f32 = 3.4;
-    const OUTER: f32 = 5.6;
+    const INNER: f32 = 3.3;
+    const OUTER: f32 = 6.2;
     const RISE: f32 = 0.58;
     let mut model = Model::default();
     for segment in 0..SEGMENTS {

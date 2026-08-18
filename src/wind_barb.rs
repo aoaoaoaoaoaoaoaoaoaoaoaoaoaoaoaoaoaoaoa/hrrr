@@ -13,7 +13,7 @@ mod baked {
     include!(concat!(env!("OUT_DIR"), "/wind_barb.rs"));
 }
 
-const TARGET_PITCH: f32 = 82.0;
+const TARGET_PITCH: f32 = 48.0;
 const METRES_PER_SECOND_TO_KNOTS: f32 = 1.943_844_6;
 const STAFF_TIP: f32 = -32.0;
 const PENNANT_PITCH: f32 = 6.0;
