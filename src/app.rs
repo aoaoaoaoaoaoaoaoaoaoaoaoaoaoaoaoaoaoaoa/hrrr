@@ -23,7 +23,7 @@ use brass_poolrooms::{
 use egui::Color32;
 use eternalist_apps::{
     ScribeOutcome, SettledScribe,
-    command_guide::{CommandGuide, GuideGesture, GuideSection, PANEL_IDIOMS, RAIL_IDIOMS},
+    command_guide::{CommandGuide, GuideGesture, GuideSection},
     commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     panel_navigation::PanelNavigator,
     responsiveness::DrainBudget,
@@ -65,20 +65,67 @@ const ASSIGN_VIEW_SLOT_KEYS: [Shortcut; 10] = [
     Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('8')),
     Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('9')),
 ];
+const TOGGLE_CONTROLS: [Shortcut; 1] = [Shortcut::new(
+    ShortcutModifiers::NONE,
+    ShortcutKey::Function(9),
+)];
+const NEXT_CONTROL_SECTION: [Shortcut; 1] =
+    [Shortcut::new(ShortcutModifiers::CONTROL, ShortcutKey::Tab)];
+const PREVIOUS_CONTROL_SECTION: [Shortcut; 1] = [Shortcut::new(
+    ShortcutModifiers::CONTROL.plus(ShortcutModifiers::SHIFT),
+    ShortcutKey::Tab,
+)];
+const ADJUST_FORECAST_TIME: [Shortcut; 2] = [
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::ArrowLeft),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::ArrowRight),
+];
+const FORECAST_TIME_BOUNDS: [Shortcut; 2] = [
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Home),
+    Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::End),
+];
+const FORECAST_CONTROL_GESTURES: [GuideGesture; 5] = [
+    GuideGesture::new(
+        "Toggle controls",
+        "Show or hide the forecast controls.",
+        &TOGGLE_CONTROLS,
+    ),
+    GuideGesture::new(
+        "Next control section",
+        "Focus the next forecast group.",
+        &NEXT_CONTROL_SECTION,
+    ),
+    GuideGesture::new(
+        "Previous control section",
+        "Focus the previous forecast group.",
+        &PREVIOUS_CONTROL_SECTION,
+    ),
+    GuideGesture::new(
+        "Adjust forecast time",
+        "Step the focused forecast hour; the wheel also works while hovering.",
+        &ADJUST_FORECAST_TIME,
+    ),
+    GuideGesture::new(
+        "First or last forecast time",
+        "Jump to the first or last forecast hour.",
+        &FORECAST_TIME_BOUNDS,
+    ),
+];
 const VIEW_GESTURES: [GuideGesture; 2] = [
     GuideGesture::new(
         "Select bound view",
-        "Loads the view assigned to one numeric berth.",
+        "Open the view bound to a number.",
         &VIEW_SLOT_KEYS,
     ),
     GuideGesture::new(
         "Bind active view",
-        "Assigns the current view to one numeric berth.",
+        "Bind the current view to a number.",
         &ASSIGN_VIEW_SLOT_KEYS,
     ),
 ];
-const VIEW_IDIOMS: GuideSection = GuideSection::new("VIEW BERTHS", &VIEW_GESTURES);
-const GUIDE_SECTIONS: [GuideSection; 3] = [PANEL_IDIOMS, RAIL_IDIOMS, VIEW_IDIOMS];
+const FORECAST_CONTROL_IDIOMS: GuideSection =
+    GuideSection::new("FORECAST CONTROLS", &FORECAST_CONTROL_GESTURES);
+const VIEW_IDIOMS: GuideSection = GuideSection::new("VIEW SHORTCUTS", &VIEW_GESTURES);
+const GUIDE_SECTIONS: [GuideSection; 2] = [FORECAST_CONTROL_IDIOMS, VIEW_IDIOMS];
 
 #[derive(Clone, Copy)]
 enum TileRejection {
@@ -574,7 +621,7 @@ impl WeatherApp {
             self.slate.inspector_scroll = inspector.scroll_offset;
             self.mark_dirty();
         }
-        self.water.heave(ui.ctx(), inspector.scroll_offset);
+        inspector.agitate(&mut self.water);
         let _center = egui::CentralPanel::default().show(ui, |ui| self.map(ui));
         let mut guide = std::mem::take(&mut self.guide);
         guide.show(
