@@ -546,8 +546,8 @@ impl WeatherApp {
             water,
             scribe,
             dirty,
-            status: "finding the newest complete HRRR cycle…".to_owned(),
-            basemap_status: "OPENING PROTOMAPS ARCHIVE".to_owned(),
+            status: "finding latest forecast…".to_owned(),
+            basemap_status: "OPENING MAP".to_owned(),
         };
         app.worker.send(Command::Discover)?;
         Ok(app)
@@ -759,7 +759,7 @@ impl WeatherApp {
             let _status = ui.label(chrome::muted(&self.status));
             ui.add_space(3.0);
             let _source = ui.label(chrome::muted(format!(
-                "DATA · NOAA HRRR\nBASE · {}",
+                "FORECAST · NOAA HRRR\nMAP · {}",
                 self.basemap_status
             )));
         });
@@ -800,7 +800,7 @@ impl WeatherApp {
 
     fn forecast_controls(&mut self, ui: &mut egui::Ui) {
         let Some(run) = self.run else {
-            let _waiting = ui.label(chrome::muted("awaiting cycle index"));
+            let _waiting = ui.label(chrome::muted("finding latest forecast…"));
             return;
         };
         let run_label = run
@@ -871,9 +871,9 @@ impl WeatherApp {
             self.choose_lead(lead);
         }
         if published.is_none() {
-            let _surveying = ui.label(chrome::muted("surveying publication frontier…"));
+            let _surveying = ui.label(chrome::muted("checking available hours…"));
         } else if !lead_ready {
-            let _interval = ui.label(chrome::muted("awaiting the first cumulative interval…"));
+            let _interval = ui.label(chrome::muted("waiting for first accumulation…"));
         }
 
         if cumulative {
@@ -1373,7 +1373,7 @@ impl WeatherApp {
                             .map(|key| (key.run, key.valid))
                             .or_else(|| self.run.map(|run| (run, self.slate.lead)))
                             .map_or_else(
-                                || "AWAITING CYCLE".to_owned(),
+                                || "NO FORECAST".to_owned(),
                                 |(run, lead)| {
                                     run.valid_local_label(lead)
                                         .unwrap_or_else(|_| "INVALID TIME".to_owned())
@@ -1390,7 +1390,7 @@ impl WeatherApp {
                             let _value = ui.label(chrome::section_title(scale.display(raw)));
                         } else if self.slate.overlay.active().is_some() {
                             let _pending = ui.label(chrome::muted(if field.is_some() {
-                                "OUTSIDE HRRR DOMAIN"
+                                "OUTSIDE FORECAST AREA"
                             } else {
                                 "UPDATING…"
                             }));
@@ -1522,7 +1522,7 @@ impl WeatherApp {
                         self.mark_dirty();
                     }
                     if self.announced_discovery || prior_latest != Some(latest) {
-                        "cycle index ready".clone_into(&mut self.status);
+                        "latest forecast found".clone_into(&mut self.status);
                     }
                     self.announced_discovery = false;
                     self.next_survey = Instant::now() + FRONTIER_POLL;
@@ -1551,7 +1551,7 @@ impl WeatherApp {
                         {
                             self.demand_active();
                         } else if prior != Some(extent.published()) {
-                            "publication frontier advanced".clone_into(&mut self.status);
+                            "new forecast hours available".clone_into(&mut self.status);
                         }
                     }
                 }
@@ -1562,11 +1562,7 @@ impl WeatherApp {
                     self.next_survey = Instant::now() + FRONTIER_POLL;
                     self.status = message;
                 }
-                Event::Loaded {
-                    demand,
-                    field,
-                    elapsed_ms,
-                } => {
+                Event::Loaded { demand, field } => {
                     if self.loading == Some(demand) {
                         self.loading = None;
                     }
@@ -1577,7 +1573,7 @@ impl WeatherApp {
                     }
                     self.fields.insert(demand.key, field);
                     if foreground {
-                        self.status = format!("forecast decoded in {elapsed_ms} ms");
+                        "forecast ready".clone_into(&mut self.status);
                     }
                     self.kick_prefetch();
                 }
@@ -1602,18 +1598,12 @@ impl WeatherApp {
         while let Some(event) = drain.receive(&self.basemap.events) {
             match event {
                 basemap::Event::Ready => {
-                    "PROTOMAPS · © OPENSTREETMAP".clone_into(&mut self.basemap_status);
+                    "PROTOMAPS · © OPENSTREETMAP CONTRIBUTORS".clone_into(&mut self.basemap_status);
                 }
                 basemap::Event::Loaded(tile) => {
                     let key = tile.key;
                     let _was_inflight = self.tile_inflight.remove(&key);
                     let _rejection = self.tile_rejections.remove(&key);
-                    self.basemap_status = format!(
-                        "PROTOMAPS · OSM · {} KB · {} µs MAP + {} µs CUT",
-                        tile.timing.bytes / 1024,
-                        tile.timing.archive_us,
-                        tile.timing.decode_us
-                    );
                     self.tiles.insert(tile);
                 }
                 basemap::Event::Missing(key) => {
@@ -1630,9 +1620,9 @@ impl WeatherApp {
                         );
                     }
                     self.basemap_status = if detail {
-                        format!("Z12 DETAIL OFFLINE · Z11 RETAINED · {message}")
+                        format!("MAP DETAIL OFFLINE · {message}")
                     } else {
-                        format!("BASEMAP UNAVAILABLE · {message}")
+                        format!("MAP UNAVAILABLE · {message}")
                     };
                 }
             }
@@ -1663,7 +1653,7 @@ impl WeatherApp {
         match self.worker.send(Command::Survey(run)) {
             Ok(()) => {
                 self.surveying_run = Some(run);
-                "surveying HRRR publication frontier…".clone_into(&mut self.status);
+                "checking available forecast hours…".clone_into(&mut self.status);
             }
             Err(err) => self.status = err.to_string(),
         }
@@ -1673,7 +1663,7 @@ impl WeatherApp {
         match self.worker.send(Command::Discover) {
             Ok(()) => {
                 self.announced_discovery = true;
-                "finding the newest complete HRRR cycle…".clone_into(&mut self.status);
+                "finding latest forecast…".clone_into(&mut self.status);
             }
             Err(err) => self.status = err.to_string(),
         }
@@ -1682,7 +1672,7 @@ impl WeatherApp {
     fn decree_status(&self, decree: Decree) -> CommandStatus<'static> {
         match decree {
             Decree::FollowLatest if self.latest_run.is_none() => {
-                CommandStatus::Disabled("the publication frontier is not known yet")
+                CommandStatus::Disabled("available forecasts are still loading")
             }
             Decree::FollowLatestLong
                 if self
@@ -1690,7 +1680,7 @@ impl WeatherApp {
                     .map(|latest| RunSelection::LatestLong.bind(latest))
                     .is_none() =>
             {
-                CommandStatus::Disabled("no extended-horizon cycle is known yet")
+                CommandStatus::Disabled("no 48-hour run is available")
             }
             Decree::UndoMapChange if !self.map_undo.has_reversal_for(&self.active_view) => {
                 CommandStatus::Disabled("the active view has no map change to undo")
@@ -1717,9 +1707,9 @@ impl WeatherApp {
             Decree::ToggleCloseToTray => {
                 self.config.close_minimizes = !self.config.close_minimizes;
                 let status = if self.config.close_minimizes {
-                    "window close will use the tray when supported"
+                    "close hides the window"
                 } else {
-                    "window close will terminate"
+                    "close quits"
                 };
                 status.clone_into(&mut self.status);
                 self.mark_config_dirty();
@@ -2005,7 +1995,7 @@ impl WeatherApp {
             self.loading = None;
             self.displayed_field = None;
             self.prefetch.clear();
-            "basemap only".clone_into(&mut self.status);
+            "map only".clone_into(&mut self.status);
         }
     }
 

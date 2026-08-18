@@ -26,7 +26,7 @@ const DECREES: [CommandSpec<Decree, ()>; 4] = [
         "Latest run",
         CommandScope::Global,
     )
-    .with_detail("Follows the newest ordinary HRRR cycle as it advances.")
+    .with_detail("Follow each new HRRR run.")
     .with_default_shortcuts(&LATEST)
     .with_mnemonic('L'),
     CommandSpec::new(
@@ -35,7 +35,7 @@ const DECREES: [CommandSpec<Decree, ()>; 4] = [
         "Latest long run",
         CommandScope::Global,
     )
-    .with_detail("Follows the newest cycle carrying the extended forecast horizon.")
+    .with_detail("Follow each new 48-hour run.")
     .with_default_shortcuts(&LATEST_LONG)
     .with_mnemonic('G'),
     CommandSpec::new(
@@ -44,7 +44,7 @@ const DECREES: [CommandSpec<Decree, ()>; 4] = [
         "Undo map change",
         CommandScope::Global,
     )
-    .with_detail("Restores the last probe or pin arrangement for the active view.")
+    .with_detail("Undo the last pin or probe change.")
     .with_default_shortcuts(&UNDO),
     CommandSpec::new(
         Decree::ToggleCloseToTray,
@@ -52,7 +52,7 @@ const DECREES: [CommandSpec<Decree, ()>; 4] = [
         "Close to tray",
         CommandScope::Global,
     )
-    .with_detail("Hides HRRR on close when the window system and tray support it.")
+    .with_detail("Closing the window hides HRRR instead of quitting.")
     .with_mnemonic('T'),
 ];
 

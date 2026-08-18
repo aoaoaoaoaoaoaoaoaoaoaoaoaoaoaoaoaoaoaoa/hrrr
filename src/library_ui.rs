@@ -48,7 +48,7 @@ pub fn active_card<T>(
         let rename = Monoglyph::symbol(Symbol::Rename)
             .size(MechanismSize::Small)
             .show(ui)
-            .on_hover_text("rename in place");
+            .on_hover_text("Rename");
         water.monoglyph(&rename);
         if rename.clicked() {
             actions.push(Action::BeginNameEdit);
@@ -80,7 +80,7 @@ pub fn active_card<T>(
         let create = Monoglyph::symbol(Symbol::Add)
             .size(MechanismSize::Small)
             .show(ui)
-            .on_hover_text(format!("new {noun} from current"));
+            .on_hover_text(format!("New {noun}"));
         water.monoglyph(&create);
         if create.clicked() {
             actions.push(Action::New);

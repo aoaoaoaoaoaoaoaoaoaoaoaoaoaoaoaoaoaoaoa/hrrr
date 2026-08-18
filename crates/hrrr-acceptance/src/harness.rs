@@ -9,7 +9,7 @@ use egui_tester::{
 
 use crate::observation::Observation;
 
-pub const TITLE: &str = "HRRR · native forecast fields";
+pub const TITLE: &str = "HRRR";
 pub const SLATE: &str = "xdg/state/hrrr/slate.toml";
 pub const VIEWS: &str = "xdg/data/hrrr/views.toml";
 

@@ -56,7 +56,6 @@ pub enum Event {
     Loaded {
         demand: LoadDemand,
         field: Arc<FieldGrid>,
-        elapsed_ms: u128,
     },
     Fault {
         demand: Option<LoadDemand>,
@@ -169,19 +168,12 @@ fn labor(
                         message: format!("{err:#}"),
                     })
             }
-            ForgeDemand::Load(demand) => {
-                let began = Instant::now();
-                forge_frame(&source, &mut blades, demand.key)
-                    .map(|field| Event::Loaded {
-                        demand,
-                        field,
-                        elapsed_ms: began.elapsed().as_millis(),
-                    })
-                    .unwrap_or_else(|err| Event::Fault {
-                        demand: Some(demand),
-                        message: format!("{err:#}"),
-                    })
-            }
+            ForgeDemand::Load(demand) => forge_frame(&source, &mut blades, demand.key)
+                .map(|field| Event::Loaded { demand, field })
+                .unwrap_or_else(|err| Event::Fault {
+                    demand: Some(demand),
+                    message: format!("{err:#}"),
+                }),
         };
         if events.send(event).is_err() {
             break;

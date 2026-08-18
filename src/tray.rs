@@ -709,7 +709,7 @@ mod platform {
             menu.append_items(&[&open, &quit])
                 .context("build tray menu")?;
             let icon = TrayIconBuilder::new()
-                .with_tooltip("HRRR forecast fields")
+                .with_tooltip("HRRR")
                 .with_icon(icon()?);
             #[cfg(target_os = "macos")]
             let icon = icon.with_icon_as_template(true);

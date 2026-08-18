@@ -24,7 +24,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 pub const PAPER_SRGB: [u8; 3] = [229; 3];
@@ -125,20 +125,12 @@ pub struct Mesh<V> {
     pub indices: Arc<[u32]>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CutTiming {
-    pub archive_us: u64,
-    pub decode_us: u64,
-    pub bytes: usize,
-}
-
 #[derive(Clone, Debug)]
 pub struct VectorTile {
     pub key: TileKey,
     pub fills: Mesh<FillPoint>,
     pub strokes: Mesh<StrokePoint>,
     pub labels: Arc<[Label]>,
-    pub timing: CutTiming,
 }
 
 impl VectorTile {
@@ -453,7 +445,6 @@ fn quarry(
         }
     };
     while let Ok(key) = commands.recv() {
-        let begun = Instant::now();
         let bytes = match load_tile(&runtime, &archive, detail.as_deref(), key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
@@ -468,17 +459,8 @@ fn quarry(
                 continue;
             }
         };
-        let archive_us = micros(begun.elapsed());
-        let decode_begun = Instant::now();
         let event = match decode_tile(key, &bytes) {
-            Ok(mut tile) => {
-                tile.timing = CutTiming {
-                    archive_us,
-                    decode_us: micros(decode_begun.elapsed()),
-                    bytes: bytes.len(),
-                };
-                Event::Loaded(Arc::new(tile))
-            }
+            Ok(tile) => Event::Loaded(Arc::new(tile)),
             Err(err) => Event::Fault {
                 key: Some(key),
                 message: format!("decode vector tile {key:?}: {err:#}"),
@@ -521,10 +503,6 @@ fn send_fault(
     {
         let _woken = wake.request_foreground_repaint();
     }
-}
-
-fn micros(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn decode_tile(key: TileKey, bytes: &[u8]) -> Result<VectorTile> {
@@ -851,7 +829,6 @@ impl Forge {
                 indices: self.strokes.indices.into(),
             },
             labels: self.labels.into(),
-            timing: CutTiming::default(),
         }
     }
 }

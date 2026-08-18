@@ -26,7 +26,7 @@ use std::{
     time::Instant,
 };
 
-const TITLE: &str = "HRRR · native forecast fields";
+const TITLE: &str = "HRRR";
 
 pub fn run(ctx: egui::Context) -> Result<()> {
     eternalist_apps::run_with(ctx, ForecastViewer::open)
@@ -403,14 +403,14 @@ impl Fault {
 }
 
 fn consent(ui: &mut egui::Ui, water: &mut Surface) -> Option<BodyEvent> {
-    let detail = "HRRR keeps a North American map core local so forecasts remain responsive. Installation downloads about 1.1 GB from Protomaps and uses roughly the same disk space. At the closest zoom, only visible detail is fetched and retained in a bounded cache. Nothing is fetched until you approve.";
+    let detail = "Download a North America map for fast browsing through zoom 11. It uses about 1.1 GB of network and disk. Closer detail downloads as viewed and stays in a bounded cache.";
     launch_card(
         ui,
         water,
-        "LOCAL BASEMAP REQUIRED",
+        "MAP DOWNLOAD REQUIRED",
         detail,
         Some(LaunchAction {
-            label: "INSTALL BASEMAP",
+            label: "DOWNLOAD MAP",
             event: BodyEvent::Install,
             target: Some(hrrr_contract::Target::BasemapInstall),
         }),
@@ -438,7 +438,7 @@ fn installing(
         event: BodyEvent::Cancel,
         target: None,
     });
-    let (event, rect) = launch_card(ui, water, "BUILDING LOCAL BASEMAP", &detail, action);
+    let (event, rect) = launch_card(ui, water, "PREPARING MAP", &detail, action);
     wait.claim(rect);
     event
 }
@@ -463,7 +463,6 @@ fn launch_card(
                 .inner_margin(egui::Margin::symmetric(28, 24))
                 .show(ui, |ui| {
                     ui.set_min_width(500.0_f32.min(ui.available_width()));
-                    let _eyebrow = ui.label(chrome::eyebrow("FIRST CONTACT"));
                     let _title = ui.label(chrome::title(title));
                     ui.add_space(10.0);
                     let _detail = ui.label(chrome::muted(detail));
@@ -490,11 +489,11 @@ fn launch_card(
 impl InstallPhase {
     const fn label(self) -> &'static str {
         match self {
-            Self::FetchingTool => "FETCHING VERIFIED EXTRACTION TOOL",
-            Self::CheckingTool => "CHECKING EXTRACTION TOOL",
-            Self::UnpackingTool => "UNPACKING EXTRACTION TOOL",
-            Self::ExtractingMap => "EXTRACTING NORTH AMERICA THROUGH Z11",
-            Self::CheckingMap => "CHECKING LOCAL MAP ARCHIVE",
+            Self::FetchingTool => "DOWNLOADING MAP TOOLS",
+            Self::CheckingTool => "VERIFYING MAP TOOLS",
+            Self::UnpackingTool => "PREPARING MAP TOOLS",
+            Self::ExtractingMap => "BUILDING NORTH AMERICA MAP",
+            Self::CheckingMap => "VERIFYING MAP",
         }
     }
 }
