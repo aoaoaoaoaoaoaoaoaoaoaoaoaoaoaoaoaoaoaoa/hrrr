@@ -14,7 +14,14 @@ pub struct Observation {
     pub dragging_pin: Option<usize>,
     pub guide_open: bool,
     pub close_to_tray: bool,
+    pub settings: Settings,
     pub viewport: Viewport,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Settings {
+    pub open: bool,
+    pub fault: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

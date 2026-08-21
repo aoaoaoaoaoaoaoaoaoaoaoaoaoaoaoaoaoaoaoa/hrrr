@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, fmt};
 
-pub const UI_FINGERPRINT: &str = "hrrr.ui/5";
+pub const UI_FINGERPRINT: &str = "hrrr.ui/6";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]

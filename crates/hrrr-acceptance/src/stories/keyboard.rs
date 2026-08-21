@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use egui_tester::{Condition, Key, Modifiers, PixelRegion, Probe, Result, demand};
+use egui_tester::{Button, Condition, Key, Modifiers, Motion, PixelRegion, Probe, Result, demand};
 
 use crate::{harness::Harness, observation::Observation};
 
@@ -53,6 +53,36 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     let _modal_retired = focus.wait_fresh(&app, WAIT)?;
     let _focus_restored = focus.wait_fresh(&app, WAIT)?;
 
+    let _settings = story.key(Key::Function(2))?.until(Condition::new(
+        "F2 settings sheet open",
+        |state: &Observation| state.settings.open && !state.settings.fault,
+    ))?;
+    let blocked = story
+        .chord(Modifiers::ALT, Key::Character('t'))?
+        .next_frame()?
+        .into_value();
+    demand(
+        blocked.state.settings.open && blocked.state.close_to_tray == initial_close,
+        "Alt+T escaped through the open settings sheet",
+    )?;
+    let toggled = !initial_close;
+    let _toggled = story
+        .tap(
+            "eternalist.settings.close_to_tray",
+            Button::Primary,
+            Motion::default(),
+        )?
+        .until(Condition::new(
+            "central close-to-tray setting applied",
+            move |state: &Observation| state.close_to_tray == toggled,
+        ))?;
+    let _closed = story
+        .chord(Modifiers::CTRL, Key::Character(','))?
+        .until(Condition::new(
+            "settings sheet closed",
+            |state: &Observation| !state.settings.open,
+        ))?;
+
     let _next_panel = story.chord(Modifiers::CTRL, Key::Tab)?.next_frame()?;
     let _forecast = focus.wait_focus(
         &app,
@@ -68,13 +98,6 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
         WAIT,
     )?;
 
-    let toggled = !initial_close;
-    let _toggled = story
-        .chord(Modifiers::ALT, Key::Character('t'))?
-        .until(Condition::new(
-            "close-to-tray mnemonic applied",
-            move |state: &Observation| state.close_to_tray == toggled,
-        ))?;
     let _persisted = story.wait_stable(
         Duration::from_secs(3),
         Duration::from_millis(700),

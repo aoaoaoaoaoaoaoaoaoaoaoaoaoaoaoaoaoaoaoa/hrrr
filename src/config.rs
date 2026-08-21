@@ -6,11 +6,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub close_minimizes: bool,
 }
+
+impl eternalist_apps::configuration::Configuration for Config {}
 
 impl Default for Config {
     fn default() -> Self {
@@ -18,12 +20,6 @@ impl Default for Config {
             close_minimizes: true,
         }
     }
-}
-
-#[derive(Debug)]
-pub struct ConfigLoad {
-    pub config: Config,
-    pub legacy_views: Option<ViewLibrary>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -34,22 +30,22 @@ struct ConfigWire {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<ConfigLoad> {
-        let Some(wire) = load_toml::<ConfigWire>(path, "preferences")? else {
-            return Ok(ConfigLoad {
-                config: Self::default(),
-                legacy_views: None,
-            });
+    pub fn migrate_legacy_views(path: &Path) -> Result<Option<ViewLibrary>> {
+        let wire = match load_toml::<ConfigWire>(path, "legacy preferences") {
+            Ok(Some(wire)) => wire,
+            Ok(None) | Err(_) => return Ok(None),
         };
-        Ok(ConfigLoad {
-            config: Self {
-                close_minimizes: wire.close_minimizes,
-            },
-            legacy_views: wire.views,
-        })
+        let Some(views) = wire.views else {
+            return Ok(None);
+        };
+        Self {
+            close_minimizes: wire.close_minimizes,
+        }
+        .save(path)?;
+        Ok(Some(views))
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    fn save(&self, path: &Path) -> Result<()> {
         save_toml(self, path, "serialize preferences")
     }
 }
@@ -111,17 +107,15 @@ mod tests {
         })?;
         std::fs::write(&path, legacy)?;
 
-        let loaded = Config::load(&path)?;
-        assert!(!loaded.config.close_minimizes);
-        let views = loaded.legacy_views.context("legacy views")?;
+        let views = Config::migrate_legacy_views(&path)?.context("legacy views")?;
         let view = views.saved.first().context("restored view")?;
         assert_eq!(view.name.as_str(), "default");
         assert_eq!(view.viewport.zoom, 9.25);
         assert_eq!(view.slot.map(ViewSlot::digit), Some(7));
         assert_eq!(view.pins.len(), 1);
 
-        loaded.config.save(&path)?;
         let text = std::fs::read_to_string(path)?;
+        assert!(text.contains("close_minimizes = false"));
         assert!(!text.contains("[views]"));
         Ok(())
     }

@@ -8,7 +8,7 @@ resolver = "3"
 
 [package]
 name = "hrrr"
-version = "1.2.10"
+version = "1.2.11"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
@@ -37,15 +37,15 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.13.12"
+brass_poolrooms = "0.13.18"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
-egui-tester-witness = { version = "0.9.6", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.7.12", features = ["serde"] }
+egui-tester-witness = { version = "0.9.7", optional = true, features = ["egui"] }
+eternalist-apps = { version = "0.8.0", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.17.1", default-features = false }
-hrrr-contract = { path = "crates/hrrr-contract", version = "0.5.0" }
+hrrr-contract = { path = "crates/hrrr-contract", version = "0.5.1" }
 jiff = "0.2.35"
 lyon_tessellation = "1.0.20"
 pmtiles = { version = "0.24.0", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls"] }
@@ -61,7 +61,7 @@ pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
 tiny_http = "0.12.0"
 
 [build-dependencies]
-brass_foundry = "0.13.12"
+brass_foundry = "0.13.18"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"

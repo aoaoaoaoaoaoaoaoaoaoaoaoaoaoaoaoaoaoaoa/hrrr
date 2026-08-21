@@ -1,7 +1,7 @@
 use crate::{
     basemap::{self, Basemap, TileKey, VectorTile},
     cache::Custodian,
-    config::{Config, ConfigLoad},
+    config::Config,
     decrees::{self, Decree},
     library::EntryName,
     library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
@@ -24,9 +24,14 @@ use egui::Color32;
 use eternalist_apps::{
     ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideSection},
-    commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
+    commands::{
+        CommandDispatch, CommandStatus, SETTINGS_SHORTCUTS, Shortcut, ShortcutKey,
+        ShortcutModifiers,
+    },
+    configuration::ConfigurationLedger,
     panel_navigation::PanelNavigator,
     responsiveness::DrainBudget,
+    settings::{SettingSpec, SettingsFile, SettingsSheet},
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -41,6 +46,11 @@ const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
 const EVENT_DRAIN: DrainBudget = DrainBudget::new(64, Duration::from_millis(3));
 const FIELD_CAPACITY: usize = 12;
 const VECTOR_CEILING: usize = 512 * 1_048_576;
+const CLOSE_TO_TRAY: SettingSpec = SettingSpec::new(
+    "close_to_tray",
+    "CLOSE TO TRAY",
+    "Closing the window hides HRRR instead of ending the forecast session.",
+);
 const VIEW_SLOT_KEYS: [Shortcut; 10] = [
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('0')),
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('1')),
@@ -122,10 +132,17 @@ const VIEW_GESTURES: [GuideGesture; 2] = [
         &ASSIGN_VIEW_SLOT_KEYS,
     ),
 ];
+const APPLICATION_GESTURES: [GuideGesture; 1] = [GuideGesture::new(
+    "Open settings",
+    "Open the central application configuration.",
+    &SETTINGS_SHORTCUTS,
+)];
 const FORECAST_CONTROL_IDIOMS: GuideSection =
     GuideSection::new("FORECAST CONTROLS", &FORECAST_CONTROL_GESTURES);
 const VIEW_IDIOMS: GuideSection = GuideSection::new("VIEW SHORTCUTS", &VIEW_GESTURES);
-const GUIDE_SECTIONS: [GuideSection; 2] = [FORECAST_CONTROL_IDIOMS, VIEW_IDIOMS];
+const APPLICATION_IDIOMS: GuideSection = GuideSection::new("APPLICATION", &APPLICATION_GESTURES);
+const GUIDE_SECTIONS: [GuideSection; 3] =
+    [FORECAST_CONTROL_IDIOMS, VIEW_IDIOMS, APPLICATION_IDIOMS];
 
 #[derive(Clone, Copy)]
 enum TileRejection {
@@ -404,19 +421,17 @@ impl SmokeSurvey {
 #[derive(Clone, Copy, Default)]
 struct DirtyState {
     slate: bool,
-    config: bool,
     views: bool,
 }
 
 impl DirtyState {
     const fn any(self) -> bool {
-        self.slate || self.config || self.views
+        self.slate || self.views
     }
 }
 
 struct DurableState {
     slate: Option<Slate>,
-    config: Option<Config>,
     views: Option<ViewLibrary>,
 }
 
@@ -427,11 +442,6 @@ impl DurableState {
             && let Err(error) = slate.save(&lair.slate_path())
         {
             faults.push(format!("session state: {error:#}"));
-        }
-        if let Some(config) = self.config
-            && let Err(error) = config.save(&lair.config_path())
-        {
-            faults.push(format!("preferences: {error:#}"));
         }
         if let Some(views) = self.views
             && let Err(error) = views.save(&lair.views_path())
@@ -448,7 +458,8 @@ impl DurableState {
 
 pub struct WeatherApp {
     _instance: InstanceGuard,
-    config: Config,
+    configuration: ConfigurationLedger<Config>,
+    settings: SettingsSheet,
     views: ViewLibrary,
     slate: Slate,
     active_view: EntryName,
@@ -494,11 +505,17 @@ pub struct WeatherApp {
 
 impl WeatherApp {
     pub fn open_at(ctx: &egui::Context, lair: Lair, instance: InstanceGuard) -> Result<Self> {
-        let ConfigLoad {
-            config,
-            legacy_views,
-        } = Config::load(&lair.config_path())?;
-        let had_legacy_views = legacy_views.is_some();
+        let legacy_views = Config::migrate_legacy_views(&lair.config_path())?;
+        let configuration = ConfigurationLedger::raise(
+            "hrrr-configuration-scribe",
+            ctx,
+            lair.config_path(),
+            STATE_SETTLE,
+        )?;
+        let mut settings = SettingsSheet::default();
+        if configuration.fault().is_some() {
+            settings.require_attention(ctx);
+        }
         let (mut views, migrated_views) = ViewLibrary::load(&lair.views_path(), legacy_views)?;
         let (mut slate, migrated_slate) = Slate::load(&lair.slate_path())?;
         views.restore_folds(&slate.closed_folders);
@@ -545,7 +562,6 @@ impl WeatherApp {
         )?;
         let dirty = DirtyState {
             slate: migrated_slate,
-            config: had_legacy_views,
             views: migrated_views,
         };
         if dirty.any() {
@@ -553,7 +569,8 @@ impl WeatherApp {
         }
         let app = Self {
             _instance: instance,
-            config,
+            configuration,
+            settings,
             views,
             slate,
             active_view,
@@ -603,8 +620,17 @@ impl WeatherApp {
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         self.absorb_events(ui.ctx());
         self.absorb_persistence();
+        let _configuration_changed = self.configuration.absorb();
+        if self.configuration.fault().is_some() {
+            self.settings.require_attention(ui.ctx());
+        }
+        let settings_invoked = self.settings.take_shortcut(ui.ctx());
+        if settings_invoked && self.settings.is_open() {
+            self.reload_configuration();
+        }
         let guide_invoked = self.guide.take_shortcuts(ui.ctx());
-        if !guide_invoked
+        if !settings_invoked
+            && !guide_invoked
             && let Some(dispatch) =
                 decrees::canon().route(ui.ctx(), &[], |decree| self.decree_status(decree))
         {
@@ -636,12 +662,14 @@ impl WeatherApp {
             crate::witness::rect(ui.ctx(), hrrr_contract::Target::CommandGuide, rect);
         }
         self.guide = guide;
+        self.show_settings(ui.ctx());
     }
 
     pub fn service_deadline(&self, _now: Instant) -> Option<Instant> {
         self.scribe
             .deadline()
             .into_iter()
+            .chain(self.configuration.deadline())
             .chain(self.survey_deadline())
             .chain(self.tile_rejections.values().filter_map(|rejection| {
                 if let TileRejection::RetryAt(deadline) = rejection {
@@ -654,7 +682,7 @@ impl WeatherApp {
     }
 
     pub fn service_deadline_reached(&mut self, now: Instant) -> bool {
-        let mut changed = false;
+        let mut changed = self.configuration.service_deadline_reached(now);
         self.tile_rejections.retain(|_key, rejection| {
             let expired = matches!(rejection, TileRejection::RetryAt(deadline) if *deadline <= now);
             changed |= expired;
@@ -702,8 +730,53 @@ impl WeatherApp {
         self.dirty = DirtyState::default();
     }
 
-    pub const fn close_to_tray_enabled(&self) -> bool {
-        self.config.close_minimizes
+    pub fn close_to_tray_enabled(&self) -> bool {
+        self.configuration.live().close_minimizes
+    }
+
+    fn reload_configuration(&mut self) {
+        if (self.configuration.fault().is_some() || self.configuration.settled())
+            && let Err(error) = self.configuration.request_reload()
+        {
+            self.status = format!("configuration reload failed: {error:#}");
+        }
+    }
+
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        let path = self.configuration.path().to_owned();
+        let fault = self.configuration.fault().map(ToString::to_string);
+        let mut close_minimizes = self.configuration.live().close_minimizes;
+        let file = fault.as_deref().map_or_else(
+            || SettingsFile::ready(&path),
+            |message| SettingsFile::fault(&path, message),
+        );
+        let file = file
+            .reloading(self.configuration.reload_pending())
+            .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
+        let mut changed = false;
+        let response = self.settings.show(ctx, &mut self.water, file, |settings| {
+            settings.section("APPLICATION");
+            changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
+        });
+        if changed {
+            match self
+                .configuration
+                .revise(|config| config.close_minimizes = close_minimizes)
+            {
+                Ok(_) => {
+                    if close_minimizes {
+                        "close hides the window"
+                    } else {
+                        "close quits"
+                    }
+                    .clone_into(&mut self.status);
+                }
+                Err(error) => self.status = format!("configuration change failed: {error:#}"),
+            }
+        }
+        if response.reload_requested() {
+            self.reload_configuration();
+        }
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
@@ -778,7 +851,7 @@ impl WeatherApp {
                         .spec(Decree::ToggleCloseToTray)
                         .widget_text(ui),
                 )
-                .selected(self.config.close_minimizes),
+                .selected(self.configuration.live().close_minimizes),
             );
             chrome::tension(ui, &response);
             if response.hovered() {
@@ -787,6 +860,11 @@ impl WeatherApp {
             if chrome::exact_activation(ui, &response) {
                 toggle_close = Some(response.rect);
             }
+            ui.add_space(6.0);
+            let settings = self
+                .settings
+                .activator(ui, self.configuration.fault().is_some());
+            self.water.monoglyph(&settings);
             ui.add_space(6.0);
             let help = self.guide.activator(ui);
             crate::witness::response(ui, hrrr_contract::Target::Help, &help);
@@ -1382,7 +1460,11 @@ impl WeatherApp {
             transient_probe: self.transient_probe.map(MercatorPoint::world),
             dragging_pin: self.pin_tug.map(|tug| tug.slot),
             guide_open: self.guide.is_open(),
-            close_to_tray: self.config.close_minimizes,
+            close_to_tray: self.configuration.live().close_minimizes,
+            settings: crate::witness::Settings {
+                open: self.settings.is_open(),
+                fault: self.configuration.fault().is_some(),
+            },
             viewport: crate::witness::Viewport {
                 center: self.viewport.center_mercator,
                 zoom: self.viewport.zoom,
@@ -1752,14 +1834,21 @@ impl WeatherApp {
             Decree::FollowLatestLong => self.follow_cycle(RunSelection::LatestLong),
             Decree::UndoMapChange => self.undo_map_object(),
             Decree::ToggleCloseToTray => {
-                self.config.close_minimizes = !self.config.close_minimizes;
-                let status = if self.config.close_minimizes {
+                let close_minimizes = !self.configuration.live().close_minimizes;
+                let status = if close_minimizes {
                     "close hides the window"
                 } else {
                     "close quits"
                 };
-                status.clone_into(&mut self.status);
-                self.mark_config_dirty();
+                match self
+                    .configuration
+                    .revise(|config| config.close_minimizes = close_minimizes)
+                {
+                    Ok(_) => status.clone_into(&mut self.status),
+                    Err(error) => {
+                        self.status = format!("configuration change failed: {error:#}");
+                    }
+                }
             }
         }
     }
@@ -2376,11 +2465,6 @@ impl WeatherApp {
         self.scribe.mark();
     }
 
-    fn mark_config_dirty(&mut self) {
-        self.dirty.config = true;
-        self.scribe.mark();
-    }
-
     fn mark_views_dirty(&mut self) {
         self.dirty.views = true;
         self.scribe.mark();
@@ -2389,7 +2473,6 @@ impl WeatherApp {
     fn durable_state(&self) -> DurableState {
         DurableState {
             slate: self.dirty.slate.then(|| self.slate.clone()),
-            config: self.dirty.config.then(|| self.config.clone()),
             views: self.dirty.views.then(|| self.views.clone()),
         }
     }
@@ -2397,7 +2480,6 @@ impl WeatherApp {
     fn durable_state_all(&self) -> DurableState {
         DurableState {
             slate: Some(self.slate.clone()),
-            config: Some(self.config.clone()),
             views: Some(self.views.clone()),
         }
     }
@@ -2406,7 +2488,6 @@ impl WeatherApp {
         if let Some(ScribeOutcome::Fault { message, .. }) = self.scribe.take_outcome() {
             self.dirty = DirtyState {
                 slate: true,
-                config: true,
                 views: true,
             };
             self.status = format!("state save failed: {message}");

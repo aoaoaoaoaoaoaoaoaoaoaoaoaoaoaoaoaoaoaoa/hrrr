@@ -71,6 +71,12 @@ within the active inspector panel; `Ctrl+Tab` and `Ctrl+Shift+Tab` cross panels.
 Permanently underlined letters mark conservative `Alt` mnemonics. The guide
 owns keyboard input while open, and `Esc` closes only its topmost layer.
 
+Press `F2` or the platform primary modifier plus comma to open Settings. The
+same **Close to tray** declaration appears beside its work and in that central
+sheet. HRRR rejects unknown configuration keys, leaves an invalid file
+untouched, and opens Settings with the exact fault and an explicit reload after
+repair. Accepted changes settle through format-preserving atomic replacement.
+
 Drag to pan and scroll at the pointer to zoom. The map scale appears at lower
 left; maximum zoom is roughly two kilometres across a full-HD viewport. A left
 click moves the transient probe; `Shift`-left-click creates a persistent probe.

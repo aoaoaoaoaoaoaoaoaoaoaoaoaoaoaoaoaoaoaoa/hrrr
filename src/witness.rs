@@ -55,6 +55,7 @@ mod active {
         pub dragging_pin: Option<usize>,
         pub guide_open: bool,
         pub close_to_tray: bool,
+        pub settings: Settings,
         pub viewport: Viewport,
     }
 
@@ -78,11 +79,18 @@ mod active {
                 dragging_pin: None,
                 guide_open: false,
                 close_to_tray: false,
+                settings: Settings::default(),
                 viewport: Viewport {
                     center: [0.0; 2],
                     zoom: 0.0,
                 },
             }
         }
+    }
+
+    #[derive(Default, Serialize)]
+    pub struct Settings {
+        pub open: bool,
+        pub fault: bool,
     }
 }

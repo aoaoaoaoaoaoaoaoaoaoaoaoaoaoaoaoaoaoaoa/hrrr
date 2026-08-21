@@ -275,15 +275,15 @@ dependencies = [
 
 [[package]]
 name = "brass_foundry"
-version = "0.13.12"
+version = "0.13.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a17ec4de95d3ab5bd4621b4b415888c2b81a967d0e8d2558bf39390472daa77"
+checksum = "3a9b9ccc4853533ca714bbb5f35df962e8d3856a943d9387399511548d28fe01"
 
 [[package]]
 name = "brass_poolrooms"
-version = "0.13.12"
+version = "0.13.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca675435651f2ca30b09aa4733d820e53781ac22011aac61fbe11a415eb12cf1"
+checksum = "1f259ee044669ebd039b026fc01250bc4cc9e5f1f921419ee63f9a77461ddff0"
 dependencies = [
  "anyhow",
  "brass_foundry",
@@ -882,9 +882,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-witness"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2177c0efe0f2d2c362bfcc9fb6a833e799730c27697248578cce86ff12d4cad7"
+checksum = "09759d7c75eb3d380c0307d0347f0b024eafaf783f337abeed11e130ae115728"
 dependencies = [
  "egui",
  "rustix 1.1.4",
@@ -1002,11 +1002,12 @@ checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.7.12"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aa020d70f593f396c74bc124fe3695afc4803e45f2aa56036da96cf212a4c4a"
+checksum = "f5daca9cefdd389bdc616f465745375ab91391c6aa25f19c899e0480178674f0"
 dependencies = [
  "anyhow",
+ "atomic-write-file",
  "brass_poolrooms",
  "crossbeam-channel",
  "egui",
@@ -1015,8 +1016,10 @@ dependencies = [
  "egui-winit",
  "pollster",
  "serde",
+ "serde_ignored",
  "serde_json",
  "sha2 0.10.9",
+ "toml_edit",
  "tracing",
  "tracing-chrome",
  "tracing-subscriber",
@@ -1438,7 +1441,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hrrr"
-version = "1.2.10"
+version = "1.2.11"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -1489,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "hrrr-contract"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "hrrr-portability"
@@ -3385,6 +3388,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3825,6 +3838,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
 dependencies = [
  "indexmap",
+ "serde_core",
+ "serde_spanned",
  "toml_datetime",
  "toml_parser",
  "toml_writer",
