@@ -25,7 +25,7 @@ fn emit(out: &mut impl Write, name: &str, model: &Model) -> io::Result<()> {
     emit_rust(
         out,
         name,
-        &forge(model, Charge::Bronze(0.96)),
+        &forge(model, Charge::Darkened(0.82)),
         RustReach::Module,
     )
 }
