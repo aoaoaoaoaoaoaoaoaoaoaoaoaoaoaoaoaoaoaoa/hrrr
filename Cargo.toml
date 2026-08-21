@@ -8,7 +8,7 @@ resolver = "3"
 
 [package]
 name = "hrrr"
-version = "1.2.11"
+version = "1.2.12"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
@@ -41,7 +41,7 @@ brass_poolrooms = "0.13.18"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-tester-witness = { version = "0.9.7", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.8.0", features = ["serde"] }
+eternalist-apps = { version = "0.8.1", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.17.1", default-features = false }

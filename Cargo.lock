@@ -864,9 +864,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c611c4f9f7da0c596688d85ab92ec91bd00601f7f04fe11d5ac8af6149d3aef6"
+checksum = "5b274f03990d187570b3c1172dd504296ee88d28cafa60968013d1fd69d0ba23"
 dependencies = [
  "bitflags 2.13.1",
  "egui-tester-witness",
@@ -1002,9 +1002,9 @@ checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5daca9cefdd389bdc616f465745375ab91391c6aa25f19c899e0480178674f0"
+checksum = "bccf52f3d1429079deef31be4dad68066c56fc97989c5760898f3b376d15552c"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -1441,7 +1441,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hrrr"
-version = "1.2.11"
+version = "1.2.12"
 dependencies = [
  "anyhow",
  "atomic-write-file",
