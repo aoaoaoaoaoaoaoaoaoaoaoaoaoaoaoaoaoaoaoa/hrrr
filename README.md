@@ -157,9 +157,10 @@ The UI vocabulary is a separately versioned dependency.
 version, waits for the registry boundary, verifies the isolated application
 tarball against that exact dependency, then publishes the application. Both
 release commands require a clean, pushed `main` checkout and a valid signed tag
-at `HEAD`. A version tag publishes the installers only after Foundry judges the
-complete source, security, package, host, lifecycle, native-acceptance, and
-artifact evidence graph.
+at `HEAD`. Registry publication remains deliberate, but a version tag cannot
+publish the installers until that exact crate version is visible. Foundry must
+also judge the complete source, security, package, host, lifecycle,
+native-acceptance, and artifact evidence graph.
 
 ## License
 

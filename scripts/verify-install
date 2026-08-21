@@ -10,7 +10,9 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-cargo install --path "$root" --root "$prefix" --locked --force
+# Cargo ignores a binary package's lockfile by default. Exercise that ordinary
+# consumer resolution so every version admitted by Cargo.toml must compose.
+cargo install --path "$root" --root "$prefix" --force
 "$binary" --version >/dev/null
 
 cd "$root"
