@@ -22,7 +22,7 @@ use brass_poolrooms::{
 };
 use egui::Color32;
 use eternalist_apps::{
-    ScribeOutcome, SettledScribe,
+    ApplicationHeader, ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideSection},
     commands::{
         CommandDispatch, CommandStatus, SETTINGS_SHORTCUTS, Shortcut, ShortcutKey,
@@ -780,6 +780,11 @@ impl WeatherApp {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
+        let header = ApplicationHeader::new("HRRR")
+            .settings_attention(self.configuration.fault().is_some())
+            .show(ui, &mut self.guide, &mut self.settings, &mut self.water);
+        crate::witness::response(ui, hrrr_contract::Target::Help, &header.help);
+        ui.add_space(5.0);
         let mut panels = navigator.frame(ui.ctx());
         let mut chosen_product = None;
         let field = panels.section(ui, "product", "field", true, |ui| {
@@ -843,7 +848,7 @@ impl WeatherApp {
         self.water.fold(views.wake);
 
         let mut toggle_close = None;
-        let application = panels.section(ui, "application", "application", true, |ui| {
+        let window = panels.section(ui, "window", "window", true, |ui| {
             let response = ui.add_sized(
                 [ui.available_width(), 26.0],
                 egui::Button::new(
@@ -860,21 +865,9 @@ impl WeatherApp {
             if chrome::exact_activation(ui, &response) {
                 toggle_close = Some(response.rect);
             }
-            ui.add_space(6.0);
-            let settings = self
-                .settings
-                .activator(ui, self.configuration.fault().is_some());
-            self.water.monoglyph(&settings);
-            ui.add_space(6.0);
-            let help = self.guide.activator(ui);
-            crate::witness::response(ui, hrrr_contract::Target::Help, &help);
         });
-        crate::witness::response(
-            ui,
-            hrrr_contract::Target::Panel("application"),
-            &application.header,
-        );
-        self.water.fold(application.wake);
+        crate::witness::response(ui, hrrr_contract::Target::Panel("window"), &window.header);
+        self.water.fold(window.wake);
         if let Some(rect) = toggle_close {
             self.apply_decree(CommandDispatch::Invoke(Decree::ToggleCloseToTray));
             self.water.select(rect);

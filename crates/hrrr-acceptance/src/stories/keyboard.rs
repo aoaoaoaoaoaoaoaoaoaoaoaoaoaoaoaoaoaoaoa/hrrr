@@ -16,6 +16,19 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     ))?;
     let initial_close = initial.state.close_to_tray;
 
+    let name = story.anchor("eternalist.application.name")?.rect;
+    let help = story.anchor("eternalist.application.help")?.rect;
+    let settings = story.anchor("eternalist.settings.open")?.rect;
+    let first_panel = story.anchor(hrrr_contract::Target::Panel("field"))?.rect;
+    demand(
+        name[0] < help[0]
+            && help[0] < settings[0]
+            && name[1] <= help[3]
+            && help[1] <= name[3]
+            && settings[3] < first_panel[1],
+        "application header did not present NAME, Help, Settings above the control panels",
+    )?;
+
     let before = story.capture()?;
     let _opened = story.key(Key::Function(1))?.until(Condition::new(
         "command guide open",
