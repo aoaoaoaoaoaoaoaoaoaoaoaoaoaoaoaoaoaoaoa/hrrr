@@ -37,11 +37,11 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.14.0"
+brass_poolrooms = "0.14.1"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-tester-witness = { version = "0.9.7", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.9.2", features = ["serde"] }
+eternalist-apps = { version = "0.9.3", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.17.1", default-features = false }
