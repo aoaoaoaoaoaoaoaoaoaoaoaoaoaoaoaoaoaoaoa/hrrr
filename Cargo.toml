@@ -8,7 +8,7 @@ resolver = "3"
 
 [package]
 name = "hrrr"
-version = "1.2.12"
+version = "1.2.13"
 edition = "2024"
 license = "MIT"
 rust-version = "1.96"
@@ -37,11 +37,11 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.13.18"
+brass_poolrooms = "0.14.0"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-tester-witness = { version = "0.9.7", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.8.1", features = ["serde"] }
+eternalist-apps = { version = "0.9.0", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.17.1", default-features = false }
@@ -61,7 +61,7 @@ pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
 tiny_http = "0.12.0"
 
 [build-dependencies]
-brass_foundry = "0.13.18"
+brass_foundry = "0.14.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"
