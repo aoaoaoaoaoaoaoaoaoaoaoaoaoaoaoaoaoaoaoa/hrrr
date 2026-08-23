@@ -75,8 +75,8 @@ fn validate_identity<R: std::io::Read>(
         bail!("GRIB product has no fixed-surface identity");
     };
     if surface.surface_type != law.surface.kind
-        || surface.scale_factor != 0
-        || surface.scaled_value != law.surface.metres
+        || surface.scale_factor != law.surface.scale_factor
+        || surface.scaled_value != law.surface.scaled_value
         || abyss.surface_type != 255
     {
         bail!(
@@ -87,7 +87,7 @@ fn validate_identity<R: std::io::Read>(
 
     let reference = message.identification().ref_time_unchecked();
     validate_time(
-        key.run.timestamp()?,
+        key.run.id.timestamp()?,
         [
             reference.year,
             u16::from(reference.month),
@@ -99,11 +99,7 @@ fn validate_identity<R: std::io::Read>(
         "reference",
     )?;
 
-    let expected_start = match law.time {
-        GribTimeLaw::Instant => u32::from(key.lead.get()),
-        GribTimeLaw::AccumulationFromRun => 0,
-        GribTimeLaw::HourlyAccumulation => u32::from(key.lead.get().saturating_sub(1)),
-    };
+    let expected_start = u32::from_be_bytes(i32::from(key.forecast_start()?).to_be_bytes());
     let Some(grib::ForecastTime {
         unit: Name(Table4_4::Hour),
         value,
@@ -119,12 +115,12 @@ fn validate_identity<R: std::io::Read>(
         );
     }
     if law.time != GribTimeLaw::Instant {
-        validate_accumulation(key, product.iter().copied().collect::<Vec<_>>().as_slice())?;
+        validate_interval(key, product.iter().copied().collect::<Vec<_>>().as_slice())?;
     }
     Ok(())
 }
 
-fn validate_accumulation(key: BladeKey, product: &[u8]) -> Result<()> {
+fn validate_interval(key: BladeKey, product: &[u8]) -> Result<()> {
     const END: std::ops::Range<usize> = 29..36;
     const RANGE_COUNT: usize = 36;
     const STATISTICAL_PROCESS: usize = 41;
@@ -135,7 +131,7 @@ fn validate_accumulation(key: BladeKey, product: &[u8]) -> Result<()> {
         bail!("GRIB accumulation template is truncated");
     }
     validate_time(
-        key.run.valid_timestamp(key.lead)?,
+        key.interval_end()?,
         [
             u16::from_be_bytes(product[END.start..END.start + 2].try_into()?),
             u16::from(product[END.start + 2]),
@@ -149,19 +145,20 @@ fn validate_accumulation(key: BladeKey, product: &[u8]) -> Result<()> {
     let law = key
         .grib_law()
         .context("blade key escaped its product recipe")?;
-    let expected_span = match law.time {
-        GribTimeLaw::AccumulationFromRun => u32::from(key.lead.get()),
-        GribTimeLaw::HourlyAccumulation => u32::from(key.lead.get().min(1)),
-        GribTimeLaw::Instant => 0,
+    let (expected_process, expected_span) = match law.time {
+        GribTimeLaw::AccumulationFromRun => (1, u32::from(key.lead.get())),
+        GribTimeLaw::HourlyAccumulation => (1, u32::from(key.lead.get().min(1))),
+        GribTimeLaw::DailySummary { .. } => (0, 23),
+        GribTimeLaw::Instant => (0, 0),
     };
     let span = u32::from_be_bytes(product[RANGE_LENGTH].try_into()?);
     if product[RANGE_COUNT] != 1
-        || product[STATISTICAL_PROCESS] != 1
+        || product[STATISTICAL_PROCESS] != expected_process
         || product[RANGE_UNIT] != 1
         || span != expected_span
     {
         bail!(
-            "GRIB accumulation interval {span} h does not match requested {:?} {}",
+            "GRIB statistical interval {span} h does not match requested {:?} {}",
             key.product,
             key.lead
         );
@@ -192,7 +189,7 @@ fn projection<R: std::io::Read>(
     let definition = GridDefinitionTemplateValues::try_from(message.grid_def())
         .context("decode GRIB grid definition")?;
     let GridDefinitionTemplateValues::Template30(lambert) = definition else {
-        bail!("HRRR field does not use Lambert conformal template 3.30");
+        bail!("forecast field does not use Lambert conformal template 3.30");
     };
     let vector_frame = key.is_vector_component().then_some({
         if lambert.resolution_and_component_flags.0 & 0b0000_1000 == 0 {
@@ -228,22 +225,35 @@ fn projection<R: std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Ingredient, LeadHour, Product, RunId};
+    use crate::model::{ForecastRun, Ingredient, LeadHour, Product, RunId};
 
     #[test]
     fn grib_identity_is_bound_to_every_frame_axis() -> Result<()> {
         let run = RunId::forge(1_785_272_400)?;
         let lead = LeadHour::forge(20)?;
         for product in Product::ALL {
+            let run = ForecastRun::forge(
+                product.system(),
+                product.system().cycle_at_or_before(run.timestamp()?)?,
+            );
             for &ingredient in product.ingredients() {
                 let key = BladeKey::forge(run, lead, product, ingredient)
                     .context("lawful product ingredient")?;
                 let blade = synthetic_blade(key)?;
                 validate(key, &blade)?;
-                let wrong_lead = BladeKey::forge(run, LeadHour::forge(19)?, product, ingredient)
-                    .context("lawful wrong-lead ingredient")?;
+                let wrong_lead = BladeKey::forge(
+                    run,
+                    if product == Product::AirQuality {
+                        LeadHour::ZERO
+                    } else {
+                        LeadHour::forge(19)?
+                    },
+                    product,
+                    ingredient,
+                )
+                .context("lawful wrong-lead ingredient")?;
                 assert!(validate(wrong_lead, &blade).is_err());
-                let wrong_run = BladeKey::forge(run.hours_ago(1), lead, product, ingredient)
+                let wrong_run = BladeKey::forge(run.previous()?, lead, product, ingredient)
                     .context("lawful wrong-run ingredient")?;
                 assert!(validate(wrong_run, &blade).is_err());
                 let alien = if product == Product::Smoke {
@@ -251,16 +261,16 @@ mod tests {
                 } else {
                     Product::Smoke
                 };
-                let wrong_product = BladeKey::forge(run, lead, alien, Ingredient::Scalar)
-                    .context("lawful alien product")?;
-                assert!(validate(wrong_product, &blade).is_err());
+                if let Some(wrong_product) = BladeKey::forge(run, lead, alien, Ingredient::Scalar) {
+                    assert!(validate(wrong_product, &blade).is_err());
+                }
             }
         }
         Ok(())
     }
 
     fn synthetic_blade(key: BladeKey) -> Result<Vec<u8>> {
-        let reference = key.run.timestamp()?.to_zoned(TimeZone::UTC);
+        let reference = key.run.id.timestamp()?.to_zoned(TimeZone::UTC);
         let mut identification = vec![0_u8; 16];
         identification[0..2].copy_from_slice(&7_u16.to_be_bytes());
         identification[6] = 1;
@@ -269,31 +279,31 @@ mod tests {
         let law = key.grib_law().context("lawful synthetic blade recipe")?;
         let mut product = match law.time {
             GribTimeLaw::Instant => vec![0_u8; 29],
-            GribTimeLaw::AccumulationFromRun | GribTimeLaw::HourlyAccumulation => vec![0_u8; 53],
+            GribTimeLaw::AccumulationFromRun
+            | GribTimeLaw::HourlyAccumulation
+            | GribTimeLaw::DailySummary { .. } => vec![0_u8; 53],
         };
         product[2..4].copy_from_slice(&law.template.to_be_bytes());
         product[4] = law.category;
         product[5] = law.parameter;
         product[12] = 1;
-        let start = match law.time {
-            GribTimeLaw::Instant => u32::from(key.lead.get()),
-            GribTimeLaw::AccumulationFromRun => 0,
-            GribTimeLaw::HourlyAccumulation => u32::from(key.lead.get().saturating_sub(1)),
-        };
+        let start = u32::from_be_bytes(i32::from(key.forecast_start()?).to_be_bytes());
         product[13..17].copy_from_slice(&start.to_be_bytes());
         product[17] = law.surface.kind;
-        product[19..23].copy_from_slice(&law.surface.metres.to_be_bytes());
+        product[18] = law.surface.scale_factor as u8;
+        product[19..23].copy_from_slice(&law.surface.scaled_value.to_be_bytes());
         product[23] = 255;
         if law.time != GribTimeLaw::Instant {
-            let valid = key.run.valid_timestamp(key.lead)?.to_zoned(TimeZone::UTC);
+            let valid = key.interval_end()?.to_zoned(TimeZone::UTC);
             stamp(&mut product[29..36], &valid)?;
             product[36] = 1;
-            product[41] = 1;
+            product[41] = u8::from(!matches!(law.time, GribTimeLaw::DailySummary { .. }));
             product[42] = 2;
             product[43] = 1;
             let span = match law.time {
                 GribTimeLaw::AccumulationFromRun => u32::from(key.lead.get()),
                 GribTimeLaw::HourlyAccumulation => u32::from(key.lead.get().min(1)),
+                GribTimeLaw::DailySummary { .. } => 23,
                 GribTimeLaw::Instant => 0,
             };
             product[44..48].copy_from_slice(&span.to_be_bytes());

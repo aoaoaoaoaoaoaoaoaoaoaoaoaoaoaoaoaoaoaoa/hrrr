@@ -8,6 +8,7 @@ pub enum Unit {
     Fahrenheit,
     Percent,
     MilesPerHour,
+    AirQualityIndex,
 }
 
 impl Unit {
@@ -18,6 +19,7 @@ impl Unit {
             Self::Fahrenheit => "°F",
             Self::Percent => "%",
             Self::MilesPerHour => "mph",
+            Self::AirQualityIndex => "AQI",
         }
     }
 
@@ -33,6 +35,7 @@ impl Unit {
             Self::Fahrenheit => [1.8, -459.67],
             Self::Percent => [1.0, 0.0],
             Self::MilesPerHour => [2.236_936_3, 0.0],
+            Self::AirQualityIndex => [1.0, 0.0],
         }
     }
 
@@ -43,13 +46,17 @@ impl Unit {
             Self::Fahrenheit => format!("{value:.1}{}", self.symbol()),
             Self::Percent => format!("{value:.0}{}", self.symbol()),
             Self::MilesPerHour => format!("{value:.1} {}", self.symbol()),
+            Self::AirQualityIndex => format!("{value:.0} {}", self.symbol()),
         }
     }
 
     pub fn format_ceiling(self, value: f32) -> String {
         match self {
             Self::Percent | Self::Fahrenheit => format!("{value:.0}{}", self.symbol()),
-            Self::Inch | Self::MicrogramPerCubicMetre | Self::MilesPerHour => {
+            Self::Inch
+            | Self::MicrogramPerCubicMetre
+            | Self::MilesPerHour
+            | Self::AirQualityIndex => {
                 format!("{value:.0} {}", self.symbol())
             }
         }
@@ -128,6 +135,7 @@ pub enum TemperatureSeason {
 impl TemperatureSeason {
     pub fn at(key: FrameKey) -> Self {
         key.run
+            .id
             .valid_month_utc(key.valid)
             .map_or(Self::Winter, Self::for_month)
     }
@@ -233,6 +241,11 @@ scale_arsenal! {
         WIND,
         WIND_CONTOUR,
     )),
+    AirQuality => air_quality = ScaleFamily::Static(Scale::forge(
+        Unit::AirQualityIndex,
+        AIR_QUALITY,
+        AIR_QUALITY_CONTOUR,
+    )),
 }
 
 const VOID: [u8; 4] = [10, 10, 8, 0];
@@ -259,6 +272,10 @@ const CLOUD_CONTOUR: Contour = Contour {
 const WIND_CONTOUR: Contour = Contour {
     width_points: 0.22,
     srgb: [35, 31, 26, 46],
+};
+const AIR_QUALITY_CONTOUR: Contour = Contour {
+    width_points: 0.30,
+    srgb: [35, 31, 26, 54],
 };
 const QPF_HOURLY_BINS: usize = 15;
 const QPF: [Bin; 18] = [
@@ -326,6 +343,15 @@ const WIND: [Bin; 11] = [
     Bin::new(50.0, [188, 69, 67, 204]),
     Bin::new(60.0, [137, 55, 86, 222]),
     Bin::new(80.0, [69, 43, 74, 238]),
+];
+const AIR_QUALITY: [Bin; 7] = [
+    Bin::new(0.0, [0, 228, 0, 76]),
+    Bin::new(50.0, [0, 228, 0, 76]),
+    Bin::new(100.0, [255, 255, 0, 112]),
+    Bin::new(150.0, [255, 126, 0, 148]),
+    Bin::new(200.0, [255, 0, 0, 176]),
+    Bin::new(300.0, [143, 63, 151, 198]),
+    Bin::new(500.0, [126, 0, 35, 218]),
 ];
 const TEMPERATURE_ALPHA: u8 = 210;
 const DEW_POINT_ALPHA: u8 = 205;

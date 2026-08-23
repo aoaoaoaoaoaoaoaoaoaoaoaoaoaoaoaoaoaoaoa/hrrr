@@ -1,12 +1,13 @@
 # HRRR
 
-HRRR is a native viewer for NOAA High-Resolution Rapid Refresh forecast
-fields. It renders surface smoke, temperature, dew point, ten-metre wind, total
-cloud cover, total precipitation, and one-hour precipitation over a locally
-indexed vector basemap. Standard wind barbs are stamped from application-owned
-3D bronze dies by the same build-time Foundry that makes Poolrooms chrome.
-Forecast animation, map navigation, probes, pins, and saved views remain responsive
-while network, GRIB, PMTiles, and mesh work run outside the UI thread.
+HRRR is a native viewer for NOAA forecast fields, centered on the
+High-Resolution Rapid Refresh model. It renders surface smoke, air quality,
+temperature, dew point, ten-metre wind, total cloud cover, total precipitation,
+and one-hour precipitation over a locally indexed vector basemap. Standard
+wind barbs are stamped from application-owned 3D bronze dies by the same
+build-time Foundry that makes Poolrooms chrome. Forecast animation, map
+navigation, probes, pins, and saved views remain responsive while network,
+GRIB, PMTiles, and mesh work run outside the UI thread.
 
 ## Install
 
@@ -64,7 +65,9 @@ Click an active field button again to show only the basemap. Focus a forecast
 rail to adjust it with the arrow keys; a hovered rail also accepts the mouse
 wheel. `Ctrl+R` and `Ctrl+Shift+R` select the latest run and latest 48-hour run.
 Cumulative fields add a **Base hour** rail; their map shows the increment from
-that hour through the selected forecast hour.
+that hour through the selected forecast hour. Air quality uses the same hourly
+forecast controls while retaining the daily period represented by its source
+field.
 
 Press `F1` or `?` for the generated command guide. `Tab` and `Shift+Tab` move
 within the active inspector panel; `Ctrl+Tab` and `Ctrl+Shift+Tab` cross panels.
@@ -130,10 +133,15 @@ local core and cached detail as well.
 
 ## Data
 
-Forecast data is fetched directly from the [NOAA HRRR public
-archive](https://registry.opendata.aws/noaa-hrrr-pds/). Basemap data comes from
-[OpenStreetMap](https://www.openstreetmap.org/copyright) through Protomaps.
-Displayed forecasts are model output, not official warnings or observations.
+Meteorological forecast data is fetched directly from the [NOAA HRRR public
+archive](https://registry.opendata.aws/noaa-hrrr-pds/). Air quality is derived
+from [NOAA-EPA Air Quality Model](https://www.emc.ncep.noaa.gov/mmb/aq/)
+bias-corrected daily PM₂.₅ and ozone summaries using the current
+[EPA AQI breakpoints](https://aqs.epa.gov/aqsweb/documents/codetables/aqi_breakpoints.html);
+it is forecast model output, not an observation or AirNow NowCast. Basemap
+data comes from [OpenStreetMap](https://www.openstreetmap.org/copyright)
+through Protomaps. Displayed forecasts are model output, not official warnings
+or observations.
 
 ## Development
 

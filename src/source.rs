@@ -2,14 +2,18 @@ use crate::{
     application_paths::ApplicationPaths,
     cache::CacheStore,
     decode,
-    model::{BladeKey, LeadHour, Product, RunExtent, RunId},
+    model::{
+        AqmBundle, BladeKey, ForecastRun, ForecastSystem, LeadHour, Product, RunExtent, RunId,
+    },
 };
 use anyhow::{Context as _, Result, bail};
 use jiff::Timestamp;
 use std::{ops::RangeInclusive, path::PathBuf};
 
-const ORIGIN: &str = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
-const DISCOVERY_DEPTH: u8 = 30;
+const HRRR_ORIGIN: &str = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com";
+const AQM_ORIGIN: &str = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/aqm/prod";
+const HRRR_DISCOVERY_DEPTH: u8 = 30;
+const AQM_DISCOVERY_DEPTH: u8 = 6;
 
 pub struct Source {
     agent: ureq::Agent,
@@ -24,32 +28,64 @@ impl Source {
         }
     }
 
-    pub fn discover(&self, now: Timestamp) -> Result<RunExtent> {
-        let head = RunId::hourly_at_or_before(now);
-        for age in 0..=DISCOVERY_DEPTH {
-            let run = head.hours_ago(age);
-            let Ok(extent) = self.survey(run) else {
+    pub fn discover(&self, system: ForecastSystem, now: Timestamp) -> Result<RunExtent> {
+        match system {
+            ForecastSystem::Hrrr => self.discover_hrrr(now),
+            ForecastSystem::Aqm => self.discover_aqm(now),
+        }
+    }
+
+    pub fn survey(&self, run: ForecastRun) -> Result<RunExtent> {
+        match run.system {
+            ForecastSystem::Hrrr => self.survey_hrrr(run),
+            ForecastSystem::Aqm => self.survey_aqm(run),
+        }
+    }
+
+    fn discover_hrrr(&self, now: Timestamp) -> Result<RunExtent> {
+        let head = ForecastSystem::Hrrr.cycle_at_or_before(now)?;
+        for age in 0..=HRRR_DISCOVERY_DEPTH {
+            let run = ForecastRun::hrrr(head.hours_ago(age));
+            let Ok(extent) = self.survey_hrrr(run) else {
                 continue;
             };
-            let Ok(index) = self.index(run, LeadHour::ZERO) else {
+            let Ok(index) = self.index(run.id, LeadHour::ZERO) else {
                 continue;
             };
-            let complete = Product::ALL.iter().all(|&product| {
-                product.ingredients().iter().all(|&ingredient| {
-                    BladeKey::forge(run, LeadHour::ZERO, product, ingredient)
-                        .is_some_and(|key| select_range(&index, key).is_ok())
-                })
-            });
+            let complete = Product::ALL
+                .iter()
+                .copied()
+                .filter(|product| product.system() == ForecastSystem::Hrrr)
+                .all(|product| {
+                    product.ingredients().iter().all(|&ingredient| {
+                        BladeKey::forge(run, LeadHour::ZERO, product, ingredient)
+                            .is_some_and(|key| select_range(&index, key).is_ok())
+                    })
+                });
             if complete {
                 return Ok(extent);
             }
         }
-        bail!("no complete HRRR run found in the last {DISCOVERY_DEPTH} hours")
+        bail!("no complete HRRR run found in the last {HRRR_DISCOVERY_DEPTH} hours")
     }
 
-    pub fn survey(&self, run: RunId) -> Result<RunExtent> {
+    fn discover_aqm(&self, now: Timestamp) -> Result<RunExtent> {
+        let mut run = ForecastRun::forge(
+            ForecastSystem::Aqm,
+            ForecastSystem::Aqm.cycle_at_or_before(now)?,
+        );
+        for _age in 0..=AQM_DISCOVERY_DEPTH {
+            if let Ok(extent) = self.survey_aqm(run) {
+                return Ok(extent);
+            }
+            run = run.previous()?;
+        }
+        bail!("no complete air-quality run found in the recent NOAA inventory")
+    }
+
+    fn survey_hrrr(&self, run: ForecastRun) -> Result<RunExtent> {
         let prefix = data_prefix(run)?;
-        let url = format!("{ORIGIN}/?list-type=2&prefix={prefix}");
+        let url = format!("{HRRR_ORIGIN}/?list-type=2&prefix={prefix}");
         let listing = self
             .agent
             .get(&url)
@@ -67,15 +103,34 @@ impl Source {
         RunExtent::forge(run, published)
     }
 
+    fn survey_aqm(&self, run: ForecastRun) -> Result<RunExtent> {
+        for bundle in AqmBundle::ALL {
+            let url = aqm_url(run, bundle)?;
+            let _response = self
+                .agent
+                .head(&url)
+                .call()
+                .with_context(|| format!("survey air-quality bundle {url}"))?;
+        }
+        RunExtent::forge(run, run.horizon()?)
+    }
+
     pub fn field_message(&self, key: BladeKey) -> Result<Vec<u8>> {
+        match key.run.system {
+            ForecastSystem::Hrrr => self.hrrr_field_message(key),
+            ForecastSystem::Aqm => self.aqm_field_message(key),
+        }
+    }
+
+    fn hrrr_field_message(&self, key: BladeKey) -> Result<Vec<u8>> {
         let blade = field_blade(key)?;
         self.cache.resolve(
             &blade,
             |bytes| decode::validate(key, bytes).is_ok(),
             || {
-                let index = self.index(key.run, key.lead)?;
+                let index = self.index(key.run.id, key.lead)?;
                 let range = select_range(&index, key)?;
-                let url = data_url(key.run, key.lead)?;
+                let url = data_url(key.run.id, key.lead)?;
                 let mut response = self
                     .agent
                     .get(&url)
@@ -96,6 +151,41 @@ impl Source {
                     )
                 })?;
                 Ok(bytes)
+            },
+        )
+    }
+
+    fn aqm_field_message(&self, key: BladeKey) -> Result<Vec<u8>> {
+        let blade = field_blade(key)?;
+        self.cache.resolve(
+            &blade,
+            |bytes| decode::validate(key, bytes).is_ok(),
+            || {
+                let bundle = key.aqm_bundle().context("AQM blade has no bundle law")?;
+                let bundle_blade = aqm_bundle_blade(key.run, bundle)?;
+                let url = aqm_url(key.run, bundle)?;
+                let bytes = self.cache.resolve(
+                    &bundle_blade,
+                    |bytes| grib_message(bytes, usize::from(AqmBundle::DAY_SLOTS - 1)).is_ok(),
+                    || {
+                        let bytes = self
+                            .agent
+                            .get(&url)
+                            .call()
+                            .with_context(|| format!("fetch {url}"))?
+                            .body_mut()
+                            .read_to_vec()
+                            .with_context(|| format!("read {url}"))?;
+                        let _last = grib_message(&bytes, usize::from(AqmBundle::DAY_SLOTS - 1))
+                            .with_context(|| format!("{url} is not a three-day GRIB bundle"))?;
+                        Ok(bytes)
+                    },
+                )?;
+                let slot = usize::from(key.daily_slot().context("AQM blade has no day slot")?);
+                let message = grib_message(&bytes, slot)?.to_vec();
+                decode::validate(key, &message)
+                    .with_context(|| format!("AQM bundle {url} did not match day slot {slot}"))?;
+                Ok(message)
             },
         )
     }
@@ -133,7 +223,20 @@ fn field_blade(key: BladeKey) -> Result<PathBuf> {
     let cache_name = key
         .cache_name()
         .context("blade key escaped its product recipe")?;
-    Ok(frame_chamber(key.run, key.lead)?.join(format!("{cache_name}.grib2")))
+    let chamber = match key.run.system {
+        ForecastSystem::Hrrr => frame_chamber(key.run.id, key.lead)?,
+        ForecastSystem::Aqm => PathBuf::from("aqm").join(key.run.id.stamp()?).join(format!(
+            "day-{}",
+            key.daily_slot().context("AQM blade has no day slot")?
+        )),
+    };
+    Ok(chamber.join(format!("{cache_name}.grib2")))
+}
+
+fn aqm_bundle_blade(run: ForecastRun, bundle: AqmBundle) -> Result<PathBuf> {
+    Ok(PathBuf::from("aqm")
+        .join(run.id.stamp()?)
+        .join(format!("{}.grib2", bundle.file_stem())))
 }
 
 fn index_blade(run: RunId, lead: LeadHour) -> Result<PathBuf> {
@@ -142,18 +245,57 @@ fn index_blade(run: RunId, lead: LeadHour) -> Result<PathBuf> {
 
 fn data_url(run: RunId, lead: LeadHour) -> Result<String> {
     Ok(format!(
-        "{ORIGIN}/{}{:02}.grib2",
-        data_prefix(run)?,
+        "{HRRR_ORIGIN}/{}{:02}.grib2",
+        data_prefix(ForecastRun::hrrr(run))?,
         lead.get()
     ))
 }
 
-fn data_prefix(run: RunId) -> Result<String> {
+fn data_prefix(run: ForecastRun) -> Result<String> {
     Ok(format!(
         "hrrr.{}/conus/hrrr.t{:02}z.wrfsfcf",
-        run.date()?,
-        run.cycle()?
+        run.id.date()?,
+        run.id.cycle()?
     ))
+}
+
+fn aqm_url(run: ForecastRun, bundle: AqmBundle) -> Result<String> {
+    Ok(format!(
+        "{AQM_ORIGIN}/aqm.{}/{:02}/aqm.t{:02}z.{}.227.grib2",
+        run.id.date()?,
+        run.id.cycle()?,
+        run.id.cycle()?,
+        bundle.file_stem(),
+    ))
+}
+
+fn grib_message(bundle: &[u8], wanted: usize) -> Result<&[u8]> {
+    let mut offset = 0_usize;
+    let mut slot = 0_usize;
+    while offset < bundle.len() {
+        let header = bundle
+            .get(offset..offset.saturating_add(16))
+            .context("truncated GRIB bundle header")?;
+        if &header[..4] != b"GRIB" {
+            bail!("GRIB bundle lost message alignment at byte {offset}");
+        }
+        let length = usize::try_from(u64::from_be_bytes(header[8..16].try_into()?))?;
+        let end = offset
+            .checked_add(length)
+            .context("GRIB message length overflow")?;
+        let message = bundle
+            .get(offset..end)
+            .context("truncated GRIB bundle message")?;
+        if message.get(length.saturating_sub(4)..) != Some(b"7777") {
+            bail!("GRIB bundle message {slot} has no terminator");
+        }
+        if slot == wanted {
+            return Ok(message);
+        }
+        offset = end;
+        slot += 1;
+    }
+    bail!("GRIB bundle has no message at slot {wanted}")
 }
 
 fn publication_frontier(listing: &str, prefix: &str, horizon: LeadHour) -> Option<LeadHour> {
@@ -250,6 +392,7 @@ mod tests {
     fn inventory_selectors_distinguish_products_and_accumulation_windows() -> Result<()> {
         use crate::model::Ingredient::*;
         let run = RunId::forge(1_785_272_400)?;
+        let run = ForecastRun::hrrr(run);
         let key = |product, ingredient| {
             BladeKey::forge(run, LeadHour::ZERO, product, ingredient).context("lawful test blade")
         };

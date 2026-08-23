@@ -219,7 +219,7 @@ mod tests {
 schema = 1
 overlay = \"smoke\"
 cycle = \"latest\"
-lead = 49
+lead = 73
 closed_folders = []
 ";
         assert!(toml::from_str::<SessionStateWire>(text).is_err());

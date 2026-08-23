@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+mod air_quality;
 mod app;
 mod application_paths;
 mod basemap;
@@ -111,7 +112,7 @@ Usage:
   hrrr --help
   hrrr --version
 
-The GUI reads NOAA HRRR forecast fields directly. `basemap install` explicitly
+The GUI reads NOAA forecast fields directly. `basemap install` explicitly
 downloads the North American Protomaps core through zoom 11. Zoom 12 detail is
 fetched only for visible tiles after the map enters that zoom and is retained
 in the bounded disposable cache."

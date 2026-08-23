@@ -575,6 +575,12 @@ fn bin_color(value: f32) -> vec4f {
     return u.colors[bin_slot(value)];
 }
 
+// Classify IEEE-754 bits directly: floating self-comparisons may be folded
+// under backend fast-math, turning missing GRIB cells into terminal-bin color.
+fn non_finite(value: f32) -> bool {
+    return (bitcast<u32>(value) & 0x7f800000u) == 0x7f800000u;
+}
+
 fn incise_contours(value: f32, base: vec4f) -> vec4f {
     if u.bin_count <= 1u || u.contour_width <= 0.0 { return base; }
     let slope = fwidth(value);
@@ -597,9 +603,14 @@ fn fragment(in: VertexOut) -> @location(0) vec4f {
     let world = mix(u.world.xy, u.world.zw, in.uv);
     let cell = grid_at(world);
     let edge = vec2f(u.grid - vec2u(1u));
-    if any(cell < vec2f(0.0)) || any(cell > edge) { return vec4f(0.0); }
+    if non_finite(cell.x)
+        || non_finite(cell.y)
+        || any(cell < vec2f(0.0))
+        || any(cell > edge) {
+        return vec4f(0.0);
+    }
     let raw = raw_at(cell);
-    if raw != raw { return vec4f(0.0); }
+    if non_finite(raw) { return vec4f(0.0); }
     let value = raw * u.affine.x + u.affine.y;
     return incise_contours(value, bin_color(value));
 }

@@ -1,4 +1,4 @@
-use crate::{application_paths::ApplicationPaths, decode, model::*, source::Source};
+use crate::{air_quality, application_paths::ApplicationPaths, decode, model::*, source::Source};
 use anyhow::{Context as _, Result, anyhow};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use eternalist_apps::{
@@ -41,7 +41,7 @@ pub struct LoadDemand {
 #[derive(Clone, Copy, Debug)]
 pub enum Command {
     Discover,
-    Survey(RunId),
+    Survey(ForecastRun),
     Load(LoadDemand),
 }
 
@@ -50,7 +50,11 @@ pub enum Event {
     Discovered(RunExtent),
     Surveyed(RunExtent),
     SurveyFault {
-        run: RunId,
+        run: ForecastRun,
+        message: String,
+    },
+    DiscoveryFault {
+        system: ForecastSystem,
         message: String,
     },
     Loaded {
@@ -58,13 +62,13 @@ pub enum Event {
         field: Arc<FieldGrid>,
     },
     Fault {
-        demand: Option<LoadDemand>,
+        demand: LoadDemand,
         message: String,
     },
 }
 
 pub struct Worker {
-    surveys: SupersedingSender<RunId>,
+    surveys: SupersedingSender<ForecastRun>,
     loads: SupersedingSender<LoadDemand>,
     shutdown: Sender<()>,
     scout: Sender<()>,
@@ -84,7 +88,7 @@ impl Worker {
         let wake = NativeWake::from_context(&ctx);
         let forge_wake = wake.clone();
         let forge_thread = thread::Builder::new()
-            .name("hrrr-forge".to_owned())
+            .name("forecast-forge".to_owned())
             .spawn(move || {
                 labor(
                     forge_wake,
@@ -95,12 +99,12 @@ impl Worker {
                     forge_events,
                 );
             })
-            .context("spawn HRRR field forge")?;
+            .context("spawn forecast field forge")?;
         let scout_source = Source::new(paths);
         let scout_thread = thread::Builder::new()
-            .name("hrrr-scout".to_owned())
+            .name("forecast-scout".to_owned())
             .spawn(move || scout_cycles(wake, scout_source, scout_rx, event_tx))
-            .context("spawn HRRR cycle scout")?;
+            .context("spawn forecast cycle scout")?;
         Ok(Self {
             surveys,
             loads,
@@ -115,18 +119,18 @@ impl Worker {
         match command {
             Command::Discover => match self.scout.try_send(()) {
                 Ok(()) | Err(TrySendError::Full(())) => Ok(()),
-                Err(TrySendError::Disconnected(())) => Err(anyhow!("HRRR cycle scout has fallen")),
+                Err(TrySendError::Disconnected(())) => Err(anyhow!("forecast scout has fallen")),
             },
             Command::Survey(run) => self
                 .surveys
                 .offer(run)
                 .map(|_superseded| ())
-                .map_err(|_| anyhow!("HRRR field forge has fallen")),
+                .map_err(|_| anyhow!("forecast forge has fallen")),
             Command::Load(demand) => self
                 .loads
                 .offer(demand)
                 .map(|_superseded| ())
-                .map_err(|_| anyhow!("HRRR field forge has fallen")),
+                .map_err(|_| anyhow!("forecast forge has fallen")),
         }
     }
 }
@@ -141,7 +145,7 @@ fn labor(
     wake: NativeWake,
     source: Source,
     shutdown: Receiver<()>,
-    surveys: SupersedingReceiver<RunId>,
+    surveys: SupersedingReceiver<ForecastRun>,
     loads: SupersedingReceiver<LoadDemand>,
     events: Sender<Event>,
 ) {
@@ -171,7 +175,7 @@ fn labor(
             ForgeDemand::Load(demand) => forge_frame(&source, &mut blades, demand.key)
                 .map(|field| Event::Loaded { demand, field })
                 .unwrap_or_else(|err| Event::Fault {
-                    demand: Some(demand),
+                    demand,
                     message: format!("{err:#}"),
                 }),
         };
@@ -183,7 +187,7 @@ fn labor(
 }
 
 enum ForgeDemand {
-    Survey(RunId),
+    Survey(ForecastRun),
     Load(LoadDemand),
 }
 
@@ -223,6 +227,28 @@ fn forge_recipe(
                     .context("vector recipe has no northward blade")?,
             )?;
             Ok(Arc::new(FieldGrid::forge_vector(&eastward, &northward)?))
+        }
+        FieldShape::AirQuality => {
+            let fine_particulate = blades.load(
+                source,
+                key.blade_at(lead, Ingredient::FineParticulate)
+                    .context("air-quality recipe has no PM2.5 blade")?,
+            )?;
+            let ozone_eight_hour = blades.load(
+                source,
+                key.blade_at(lead, Ingredient::OzoneEightHour)
+                    .context("air-quality recipe has no eight-hour ozone blade")?,
+            )?;
+            let ozone_one_hour = blades.load(
+                source,
+                key.blade_at(lead, Ingredient::OzoneOneHour)
+                    .context("air-quality recipe has no one-hour ozone blade")?,
+            )?;
+            Ok(Arc::new(air_quality::field(
+                &fine_particulate,
+                &ozone_eight_hour,
+                &ozone_one_hour,
+            )?))
         }
     }
 }
@@ -277,20 +303,23 @@ fn scout_cycles(wake: NativeWake, source: Source, summons: Receiver<()>, events:
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        let (event, cadence) = match source.discover(Timestamp::now()) {
-            Ok(extent) => (Event::Discovered(extent), DISCOVERY_POLL),
-            Err(err) => (
-                Event::Fault {
-                    demand: None,
-                    message: format!("{err:#}"),
-                },
-                DISCOVERY_RETRY,
-            ),
-        };
-        next_discovery = Instant::now() + cadence;
-        if events.send(event).is_err() {
-            break;
+        let mut cadence = DISCOVERY_POLL;
+        for system in ForecastSystem::ALL {
+            let event = match source.discover(system, Timestamp::now()) {
+                Ok(extent) => Event::Discovered(extent),
+                Err(err) => {
+                    cadence = DISCOVERY_RETRY;
+                    Event::DiscoveryFault {
+                        system,
+                        message: format!("{err:#}"),
+                    }
+                }
+            };
+            if events.send(event).is_err() {
+                return;
+            }
         }
+        next_discovery = Instant::now() + cadence;
         let _woken = wake.request_foreground_repaint();
     }
 }

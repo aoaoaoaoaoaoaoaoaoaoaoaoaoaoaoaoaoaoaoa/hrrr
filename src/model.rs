@@ -15,18 +15,33 @@ pub(crate) struct GribLaw {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FixedSurfaceLaw {
     pub kind: u8,
-    pub metres: i32,
+    pub scale_factor: i8,
+    pub scaled_value: i32,
 }
 
 impl FixedSurfaceLaw {
-    const GROUND: Self = Self { kind: 1, metres: 0 };
+    const GROUND: Self = Self {
+        kind: 1,
+        scale_factor: 0,
+        scaled_value: 0,
+    };
     const ENTIRE_ATMOSPHERE: Self = Self {
         kind: 10,
-        metres: 0,
+        scale_factor: 0,
+        scaled_value: 0,
+    };
+    const SIGMA_ONE: Self = Self {
+        kind: 104,
+        scale_factor: 4,
+        scaled_value: 10_000,
     };
 
     const fn metres_above_ground(metres: i32) -> Self {
-        Self { kind: 103, metres }
+        Self {
+            kind: 103,
+            scale_factor: 0,
+            scaled_value: metres,
+        }
     }
 }
 
@@ -35,6 +50,7 @@ pub(crate) enum GribTimeLaw {
     Instant,
     AccumulationFromRun,
     HourlyAccumulation,
+    DailySummary { start_shift: i8, end_shift: i8 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +65,7 @@ impl GribTimeLaw {
         match self {
             Self::Instant => TemporalShape::Instant,
             Self::HourlyAccumulation => TemporalShape::Interval,
+            Self::DailySummary { .. } => TemporalShape::Interval,
             Self::AccumulationFromRun => TemporalShape::Cumulative,
         }
     }
@@ -74,6 +91,19 @@ impl GribLaw {
             time,
         }
     }
+
+    const fn daily_summary(category: u8, parameter: u8, start_shift: i8, end_shift: i8) -> Self {
+        Self {
+            template: 8,
+            category,
+            parameter,
+            surface: FixedSurfaceLaw::SIGMA_ONE,
+            time: GribTimeLaw::DailySummary {
+                start_shift,
+                end_shift,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -83,28 +113,74 @@ enum InventoryLaw {
     Contains(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AqmBundle {
+    FineParticulate,
+    OzoneEightHour,
+    OzoneOneHour,
+}
+
+impl AqmBundle {
+    pub(crate) const DAY_SLOTS: u8 = 3;
+    pub(crate) const ALL: [Self; 3] = [
+        Self::FineParticulate,
+        Self::OzoneEightHour,
+        Self::OzoneOneHour,
+    ];
+
+    pub(crate) const fn file_stem(self) -> &'static str {
+        match self {
+            Self::FineParticulate => "ave_24hr_pm25_bc",
+            Self::OzoneEightHour => "max_8hr_o3_bc",
+            Self::OzoneOneHour => "max_1hr_o3_bc",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AcquisitionLaw {
+    Hrrr(InventoryLaw),
+    Aqm(AqmBundle),
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Ingredient {
     Scalar,
     Eastward,
     Northward,
+    FineParticulate,
+    OzoneEightHour,
+    OzoneOneHour,
 }
 
 const SCALAR_INGREDIENTS: &[Ingredient] = &[Ingredient::Scalar];
 const VECTOR_INGREDIENTS: &[Ingredient] = &[Ingredient::Eastward, Ingredient::Northward];
+const AIR_QUALITY_INGREDIENTS: &[Ingredient] = &[
+    Ingredient::FineParticulate,
+    Ingredient::OzoneEightHour,
+    Ingredient::OzoneOneHour,
+];
 
 #[derive(Clone, Copy)]
 struct IngredientLaw {
     cache_suffix: &'static str,
-    inventory: InventoryLaw,
+    acquisition: AcquisitionLaw,
     grib: GribLaw,
 }
 
 impl IngredientLaw {
-    const fn new(cache_suffix: &'static str, inventory: InventoryLaw, grib: GribLaw) -> Self {
+    const fn hrrr(cache_suffix: &'static str, inventory: InventoryLaw, grib: GribLaw) -> Self {
         Self {
             cache_suffix,
-            inventory,
+            acquisition: AcquisitionLaw::Hrrr(inventory),
+            grib,
+        }
+    }
+
+    const fn aqm(cache_suffix: &'static str, bundle: AqmBundle, grib: GribLaw) -> Self {
+        Self {
+            cache_suffix,
+            acquisition: AcquisitionLaw::Aqm(bundle),
             grib,
         }
     }
@@ -117,17 +193,23 @@ enum FieldRecipe {
         eastward: IngredientLaw,
         northward: IngredientLaw,
     },
+    AirQuality {
+        fine_particulate: IngredientLaw,
+        ozone_eight_hour: IngredientLaw,
+        ozone_one_hour: IngredientLaw,
+    },
 }
 
 impl FieldRecipe {
     const fn scalar(inventory: InventoryLaw, grib: GribLaw) -> Self {
-        Self::Scalar(IngredientLaw::new("", inventory, grib))
+        Self::Scalar(IngredientLaw::hrrr("", inventory, grib))
     }
 
     const fn ingredients(self) -> &'static [Ingredient] {
         match self {
             Self::Scalar(_) => SCALAR_INGREDIENTS,
             Self::Vector { .. } => VECTOR_INGREDIENTS,
+            Self::AirQuality { .. } => AIR_QUALITY_INGREDIENTS,
         }
     }
 
@@ -136,6 +218,21 @@ impl FieldRecipe {
             (Self::Scalar(law), Ingredient::Scalar) => Some(law),
             (Self::Vector { eastward, .. }, Ingredient::Eastward) => Some(eastward),
             (Self::Vector { northward, .. }, Ingredient::Northward) => Some(northward),
+            (
+                Self::AirQuality {
+                    fine_particulate, ..
+                },
+                Ingredient::FineParticulate,
+            ) => Some(fine_particulate),
+            (
+                Self::AirQuality {
+                    ozone_eight_hour, ..
+                },
+                Ingredient::OzoneEightHour,
+            ) => Some(ozone_eight_hour),
+            (Self::AirQuality { ozone_one_hour, .. }, Ingredient::OzoneOneHour) => {
+                Some(ozone_one_hour)
+            }
             _ => None,
         }
     }
@@ -144,14 +241,27 @@ impl FieldRecipe {
         match self {
             Self::Scalar(_) => FieldShape::Scalar,
             Self::Vector { .. } => FieldShape::Vector,
+            Self::AirQuality { .. } => FieldShape::AirQuality,
         }
     }
 
     const fn temporal_shape(self) -> TemporalShape {
         let law = match self {
-            Self::Scalar(law) | Self::Vector { eastward: law, .. } => law,
+            Self::Scalar(law)
+            | Self::Vector { eastward: law, .. }
+            | Self::AirQuality {
+                fine_particulate: law,
+                ..
+            } => law,
         };
         law.grib.time.temporal_shape()
+    }
+
+    const fn system(self) -> ForecastSystem {
+        match self {
+            Self::Scalar(_) | Self::Vector { .. } => ForecastSystem::Hrrr,
+            Self::AirQuality { .. } => ForecastSystem::Aqm,
+        }
     }
 }
 
@@ -159,6 +269,7 @@ impl FieldRecipe {
 pub(crate) enum FieldShape {
     Scalar,
     Vector,
+    AirQuality,
 }
 
 impl InventoryLaw {
@@ -257,6 +368,10 @@ macro_rules! field_arsenal {
                 self.law().recipe.temporal_shape()
             }
 
+            pub(crate) const fn system(self) -> ForecastSystem {
+                self.law().recipe.system()
+            }
+
             pub const fn has_baseline(self) -> bool {
                 matches!(self.temporal_shape(), TemporalShape::Cumulative)
             }
@@ -335,12 +450,12 @@ field_arsenal! {
             label: "WIND · 10 M AGL",
             cache: "wind",
             recipe: FieldRecipe::Vector {
-                eastward: IngredientLaw::new(
+                eastward: IngredientLaw::hrrr(
                     "eastward",
                     InventoryLaw::Contains(":UGRD:10 m above ground:"),
                     GribLaw::instant(2, 2, FixedSurfaceLaw::metres_above_ground(10)),
                 ),
-                northward: IngredientLaw::new(
+                northward: IngredientLaw::hrrr(
                     "northward",
                     InventoryLaw::Contains(":VGRD:10 m above ground:"),
                     GribLaw::instant(2, 3, FixedSurfaceLaw::metres_above_ground(10)),
@@ -348,6 +463,75 @@ field_arsenal! {
             },
         },
     ],
+    [
+        AirQuality {
+            label: "AIR QUALITY · AQI",
+            cache: "air-quality",
+            recipe: FieldRecipe::AirQuality {
+                fine_particulate: IngredientLaw::aqm(
+                    "pm25",
+                    AqmBundle::FineParticulate,
+                    GribLaw::daily_summary(13, 193, 0, 0),
+                ),
+                ozone_eight_hour: IngredientLaw::aqm(
+                    "ozone-8h",
+                    AqmBundle::OzoneEightHour,
+                    GribLaw::daily_summary(14, 201, 6, 8),
+                ),
+                ozone_one_hour: IngredientLaw::aqm(
+                    "ozone-1h",
+                    AqmBundle::OzoneOneHour,
+                    GribLaw::daily_summary(14, 200, 0, 1),
+                ),
+            },
+        },
+    ],
+}
+
+impl Product {
+    pub(crate) fn horizon(self, run: ForecastRun) -> Result<LeadHour> {
+        if self.system() != run.system {
+            bail!("forecast product and run belong to different systems");
+        }
+        match self {
+            Self::AirQuality => {
+                let final_hour =
+                    i16::from(aqm_day_zero(run.id)?) + i16::from(AqmBundle::DAY_SLOTS) * 24 - 1;
+                LeadHour::forge(u8::try_from(final_hour)?)
+            }
+            _ => run.horizon(),
+        }
+    }
+
+    fn canonical_lead(self, run: ForecastRun, lead: LeadHour) -> Option<LeadHour> {
+        if self != Self::AirQuality {
+            return Some(lead);
+        }
+        let slot = self.daily_slot(run, lead)?;
+        let end = i16::from(aqm_day_zero(run.id).ok()?) + i16::from(slot) * 24 + 23;
+        LeadHour::forge(u8::try_from(end.max(0)).ok()?).ok()
+    }
+
+    fn daily_slot(self, run: ForecastRun, lead: LeadHour) -> Option<u8> {
+        if self != Self::AirQuality || run.system != ForecastSystem::Aqm {
+            return None;
+        }
+        let day_zero = i16::from(aqm_day_zero(run.id).ok()?);
+        let slot = (i16::from(lead.get()) - day_zero)
+            .div_euclid(24)
+            .clamp(0, i16::from(AqmBundle::DAY_SLOTS - 1));
+        u8::try_from(slot).ok()
+    }
+}
+
+fn aqm_day_zero(run: RunId) -> Result<i8> {
+    const DAILY_BOUNDARY_UTC: i8 = 5;
+    let cycle = i8::try_from(run.cycle()?)?;
+    if matches!(cycle, 6 | 12) {
+        Ok(DAILY_BOUNDARY_UTC - cycle)
+    } else {
+        bail!("AQM run must use a 06Z or 12Z cycle, found {cycle:02}Z");
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -445,11 +629,116 @@ pub enum RunSelection {
     Fixed(RunId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ForecastSystem {
+    Hrrr,
+    Aqm,
+}
+
+impl ForecastSystem {
+    pub(crate) const ALL: [Self; 2] = [Self::Hrrr, Self::Aqm];
+
+    pub(crate) fn cycle_at_or_before(self, timestamp: Timestamp) -> Result<RunId> {
+        let hour = RunId::hourly_at_or_before(timestamp);
+        Ok(match self {
+            Self::Hrrr => hour,
+            Self::Aqm => {
+                let cycle = hour.cycle()?;
+                let retreat = match cycle {
+                    0..=5 => cycle.saturating_add(12),
+                    6..=11 => cycle - 6,
+                    _ => cycle - 12,
+                };
+                hour.hours_ago(retreat)
+            }
+        })
+    }
+
+    pub(crate) fn previous(self, run: RunId) -> Result<RunId> {
+        Ok(match self {
+            Self::Hrrr => run.hours_ago(1),
+            Self::Aqm if run.cycle()? == 12 => run.hours_ago(6),
+            Self::Aqm => run.hours_ago(18),
+        })
+    }
+
+    pub(crate) fn next(self, run: RunId) -> Result<RunId> {
+        Ok(match self {
+            Self::Hrrr => run.hours_after(1),
+            Self::Aqm if run.cycle()? == 6 => run.hours_after(6),
+            Self::Aqm => run.hours_after(18),
+        })
+    }
+
+    pub(crate) fn horizon(self, run: RunId) -> Result<LeadHour> {
+        match self {
+            Self::Hrrr => LeadHour::forge(if run.cycle()?.is_multiple_of(6) {
+                48
+            } else {
+                18
+            }),
+            Self::Aqm => LeadHour::forge(72),
+        }
+    }
+
+    pub(crate) fn latest_long(self, latest: RunId) -> Result<RunId> {
+        match self {
+            Self::Hrrr => Ok(latest.hours_ago(latest.cycle()? % 6)),
+            Self::Aqm => Ok(latest),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ForecastRun {
+    pub system: ForecastSystem,
+    pub id: RunId,
+}
+
+impl ForecastRun {
+    pub(crate) const fn forge(system: ForecastSystem, id: RunId) -> Self {
+        Self { system, id }
+    }
+
+    pub(crate) const fn hrrr(id: RunId) -> Self {
+        Self::forge(ForecastSystem::Hrrr, id)
+    }
+
+    pub(crate) fn horizon(self) -> Result<LeadHour> {
+        self.system.horizon(self.id)
+    }
+
+    pub(crate) fn previous(self) -> Result<Self> {
+        Ok(Self::forge(self.system, self.system.previous(self.id)?))
+    }
+
+    pub(crate) fn next(self) -> Result<Self> {
+        Ok(Self::forge(self.system, self.system.next(self.id)?))
+    }
+
+    pub(crate) fn rebase_lead(
+        self,
+        source: Self,
+        source_lead: LeadHour,
+        frontier: LeadHour,
+    ) -> LeadHour {
+        self.id.rebase_lead(source.id, source_lead, frontier)
+    }
+
+    pub(crate) fn local_label(self) -> Result<String> {
+        self.id.local_label()
+    }
+
+    pub(crate) fn valid_local_label(self, lead: LeadHour) -> Result<String> {
+        self.id.valid_local_label(lead)
+    }
+}
+
 impl RunSelection {
-    pub fn bind(self, latest: RunId) -> RunId {
+    pub(crate) fn bind(self, system: ForecastSystem, latest: RunId) -> RunId {
         match self {
             Self::Latest => latest,
-            Self::LatestLong => latest.latest_extended_at_or_before().unwrap_or(latest),
+            Self::LatestLong => system.latest_long(latest).unwrap_or(latest),
             Self::Fixed(run) => run.min(latest),
         }
     }
@@ -476,10 +765,10 @@ pub struct RunId(i64);
 impl RunId {
     pub fn forge(epoch_second: i64) -> Result<Self> {
         if epoch_second.rem_euclid(3_600) != 0 {
-            bail!("HRRR cycle {epoch_second} is not aligned to an hour");
+            bail!("forecast cycle {epoch_second} is not aligned to an hour");
         }
-        let _timestamp =
-            Timestamp::from_second(epoch_second).context("HRRR cycle lies outside civil time")?;
+        let _timestamp = Timestamp::from_second(epoch_second)
+            .context("forecast cycle lies outside civil time")?;
         Ok(Self(epoch_second))
     }
 
@@ -501,6 +790,10 @@ impl RunId {
 
     pub fn valid_timestamp(self, lead: LeadHour) -> Result<Timestamp> {
         Timestamp::from_second(self.0 + i64::from(lead.get()) * 3_600).map_err(Into::into)
+    }
+
+    pub(crate) fn timestamp_at_offset(self, hours: i16) -> Result<Timestamp> {
+        Timestamp::from_second(self.0 + i64::from(hours) * 3_600).map_err(Into::into)
     }
 
     pub fn rebase_lead(self, source: Self, source_lead: LeadHour, frontier: LeadHour) -> LeadHour {
@@ -529,18 +822,6 @@ impl RunId {
     pub fn cycle(self) -> Result<u8> {
         let hour = self.timestamp()?.to_zoned(TimeZone::UTC).hour();
         u8::try_from(hour).map_err(Into::into)
-    }
-
-    pub fn horizon(self) -> Result<LeadHour> {
-        LeadHour::forge(if self.cycle()?.is_multiple_of(6) {
-            48
-        } else {
-            18
-        })
-    }
-
-    pub fn latest_extended_at_or_before(self) -> Result<Self> {
-        Ok(self.hours_ago(self.cycle()? % 6))
     }
 
     pub fn local_label(self) -> Result<String> {
@@ -583,11 +864,11 @@ pub struct LeadHour(u8);
 impl LeadHour {
     pub const ZERO: Self = Self(0);
     pub const ONE: Self = Self(1);
-    pub const MAX: u8 = 48;
+    pub const MAX: u8 = 72;
 
     pub fn forge(hour: u8) -> Result<Self> {
         if hour > Self::MAX {
-            bail!("forecast lead {hour} exceeds HRRR ceiling {}", Self::MAX);
+            bail!("forecast lead {hour} exceeds ceiling {}", Self::MAX);
         }
         Ok(Self(hour))
     }
@@ -634,12 +915,12 @@ impl fmt::Display for LeadHour {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunExtent {
-    run: RunId,
+    run: ForecastRun,
     published: LeadHour,
 }
 
 impl RunExtent {
-    pub fn forge(run: RunId, published: LeadHour) -> Result<Self> {
+    pub(crate) fn forge(run: ForecastRun, published: LeadHour) -> Result<Self> {
         let horizon = run.horizon()?;
         if published > horizon {
             bail!("published lead {published} exceeds {run:?} horizon {horizon}");
@@ -647,7 +928,7 @@ impl RunExtent {
         Ok(Self { run, published })
     }
 
-    pub const fn run(self) -> RunId {
+    pub(crate) const fn run(self) -> ForecastRun {
         self.run
     }
 
@@ -658,7 +939,7 @@ impl RunExtent {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct BladeKey {
-    pub run: RunId,
+    pub run: ForecastRun,
     pub lead: LeadHour,
     pub product: Product,
     ingredient: Ingredient,
@@ -666,22 +947,30 @@ pub(crate) struct BladeKey {
 
 impl BladeKey {
     pub(crate) fn forge(
-        run: RunId,
+        run: ForecastRun,
         lead: LeadHour,
         product: Product,
         ingredient: Ingredient,
     ) -> Option<Self> {
-        product.ingredient_law(ingredient).map(|_law| Self {
-            run,
-            lead,
-            product,
-            ingredient,
-        })
+        (product.system() == run.system)
+            .then(|| product.ingredient_law(ingredient))
+            .flatten()
+            .and_then(|_law| {
+                let lead = product.canonical_lead(run, lead)?;
+                Some(Self {
+                    run,
+                    lead,
+                    product,
+                    ingredient,
+                })
+            })
     }
 
     pub(crate) fn index_match(self, descriptor: &str) -> bool {
-        self.law()
-            .is_some_and(|law| law.inventory.matches(descriptor))
+        self.law().is_some_and(|law| match law.acquisition {
+            AcquisitionLaw::Hrrr(inventory) => inventory.matches(descriptor),
+            AcquisitionLaw::Aqm(_) => false,
+        })
     }
 
     pub(crate) fn cache_name(self) -> Option<String> {
@@ -696,6 +985,52 @@ impl BladeKey {
 
     pub(crate) fn grib_law(self) -> Option<GribLaw> {
         self.law().map(|law| law.grib)
+    }
+
+    pub(crate) fn aqm_bundle(self) -> Option<AqmBundle> {
+        match self.law()?.acquisition {
+            AcquisitionLaw::Aqm(bundle) => Some(bundle),
+            AcquisitionLaw::Hrrr(_) => None,
+        }
+    }
+
+    pub(crate) fn daily_slot(self) -> Option<u8> {
+        self.product.daily_slot(self.run, self.lead)
+    }
+
+    pub(crate) fn forecast_start(self) -> Result<i16> {
+        let law = self
+            .grib_law()
+            .context("blade key escaped its product recipe")?;
+        Ok(match law.time {
+            GribTimeLaw::Instant => i16::from(self.lead.get()),
+            GribTimeLaw::AccumulationFromRun => 0,
+            GribTimeLaw::HourlyAccumulation => i16::from(self.lead.get().saturating_sub(1)),
+            GribTimeLaw::DailySummary { start_shift, .. } => {
+                i16::from(aqm_day_zero(self.run.id)?)
+                    + i16::from(self.daily_slot().context("daily blade has no day slot")?) * 24
+                    + i16::from(start_shift)
+            }
+        })
+    }
+
+    pub(crate) fn interval_end(self) -> Result<Timestamp> {
+        let law = self
+            .grib_law()
+            .context("blade key escaped its product recipe")?;
+        match law.time {
+            GribTimeLaw::DailySummary { end_shift, .. } => {
+                let slot = self.daily_slot().context("daily blade has no day slot")?;
+                let end = i16::from(aqm_day_zero(self.run.id)?)
+                    + i16::from(slot) * 24
+                    + 23
+                    + i16::from(end_shift);
+                self.run.id.timestamp_at_offset(end)
+            }
+            GribTimeLaw::Instant
+            | GribTimeLaw::AccumulationFromRun
+            | GribTimeLaw::HourlyAccumulation => self.run.id.valid_timestamp(self.lead),
+        }
     }
 
     pub(crate) const fn ingredient(self) -> Ingredient {
@@ -713,7 +1048,7 @@ impl BladeKey {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FrameKey {
-    pub run: RunId,
+    pub run: ForecastRun,
     pub valid: LeadHour,
     pub product: Product,
     baseline: Option<LeadHour>,
@@ -721,11 +1056,17 @@ pub struct FrameKey {
 
 impl FrameKey {
     pub fn forge(
-        run: RunId,
+        run: ForecastRun,
         product: Product,
         baseline: LeadHour,
         valid: LeadHour,
     ) -> Option<Self> {
+        if product.system() != run.system {
+            return None;
+        }
+        if valid > product.horizon(run).ok()? {
+            return None;
+        }
         let baseline = match product.temporal_shape() {
             TemporalShape::Cumulative if baseline < valid => Some(baseline),
             TemporalShape::Cumulative => return None,
@@ -755,6 +1096,16 @@ impl FrameKey {
             valid,
         )
     }
+
+    pub(crate) fn field_identity(self) -> Self {
+        Self {
+            valid: self
+                .product
+                .canonical_lead(self.run, self.valid)
+                .unwrap_or(self.valid),
+            ..self
+        }
+    }
 }
 
 impl fmt::Display for FrameKey {
@@ -767,7 +1118,7 @@ impl fmt::Display for FrameKey {
     }
 }
 
-/// The spherical Lambert conformal law carried by each HRRR GRIB message.
+/// The spherical Lambert conformal law carried by each forecast GRIB message.
 /// Keeping it beside the values prevents a visually plausible but displaced
 /// field if NOAA ever changes the grid definition.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1130,6 +1481,40 @@ impl FieldGrid {
             self.projection,
         )
     }
+
+    pub(crate) fn fuse3(
+        first: &Self,
+        second: &Self,
+        third: &Self,
+        mut fuse: impl FnMut(f32, f32, f32) -> f32,
+    ) -> Result<Self> {
+        if [second, third].iter().any(|field| {
+            field.width != first.width
+                || field.height != first.height
+                || field.projection != first.projection
+        }) {
+            bail!("derived field ingredients do not share one grid law");
+        }
+        if [first, second, third]
+            .iter()
+            .any(|field| field.vector.is_some())
+        {
+            bail!("derived scalar fields require scalar ingredients");
+        }
+        let values = first
+            .values
+            .iter()
+            .zip(second.values.iter())
+            .zip(third.values.iter())
+            .map(|((&a, &b), &c)| fuse(a, b, c))
+            .collect();
+        Self::forge(
+            values,
+            first.width as usize,
+            first.height as usize,
+            first.projection,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1161,7 +1546,7 @@ mod tests {
 
     #[test]
     fn cumulative_frame_identity_requires_a_nonempty_span() -> Result<()> {
-        let run = RunId::forge(1_785_272_400)?;
+        let run = ForecastRun::hrrr(RunId::forge(1_785_272_400)?);
         let base = LeadHour::forge(3)?;
         let valid = LeadHour::forge(8)?;
         let frame = FrameKey::forge(run, Product::QpfRun, base, valid).context("QPF span")?;
@@ -1252,14 +1637,49 @@ mod tests {
     fn extended_cycles_own_the_long_horizon() -> Result<()> {
         let run = RunId::hourly_at_or_before(Timestamp::from_second(1_752_926_400)?);
         assert_eq!(run.cycle()?, 12);
-        assert_eq!(run.horizon()?.get(), 48);
-        assert_eq!(run.hours_ago(1).horizon()?.get(), 18);
-        assert_eq!(run.latest_extended_at_or_before()?, run);
-        assert_eq!(run.hours_after(5).latest_extended_at_or_before()?, run);
-        assert_eq!(RunSelection::LatestLong.bind(run.hours_after(5)), run);
+        assert_eq!(ForecastSystem::Hrrr.horizon(run)?.get(), 48);
+        assert_eq!(ForecastSystem::Hrrr.horizon(run.hours_ago(1))?.get(), 18);
+        assert_eq!(ForecastSystem::Hrrr.latest_long(run)?, run);
+        assert_eq!(ForecastSystem::Hrrr.latest_long(run.hours_after(5))?, run);
         assert_eq!(
-            RunSelection::Fixed(run.hours_ago(1)).bind(run),
+            RunSelection::LatestLong.bind(ForecastSystem::Hrrr, run.hours_after(5)),
+            run
+        );
+        assert_eq!(
+            RunSelection::Fixed(run.hours_ago(1)).bind(ForecastSystem::Hrrr, run),
             run.hours_ago(1)
+        );
+
+        let aqm = ForecastRun::forge(ForecastSystem::Aqm, run);
+        assert_eq!(Product::AirQuality.horizon(aqm)?.get(), 64);
+        assert_eq!(Product::AirQuality.horizon(aqm.previous()?)?.get(), 70);
+        assert_eq!(aqm.previous()?.id, run.hours_ago(6));
+        assert_eq!(aqm.previous()?.previous()?.id, run.hours_ago(24));
+        assert_eq!(
+            FrameKey::forge(aqm, Product::AirQuality, LeadHour::ZERO, LeadHour::ZERO)
+                .context("first AQI hour")?
+                .field_identity(),
+            FrameKey::forge(
+                aqm,
+                Product::AirQuality,
+                LeadHour::ZERO,
+                LeadHour::forge(16)?,
+            )
+            .context("last hour in first AQI period")?
+            .field_identity(),
+        );
+        assert_ne!(
+            FrameKey::forge(aqm, Product::AirQuality, LeadHour::ZERO, LeadHour::ZERO)
+                .context("first AQI hour")?
+                .field_identity(),
+            FrameKey::forge(
+                aqm,
+                Product::AirQuality,
+                LeadHour::ZERO,
+                LeadHour::forge(17)?,
+            )
+            .context("first hour in second AQI period")?
+            .field_identity(),
         );
         Ok(())
     }
@@ -1293,7 +1713,9 @@ mod tests {
 
     #[test]
     fn run_extents_cannot_breach_their_cycle_horizon() -> Result<()> {
-        let run = RunId::hourly_at_or_before(Timestamp::from_second(1_752_926_400)?).hours_ago(1);
+        let run = ForecastRun::hrrr(
+            RunId::hourly_at_or_before(Timestamp::from_second(1_752_926_400)?).hours_ago(1),
+        );
         assert_eq!(
             RunExtent::forge(run, LeadHour::forge(18)?)?
                 .published()

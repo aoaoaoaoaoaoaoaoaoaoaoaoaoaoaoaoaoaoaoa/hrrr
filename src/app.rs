@@ -7,7 +7,10 @@ use crate::{
     library::EntryName,
     library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
     map::{self, FieldPaint},
-    model::{FieldGrid, FrameKey, LeadHour, MercatorPoint, Product, RunId, RunSelection, Viewport},
+    model::{
+        FieldGrid, ForecastRun, ForecastSystem, FrameKey, LeadHour, MercatorPoint, Product, RunId,
+        RunSelection, Viewport,
+    },
     spec::{Scale, ScaleAtlas, SmokeRegime, TemperatureSeason},
     state::SessionState,
     vector_map::VectorPaint,
@@ -455,13 +458,13 @@ pub struct WeatherApp {
     active_view: EntryName,
     viewport: Viewport,
     pins: Vec<MercatorPoint>,
-    run: Option<RunId>,
+    run: Option<ForecastRun>,
     worker: Worker,
     basemap: Basemap,
     custodian: Custodian,
-    latest_run: Option<RunId>,
-    run_extents: HashMap<RunId, LeadHour>,
-    surveying_run: Option<RunId>,
+    latest_runs: HashMap<ForecastSystem, RunId>,
+    run_extents: HashMap<ForecastRun, LeadHour>,
+    surveying_run: Option<ForecastRun>,
     next_survey: Instant,
     announced_discovery: bool,
     demand_id: DemandId,
@@ -524,7 +527,11 @@ impl WeatherApp {
         };
         let viewport = view.viewport;
         let pins = view.pins.clone();
-        let run = session_state.cycle.fixed();
+        let run = session_state
+            .cycle
+            .fixed()
+            .zip(session_state.overlay.active())
+            .map(|(run, product)| ForecastRun::forge(product.system(), run));
         session_state.active_view = Some(active_view.clone());
         let worker = Worker::spawn(ctx.clone(), &paths)?;
         let basemap = Basemap::spawn(ctx.clone(), &paths)?;
@@ -574,7 +581,7 @@ impl WeatherApp {
             worker,
             basemap,
             custodian,
-            latest_run: None,
+            latest_runs: HashMap::new(),
             run_extents,
             surveying_run: None,
             next_survey: Instant::now(),
@@ -841,7 +848,7 @@ impl WeatherApp {
             let _status = ui.label(chrome::muted(&self.status));
             ui.add_space(3.0);
             let _source = ui.label(chrome::muted(format!(
-                "FORECAST · NOAA HRRR\nMAP · {}",
+                "FORECAST · NOAA\nMAP · {}",
                 self.basemap_status
             )));
         });
@@ -894,8 +901,15 @@ impl WeatherApp {
         let _run = ui.label(chrome::eyebrow(format!("RUN · {run_label}")));
         ui.add_space(3.0);
 
-        let horizon = run.horizon().unwrap_or(LeadHour::ZERO);
-        let published = self.run_extents.get(&run).copied();
+        let product = self.session_state.overlay.active();
+        let horizon = product
+            .and_then(|product| product.horizon(run).ok())
+            .unwrap_or(LeadHour::ZERO);
+        let published = self
+            .run_extents
+            .get(&run)
+            .copied()
+            .map(|published| published.min(horizon));
         let gate = published.unwrap_or(LeadHour::ZERO);
         let cumulative = self
             .session_state
@@ -992,12 +1006,12 @@ impl WeatherApp {
         }
 
         ui.add_space(4.0);
-        let latest_extended = self
-            .latest_run
-            .map(|latest| RunSelection::LatestLong.bind(latest));
+        let latest_run = self.latest_runs.get(&run.system).copied();
+        let latest_extended =
+            latest_run.map(|latest| RunSelection::LatestLong.bind(run.system, latest));
         let mut run_step = None;
         let latest = ui
-            .add_enabled_ui(self.latest_run.is_some(), |ui| {
+            .add_enabled_ui(latest_run.is_some(), |ui| {
                 ui.add_sized(
                     [ui.available_width(), 24.0],
                     egui::Button::new(commands::canon().spec(Edict::FollowLatest).widget_text(ui))
@@ -1006,7 +1020,7 @@ impl WeatherApp {
                         )
                         .selected(
                             self.session_state.cycle == RunSelection::Latest
-                                && self.latest_run == Some(run),
+                                && latest_run == Some(run.id),
                         ),
                 )
             })
@@ -1028,7 +1042,7 @@ impl WeatherApp {
                     )
                     .selected(
                         self.session_state.cycle == RunSelection::LatestLong
-                            && latest_extended == Some(run),
+                            && latest_extended == Some(run.id),
                     ),
                 )
             })
@@ -1038,19 +1052,25 @@ impl WeatherApp {
         }
         let _step = ui.horizontal(|ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-            let older = ui.add_sized([width, 22.0], egui::Button::new("−1H"));
+            let older = ui.add_sized([width, 22.0], egui::Button::new("OLDER"));
             if older.clicked() {
-                run_step = Some((RunSelection::Fixed(run.hours_ago(1)), older.rect));
+                run_step = run
+                    .previous()
+                    .ok()
+                    .map(|candidate| (RunSelection::Fixed(candidate.id), older.rect));
             }
-            let newer = ui.add_enabled_ui(
-                self.latest_run.is_some_and(|latest_run| run < latest_run),
-                |ui| ui.add_sized([width, 22.0], egui::Button::new("+1H")),
-            );
+            let newer = ui.add_enabled_ui(latest_run.is_some_and(|latest| run.id < latest), |ui| {
+                ui.add_sized([width, 22.0], egui::Button::new("NEWER"))
+            });
             if newer.inner.clicked() {
-                let candidate = run.hours_after(1);
-                run_step = self
-                    .latest_run
-                    .map(|latest| (RunSelection::Fixed(candidate.min(latest)), newer.inner.rect));
+                run_step = run.next().ok().and_then(|candidate| {
+                    latest_run.map(|latest| {
+                        (
+                            RunSelection::Fixed(candidate.id.min(latest)),
+                            newer.inner.rect,
+                        )
+                    })
+                });
             }
         });
         if let Some((selection, rect)) = run_step {
@@ -1597,20 +1617,29 @@ impl WeatherApp {
             match event {
                 Event::Discovered(extent) => {
                     let latest = extent.run();
-                    let prior_latest = self.latest_run.replace(latest);
+                    let prior_latest = self.latest_runs.insert(latest.system, latest.id);
                     let _prior_extent = self.run_extents.insert(latest, extent.published());
-                    let selection = self.session_state.cycle.rectify(latest);
+                    if self
+                        .session_state
+                        .overlay
+                        .active()
+                        .is_none_or(|product| product.system() != latest.system)
+                    {
+                        continue;
+                    }
+                    let selection = self.session_state.cycle.rectify(latest.id);
                     if selection != self.session_state.cycle {
                         self.session_state.cycle = selection;
                         self.mark_dirty();
                     }
-                    let run = selection.bind(latest);
+                    let run =
+                        ForecastRun::forge(latest.system, selection.bind(latest.system, latest.id));
                     let run_changed = self.run != Some(run);
                     if run_changed {
                         self.rebase_forecast(run);
                         self.mark_dirty();
                     }
-                    if self.announced_discovery || prior_latest != Some(latest) {
+                    if self.announced_discovery || prior_latest != Some(latest.id) {
                         "latest forecast found".clone_into(&mut self.status);
                     }
                     self.announced_discovery = false;
@@ -1651,6 +1680,17 @@ impl WeatherApp {
                     self.next_survey = Instant::now() + FRONTIER_POLL;
                     self.status = message;
                 }
+                Event::DiscoveryFault { system, message } => {
+                    if self
+                        .session_state
+                        .overlay
+                        .active()
+                        .is_some_and(|product| product.system() == system)
+                    {
+                        self.announced_discovery = false;
+                        self.status = format!("live refresh failed · {message}");
+                    }
+                }
                 Event::Loaded { demand, field } => {
                     if self.loading == Some(demand) {
                         self.loading = None;
@@ -1667,20 +1707,15 @@ impl WeatherApp {
                     self.kick_prefetch();
                 }
                 Event::Fault { demand, message } => {
-                    if let Some(demand) = demand {
-                        if demand.intent == LoadIntent::Foreground(self.demand_id)
-                            && self.active_key() == Some(demand.key)
-                        {
-                            self.status = message;
-                        }
-                        if self.loading == Some(demand) {
-                            self.loading = None;
-                        }
-                        self.kick_prefetch();
-                    } else {
-                        self.announced_discovery = false;
-                        self.status = format!("live refresh failed · {message}");
+                    if demand.intent == LoadIntent::Foreground(self.demand_id)
+                        && self.active_key() == Some(demand.key)
+                    {
+                        self.status = message;
                     }
+                    if self.loading == Some(demand) {
+                        self.loading = None;
+                    }
+                    self.kick_prefetch();
                 }
             }
         }
@@ -1734,7 +1769,7 @@ impl WeatherApp {
             .then_some(self.next_survey)
     }
 
-    fn request_survey(&mut self, run: RunId) {
+    fn request_survey(&mut self, run: ForecastRun) {
         if self.surveying_run == Some(run) {
             return;
         }
@@ -1759,14 +1794,16 @@ impl WeatherApp {
     }
 
     fn edict_status(&self, edict: Edict) -> CommandStatus<'static> {
+        let system = self.session_state.overlay.active().map(Product::system);
+        let latest = system.and_then(|system| self.latest_runs.get(&system).copied());
         match edict {
-            Edict::FollowLatest if self.latest_run.is_none() => {
+            Edict::FollowLatest if latest.is_none() => {
                 CommandStatus::Disabled("available forecasts are still loading")
             }
             Edict::FollowLatestLong
-                if self
-                    .latest_run
-                    .map(|latest| RunSelection::LatestLong.bind(latest))
+                if system
+                    .zip(latest)
+                    .map(|(system, latest)| RunSelection::LatestLong.bind(system, latest))
                     .is_none() =>
             {
                 CommandStatus::Disabled("no 48-hour run is available")
@@ -2065,9 +2102,17 @@ impl WeatherApp {
     fn strike_overlay(&mut self, product: Product) {
         self.session_state.overlay = self.session_state.overlay.strike(product);
         self.mark_dirty();
-        if self.session_state.overlay.active().is_some() {
-            self.clamp_clock();
-            self.demand_active();
+        if let Some(product) = self.session_state.overlay.active() {
+            if let Some(latest) = self.latest_runs.get(&product.system()).copied() {
+                let selection = self.session_state.cycle.rectify(latest);
+                let run =
+                    ForecastRun::forge(product.system(), selection.bind(product.system(), latest));
+                self.land_run(run);
+            } else {
+                self.run = None;
+                self.demand_active();
+                self.request_discovery();
+            }
         } else {
             self.demand_id.advance();
             self.loading = None;
@@ -2078,7 +2123,7 @@ impl WeatherApp {
     }
 
     fn choose_lead(&mut self, lead: LeadHour) {
-        let Some(frontier) = self.run.and_then(|run| self.run_extents.get(&run)).copied() else {
+        let Some(frontier) = self.run.and_then(|run| self.frontier_for(run)) else {
             return;
         };
         let floor = self
@@ -2120,8 +2165,10 @@ impl WeatherApp {
             self.session_state.cycle = selection;
             self.mark_dirty();
         }
-        if let Some(latest) = self.latest_run {
-            let run = selection.rectify(latest).bind(latest);
+        if let Some(system) = self.session_state.overlay.active().map(Product::system)
+            && let Some(latest) = self.latest_runs.get(&system).copied()
+        {
+            let run = ForecastRun::forge(system, selection.rectify(latest).bind(system, latest));
             if self.run != Some(run) {
                 self.land_run(run);
             }
@@ -2129,7 +2176,7 @@ impl WeatherApp {
         self.request_discovery();
     }
 
-    fn land_run(&mut self, run: RunId) {
+    fn land_run(&mut self, run: ForecastRun) {
         if self.run == Some(run) {
             self.request_survey(run);
         } else {
@@ -2164,12 +2211,12 @@ impl WeatherApp {
         let Some(run) = self.run else {
             return;
         };
-        let Some(ceiling) = self
-            .run_extents
-            .get(&run)
-            .copied()
-            .or_else(|| run.horizon().ok())
-        else {
+        let Some(ceiling) = self.frontier_for(run).or_else(|| {
+            self.session_state
+                .overlay
+                .active()
+                .and_then(|product| product.horizon(run).ok())
+        }) else {
             return;
         };
         let (lead, base) = lawful_clock(
@@ -2185,13 +2232,14 @@ impl WeatherApp {
         }
     }
 
-    fn rebase_forecast(&mut self, run: RunId) {
-        let frontier = self
-            .run_extents
-            .get(&run)
-            .copied()
-            .or_else(|| run.horizon().ok())
-            .unwrap_or(LeadHour::ZERO);
+    fn rebase_forecast(&mut self, run: ForecastRun) {
+        let frontier = self.frontier_for(run).unwrap_or_else(|| {
+            self.session_state
+                .overlay
+                .active()
+                .and_then(|product| product.horizon(run).ok())
+                .unwrap_or(LeadHour::ZERO)
+        });
         let (lead, base) = self.run.map_or(
             (self.session_state.lead, self.session_state.base),
             |source| {
@@ -2209,9 +2257,9 @@ impl WeatherApp {
 
     fn active_key(&self) -> Option<FrameKey> {
         let run = self.run?;
-        let published = self.run_extents.get(&run)?;
         let product = self.session_state.overlay.active()?;
-        (self.session_state.lead <= *published)
+        let published = self.frontier_for(run)?;
+        (self.session_state.lead <= published)
             .then(|| {
                 FrameKey::forge(
                     run,
@@ -2221,6 +2269,16 @@ impl WeatherApp {
                 )
             })
             .flatten()
+    }
+
+    fn frontier_for(&self, run: ForecastRun) -> Option<LeadHour> {
+        let product = self.session_state.overlay.active()?;
+        (product.system() == run.system).then_some(())?;
+        let horizon = product.horizon(run).ok()?;
+        self.run_extents
+            .get(&run)
+            .copied()
+            .map(|published| published.min(horizon))
     }
 
     fn scale_for(&self, key: FrameKey) -> &Scale {
@@ -2370,11 +2428,7 @@ impl WeatherApp {
     }
 
     fn seed_prefetch(&mut self, key: FrameKey) {
-        let horizon = self
-            .run_extents
-            .get(&key.run)
-            .copied()
-            .unwrap_or(LeadHour::ZERO);
+        let horizon = self.frontier_for(key.run).unwrap_or(LeadHour::ZERO);
         for distance in 1..=2 {
             if let Ok(lead) = LeadHour::forge(key.valid.get().saturating_add(distance))
                 && lead <= horizon
@@ -2482,7 +2536,7 @@ fn lawful_clock(
 }
 
 #[cfg(feature = "egui-test")]
-fn witnessed_frontier(run: Option<RunId>) -> Option<(RunId, LeadHour)> {
+fn witnessed_frontier(run: Option<ForecastRun>) -> Option<(ForecastRun, LeadHour)> {
     let run = run?;
     let raw = std::env::var("HRRR_ACCEPTANCE_PUBLISHED").ok()?;
     let published = raw
@@ -2548,10 +2602,11 @@ impl FrameBank {
     }
 
     fn get(&self, key: FrameKey) -> Option<&Arc<FieldGrid>> {
-        self.fields.get(&key)
+        self.fields.get(&key.field_identity())
     }
 
     fn insert(&mut self, key: FrameKey, field: Arc<FieldGrid>) {
+        let key = key.field_identity();
         if self.fields.insert(key, field).is_none() {
             self.order.push_back(key);
         }
