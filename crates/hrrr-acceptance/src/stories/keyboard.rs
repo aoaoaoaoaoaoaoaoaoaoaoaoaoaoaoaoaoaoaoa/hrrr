@@ -34,7 +34,7 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
         "command guide open",
         |state: &Observation| state.guide_open,
     ))?;
-    let guide = focus.wait_anchor(&app, &hrrr_contract::Target::CommandGuide.to_string(), WAIT)?;
+    let guide = focus.wait_anchor(&app, "eternalist.command-guide.body", WAIT)?;
     let _presented_after_guide = focus.wait_fresh(&app, WAIT)?;
     let _compositor_margin = focus.wait_fresh(&app, WAIT)?;
     let guide_region = PixelRegion::anchor(&guide);
@@ -114,7 +114,7 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     let _persisted = story.wait_stable(
         Duration::from_secs(3),
         Duration::from_millis(700),
-        "close-to-tray preference persisted",
+        "close-to-tray setting persisted",
         move |frame| (frame.state.close_to_tray == toggled).then_some(()),
     )?;
     app.terminate()?;

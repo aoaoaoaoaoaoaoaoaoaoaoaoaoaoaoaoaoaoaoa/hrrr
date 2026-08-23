@@ -1,12 +1,13 @@
 use anyhow::Result;
 
 mod app;
+mod application_paths;
 mod basemap;
 mod basemap_artifact;
 mod cache;
-mod config;
+mod commands;
+mod configuration;
 mod decode;
-mod decrees;
 mod host;
 mod library;
 mod library_ui;
@@ -22,7 +23,6 @@ mod view;
 mod wind_barb;
 mod witness;
 mod worker;
-mod xdg;
 
 /// Enter HRRR through its ordinary command-line boundary.
 ///
@@ -69,10 +69,10 @@ fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Resul
         .next()
         .and_then(|argument| argument.into_string().ok())
         .unwrap_or_else(|| "status".to_owned());
-    let lair = xdg::Lair::claim()?;
+    let paths = application_paths::ApplicationPaths::claim()?;
     match operation.as_str() {
         "install" => {
-            let _instance = lair.lock_instance()?;
+            let _instance = paths.lock_instance()?;
             let day = arguments.next();
             if arguments.next().is_some() {
                 anyhow::bail!("usage: hrrr basemap install [YYYYMMDD]");
@@ -84,13 +84,13 @@ fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Resul
                         .ok_or_else(|| anyhow::anyhow!("basemap date is not valid UTF-8"))
                 })
                 .transpose()?;
-            let _installed = basemap_artifact::install(&lair, day)?;
+            let _installed = basemap_artifact::install(&paths, day)?;
             Ok(())
         }
-        "status" if arguments.next().is_none() => basemap_artifact::status(&lair),
+        "status" if arguments.next().is_none() => basemap_artifact::status(&paths),
         "remove" if arguments.next().is_none() => {
-            let _instance = lair.lock_instance()?;
-            basemap_artifact::remove(&lair)
+            let _instance = paths.lock_instance()?;
+            basemap_artifact::remove(&paths)
         }
         _ => anyhow::bail!(
             "unknown basemap operation `{operation}`; expected install, status, or remove"

@@ -417,14 +417,17 @@ mod tests {
     fn surface_verdict_requires_presentation_contract_phase_and_expected_anchor() -> Result<()> {
         let ready = json!({
             "surface_sequence": 1,
-            "anchors": [{ "name": "map.canvas", "rect": [0.0, 0.0, 1.0, 1.0] }],
+            "anchors": [{
+                "name": hrrr_contract::Target::Map.to_string(),
+                "rect": [0.0, 0.0, 1.0, 1.0]
+            }],
             "state": { "contract": hrrr_contract::UI_FINGERPRINT, "launch": "ready" },
         });
         assert!(presented_hrrr_frame(&ready, Surface::Map)?);
         assert!(!presented_hrrr_frame(
             &json!({
                 "surface_sequence": 0,
-                "anchors": [{ "name": "map.canvas" }],
+                "anchors": [{ "name": hrrr_contract::Target::Map.to_string() }],
                 "state": { "contract": hrrr_contract::UI_FINGERPRINT, "launch": "ready" },
             }),
             Surface::Map
@@ -432,7 +435,7 @@ mod tests {
 
         let frame = json!({
             "surface_sequence": 1,
-            "anchors": [{ "name": "basemap.install" }],
+            "anchors": [{ "name": hrrr_contract::Target::BasemapInstall.to_string() }],
             "state": {
                 "contract": hrrr_contract::UI_FINGERPRINT,
                 "launch": "basemap-required"
@@ -443,7 +446,7 @@ mod tests {
 
         let alien = json!({
             "surface_sequence": 1,
-            "anchors": [{ "name": "map.canvas" }],
+            "anchors": [{ "name": hrrr_contract::Target::Map.to_string() }],
             "state": { "contract": "hrrr.ui/alien" },
         });
         assert!(presented_hrrr_frame(&alien, Surface::Map).is_err());

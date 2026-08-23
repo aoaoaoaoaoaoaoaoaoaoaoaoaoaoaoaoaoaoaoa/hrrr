@@ -7,7 +7,7 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-pub struct Lair {
+pub struct ApplicationPaths {
     pub config: PathBuf,
     pub state: PathBuf,
     pub data: PathBuf,
@@ -20,7 +20,7 @@ pub struct InstanceGuard {
     _file: File,
 }
 
-impl Lair {
+impl ApplicationPaths {
     pub fn claim() -> Result<Self> {
         let Some(dirs) = ProjectDirs::from("moe", "swarm", "hrrr") else {
             bail!("could not resolve platform project directories");
@@ -38,7 +38,9 @@ impl Lair {
         })
     }
 
-    pub fn slate_path(&self) -> PathBuf {
+    pub fn session_state_path(&self) -> PathBuf {
+        // The legacy filename is durable XDG state ABI; only the Rust noun was
+        // rectified.
         self.state.join("slate.toml")
     }
 

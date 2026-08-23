@@ -1,19 +1,19 @@
 use crate::{
+    application_paths::{ApplicationPaths, InstanceGuard},
     basemap::{self, Basemap, TileKey, VectorTile},
     cache::Custodian,
-    config::Config,
-    decrees::{self, Decree},
+    commands::{self, Edict},
+    configuration::Configuration,
     library::EntryName,
     library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
     map::{self, FieldPaint},
     model::{FieldGrid, FrameKey, LeadHour, MercatorPoint, Product, RunId, RunSelection, Viewport},
     spec::{Scale, ScaleAtlas, SmokeRegime, TemperatureSeason},
-    state::Slate,
+    state::SessionState,
     vector_map::VectorPaint,
     view::{SavedView, ViewLibrary, ViewSlot},
     wind_barb,
     worker::{Command, DemandId, Event, LoadDemand, LoadIntent, Worker},
-    xdg::{InstanceGuard, Lair},
 };
 use anyhow::Result;
 use brass_poolrooms::{
@@ -24,10 +24,7 @@ use egui::Color32;
 use eternalist_apps::{
     ApplicationHeader, ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideSection},
-    commands::{
-        CommandDispatch, CommandStatus, SETTINGS_SHORTCUTS, Shortcut, ShortcutKey,
-        ShortcutModifiers,
-    },
+    commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     configuration::ConfigurationLedger,
     panel_navigation::PanelNavigator,
     responsiveness::DrainBudget,
@@ -132,17 +129,10 @@ const VIEW_GESTURES: [GuideGesture; 2] = [
         &ASSIGN_VIEW_SLOT_KEYS,
     ),
 ];
-const APPLICATION_GESTURES: [GuideGesture; 1] = [GuideGesture::new(
-    "Open settings",
-    "Open the central application configuration.",
-    &SETTINGS_SHORTCUTS,
-)];
-const FORECAST_CONTROL_IDIOMS: GuideSection =
+const FORECAST_CONTROL_GUIDE_GROUP: GuideSection =
     GuideSection::new("FORECAST CONTROLS", &FORECAST_CONTROL_GESTURES);
-const VIEW_IDIOMS: GuideSection = GuideSection::new("VIEW SHORTCUTS", &VIEW_GESTURES);
-const APPLICATION_IDIOMS: GuideSection = GuideSection::new("APPLICATION", &APPLICATION_GESTURES);
-const GUIDE_SECTIONS: [GuideSection; 3] =
-    [FORECAST_CONTROL_IDIOMS, VIEW_IDIOMS, APPLICATION_IDIOMS];
+const VIEW_GUIDE_GROUP: GuideSection = GuideSection::new("VIEW SHORTCUTS", &VIEW_GESTURES);
+const GUIDE_GROUPS: [GuideSection; 2] = [FORECAST_CONTROL_GUIDE_GROUP, VIEW_GUIDE_GROUP];
 
 #[derive(Clone, Copy)]
 enum TileRejection {
@@ -420,31 +410,31 @@ impl SmokeSurvey {
 
 #[derive(Clone, Copy, Default)]
 struct DirtyState {
-    slate: bool,
+    session_state: bool,
     views: bool,
 }
 
 impl DirtyState {
     const fn any(self) -> bool {
-        self.slate || self.views
+        self.session_state || self.views
     }
 }
 
 struct DurableState {
-    slate: Option<Slate>,
+    session_state: Option<SessionState>,
     views: Option<ViewLibrary>,
 }
 
 impl DurableState {
-    fn save(self, lair: &Lair) -> Result<()> {
+    fn save(self, paths: &ApplicationPaths) -> Result<()> {
         let mut faults = Vec::new();
-        if let Some(slate) = self.slate
-            && let Err(error) = slate.save(&lair.slate_path())
+        if let Some(session_state) = self.session_state
+            && let Err(error) = session_state.save(&paths.session_state_path())
         {
             faults.push(format!("session state: {error:#}"));
         }
         if let Some(views) = self.views
-            && let Err(error) = views.save(&lair.views_path())
+            && let Err(error) = views.save(&paths.views_path())
         {
             faults.push(format!("saved views: {error:#}"));
         }
@@ -458,10 +448,10 @@ impl DurableState {
 
 pub struct WeatherApp {
     _instance: InstanceGuard,
-    configuration: ConfigurationLedger<Config>,
+    configuration: ConfigurationLedger<Configuration>,
     settings: SettingsSheet,
     views: ViewLibrary,
-    slate: Slate,
+    session_state: SessionState,
     active_view: EntryName,
     viewport: Viewport,
     pins: Vec<MercatorPoint>,
@@ -504,23 +494,27 @@ pub struct WeatherApp {
 }
 
 impl WeatherApp {
-    pub fn open_at(ctx: &egui::Context, lair: Lair, instance: InstanceGuard) -> Result<Self> {
-        let legacy_views = Config::migrate_legacy_views(&lair.config_path())?;
+    pub fn open_at(
+        ctx: &egui::Context,
+        paths: ApplicationPaths,
+        instance: InstanceGuard,
+    ) -> Result<Self> {
+        let legacy_views = Configuration::migrate_legacy_views(&paths.config_path())?;
         let configuration = ConfigurationLedger::raise(
             "hrrr-configuration-scribe",
             ctx,
-            lair.config_path(),
+            paths.config_path(),
             STATE_SETTLE,
         )?;
         let mut settings = SettingsSheet::default();
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
         }
-        let (mut views, migrated_views) = ViewLibrary::load(&lair.views_path(), legacy_views)?;
-        let (mut slate, migrated_slate) = Slate::load(&lair.slate_path())?;
-        views.restore_folds(&slate.closed_folders);
+        let (mut views, migrated_views) = ViewLibrary::load(&paths.views_path(), legacy_views)?;
+        let (mut session_state, migrated_slate) = SessionState::load(&paths.session_state_path())?;
+        views.restore_folds(&session_state.closed_folders);
         let active_view = views
-            .active(slate.active_view.clone())
+            .active(session_state.active_view.clone())
             .or_else(|| views.all().next().map(|view| view.name.clone()));
         let Some(active_view) = active_view else {
             anyhow::bail!("view library admitted no active document");
@@ -530,11 +524,11 @@ impl WeatherApp {
         };
         let viewport = view.viewport;
         let pins = view.pins.clone();
-        let run = slate.cycle.fixed();
-        slate.active_view = Some(active_view.clone());
-        let worker = Worker::spawn(ctx.clone(), &lair)?;
-        let basemap = Basemap::spawn(ctx.clone(), &lair)?;
-        let custodian = Custodian::spawn(ctx.clone(), lair.cache_manager())?;
+        let run = session_state.cycle.fixed();
+        session_state.active_view = Some(active_view.clone());
+        let worker = Worker::spawn(ctx.clone(), &paths)?;
+        let basemap = Basemap::spawn(ctx.clone(), &paths)?;
+        let custodian = Custodian::spawn(ctx.clone(), paths.cache_manager())?;
         #[cfg(feature = "egui-test")]
         let run_extents = witnessed_frontier(run).into_iter().collect();
         #[cfg(not(feature = "egui-test"))]
@@ -553,7 +547,7 @@ impl WeatherApp {
             agitation.scroll_coupling = 0.006;
             agitation.pond_impulse = 0.4;
         }
-        let scribe_lair = lair.clone();
+        let scribe_lair = paths.clone();
         let mut scribe = SettledScribe::spawn(
             "hrrr-state-scribe",
             ctx,
@@ -561,7 +555,7 @@ impl WeatherApp {
             move |state: DurableState| state.save(&scribe_lair),
         )?;
         let dirty = DirtyState {
-            slate: migrated_slate,
+            session_state: migrated_slate,
             views: migrated_views,
         };
         if dirty.any() {
@@ -572,7 +566,7 @@ impl WeatherApp {
             configuration,
             settings,
             views,
-            slate,
+            session_state,
             active_view,
             viewport,
             pins,
@@ -632,19 +626,19 @@ impl WeatherApp {
         if !settings_invoked
             && !guide_invoked
             && let Some(dispatch) =
-                decrees::canon().route(ui.ctx(), &[], |decree| self.decree_status(decree))
+                commands::canon().route(ui.ctx(), &[], |edict| self.edict_status(edict))
         {
-            self.apply_decree(dispatch);
+            self.apply_edict(dispatch);
         }
         self.take_keys(ui.ctx());
         let mut panels = std::mem::take(&mut self.panels);
         let inspector = eternalist_apps::Inspector::new("forecast-inspector")
             .scroll_id("forecast-inspector-scroll")
-            .scroll_offset(self.slate.inspector_scroll)
+            .scroll_offset(self.session_state.inspector_scroll)
             .show(ui, |ui| self.inspector(ui, &mut panels));
         self.panels = panels;
-        if inspector.scroll_offset != self.slate.inspector_scroll {
-            self.slate.inspector_scroll = inspector.scroll_offset;
+        if inspector.scroll_offset != self.session_state.inspector_scroll {
+            self.session_state.inspector_scroll = inspector.scroll_offset;
             self.mark_dirty();
         }
         inspector.agitate(&mut self.water);
@@ -652,15 +646,12 @@ impl WeatherApp {
         let mut guide = std::mem::take(&mut self.guide);
         guide.show(
             ui.ctx(),
-            decrees::canon(),
+            commands::canon(),
             &[],
             |()| "FORECAST",
-            |decree| self.decree_status(decree),
-            &GUIDE_SECTIONS,
+            |edict| self.edict_status(edict),
+            &GUIDE_GROUPS,
         );
-        if let Some(rect) = guide.rect() {
-            crate::witness::rect(ui.ctx(), hrrr_contract::Target::CommandGuide, rect);
-        }
         self.guide = guide;
         self.show_settings(ui.ctx());
     }
@@ -755,7 +746,7 @@ impl WeatherApp {
             .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
         let mut changed = false;
         let response = self.settings.show(ctx, &mut self.water, file, |settings| {
-            settings.section("APPLICATION");
+            settings.section("WINDOW");
             changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
         });
         if changed {
@@ -780,10 +771,9 @@ impl WeatherApp {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
-        let header = ApplicationHeader::new("HRRR")
+        let _header = ApplicationHeader::new("HRRR")
             .settings_attention(self.configuration.fault().is_some())
             .show(ui, &mut self.guide, &mut self.settings, &mut self.water);
-        crate::witness::response(ui, hrrr_contract::Target::Help, &header.help);
         ui.add_space(5.0);
         let mut panels = navigator.frame(ui.ctx());
         let mut chosen_product = None;
@@ -796,7 +786,7 @@ impl WeatherApp {
                         let response = ui.add_sized(
                             [width, 26.0],
                             egui::Button::new(product.label())
-                                .selected(self.slate.overlay.active() == Some(product)),
+                                .selected(self.session_state.overlay.active() == Some(product)),
                         );
                         crate::witness::anchor(
                             ui,
@@ -899,7 +889,7 @@ impl WeatherApp {
             .local_label()
             .unwrap_or_else(|_| "invalid cycle time".to_owned());
         let valid_label = run
-            .valid_local_label(self.slate.lead)
+            .valid_local_label(self.session_state.lead)
             .unwrap_or_else(|_| "invalid valid time".to_owned());
         let _run = ui.label(chrome::eyebrow(format!("RUN · {run_label}")));
         ui.add_space(3.0);
@@ -908,12 +898,12 @@ impl WeatherApp {
         let published = self.run_extents.get(&run).copied();
         let gate = published.unwrap_or(LeadHour::ZERO);
         let cumulative = self
-            .slate
+            .session_state
             .overlay
             .active()
             .is_some_and(Product::has_baseline);
         let lead_floor = if cumulative {
-            self.slate.base.next()
+            self.session_state.base.next()
         } else {
             Some(LeadHour::ZERO)
         };
@@ -921,18 +911,21 @@ impl WeatherApp {
         let mut step = None;
         let _row = ui.horizontal(|ui| {
             let previous = ui.add_enabled(
-                lead_floor.is_some_and(|floor| lead_ready && self.slate.lead > floor),
+                lead_floor.is_some_and(|floor| lead_ready && self.session_state.lead > floor),
                 egui::Button::new("◀"),
             );
             chrome::tension(ui, &previous);
             if previous.clicked() {
-                step = Some((self.slate.lead.saturating_previous(), previous.rect));
+                step = Some((self.session_state.lead.saturating_previous(), previous.rect));
             }
             let _lead = ui.label(chrome::section_title(&valid_label));
-            let next = ui.add_enabled(lead_ready && self.slate.lead < gate, egui::Button::new("▶"));
+            let next = ui.add_enabled(
+                lead_ready && self.session_state.lead < gate,
+                egui::Button::new("▶"),
+            );
             chrome::tension(ui, &next);
             if next.clicked() {
-                step = Some((self.slate.lead.saturating_next(gate), next.rect));
+                step = Some((self.session_state.lead.saturating_next(gate), next.rect));
             }
         });
         if let Some((lead, rect)) = step {
@@ -944,7 +937,7 @@ impl WeatherApp {
         let allowed_floor = lead_floor
             .filter(|_| lead_ready)
             .map_or(0, |floor| u16::from(floor.get()));
-        let mut raw_lead = u16::from(self.slate.lead.get());
+        let mut raw_lead = u16::from(self.session_state.lead.get());
         let rail = ui
             .add_enabled_ui(lead_ready, |ui| {
                 chrome::Rail::new(&mut raw_lead, 0..=rail_ceiling)
@@ -971,14 +964,14 @@ impl WeatherApp {
         if cumulative {
             ui.add_space(4.0);
             let base_label = run
-                .valid_local_label(self.slate.base)
+                .valid_local_label(self.session_state.base)
                 .unwrap_or_else(|_| "invalid base time".to_owned());
             let _base = ui.horizontal(|ui| {
                 let _label = ui.label(chrome::muted("BASE HOUR"));
                 let _value = ui.label(chrome::section_title(base_label));
             });
-            let base_ceiling = self.slate.lead.saturating_previous();
-            let mut raw_base = u16::from(self.slate.base.get());
+            let base_ceiling = self.session_state.lead.saturating_previous();
+            let mut raw_base = u16::from(self.session_state.base.get());
             let base_rail = ui
                 .add_enabled_ui(lead_ready, |ui| {
                     chrome::Rail::new(&mut raw_base, 0..=rail_ceiling)
@@ -1007,12 +1000,12 @@ impl WeatherApp {
             .add_enabled_ui(self.latest_run.is_some(), |ui| {
                 ui.add_sized(
                     [ui.available_width(), 24.0],
-                    egui::Button::new(decrees::canon().spec(Decree::FollowLatest).widget_text(ui))
+                    egui::Button::new(commands::canon().spec(Edict::FollowLatest).widget_text(ui))
                         .shortcut_text(
-                            decrees::canon().shortcuts(Decree::FollowLatest)[0].label(ui.ctx()),
+                            commands::canon().shortcuts(Edict::FollowLatest)[0].label(ui.ctx()),
                         )
                         .selected(
-                            self.slate.cycle == RunSelection::Latest
+                            self.session_state.cycle == RunSelection::Latest
                                 && self.latest_run == Some(run),
                         ),
                 )
@@ -1026,15 +1019,15 @@ impl WeatherApp {
                 ui.add_sized(
                     [ui.available_width(), 24.0],
                     egui::Button::new(
-                        decrees::canon()
-                            .spec(Decree::FollowLatestLong)
+                        commands::canon()
+                            .spec(Edict::FollowLatestLong)
                             .widget_text(ui),
                     )
                     .shortcut_text(
-                        decrees::canon().shortcuts(Decree::FollowLatestLong)[0].label(ui.ctx()),
+                        commands::canon().shortcuts(Edict::FollowLatestLong)[0].label(ui.ctx()),
                     )
                     .selected(
-                        self.slate.cycle == RunSelection::LatestLong
+                        self.session_state.cycle == RunSelection::LatestLong
                             && latest_extended == Some(run),
                     ),
                 )
@@ -1411,17 +1404,17 @@ impl WeatherApp {
             contract: hrrr_contract::UI_FINGERPRINT,
             launch: "ready",
             active_field: self
-                .slate
+                .session_state
                 .overlay
                 .active()
                 .map(|product| product.cache_name().to_owned()),
-            lead_hour: self.slate.lead.get(),
+            lead_hour: self.session_state.lead.get(),
             base_hour: self
-                .slate
+                .session_state
                 .overlay
                 .active()
                 .filter(|product| product.has_baseline())
-                .map(|_| self.slate.base.get()),
+                .map(|_| self.session_state.base.get()),
             active_view: self.active_view.as_str().to_owned(),
             pins: self.pins.iter().map(|pin| pin.world()).collect(),
             transient_probe: self.transient_probe.map(MercatorPoint::world),
@@ -1467,7 +1460,7 @@ impl WeatherApp {
                     .show(ui, |ui| {
                         let valid = key
                             .map(|key| (key.run, key.valid))
-                            .or_else(|| self.run.map(|run| (run, self.slate.lead)))
+                            .or_else(|| self.run.map(|run| (run, self.session_state.lead)))
                             .map_or_else(
                                 || "NO FORECAST".to_owned(),
                                 |(run, lead)| {
@@ -1484,7 +1477,7 @@ impl WeatherApp {
                         if let (Some(key), Some(raw)) = (key, sample) {
                             let scale = self.scale_for(key);
                             let _value = ui.label(chrome::section_title(scale.display(raw)));
-                        } else if self.slate.overlay.active().is_some() {
+                        } else if self.session_state.overlay.active().is_some() {
                             let _pending = ui.label(chrome::muted(if field.is_some() {
                                 "OUTSIDE FORECAST AREA"
                             } else {
@@ -1606,9 +1599,9 @@ impl WeatherApp {
                     let latest = extent.run();
                     let prior_latest = self.latest_run.replace(latest);
                     let _prior_extent = self.run_extents.insert(latest, extent.published());
-                    let selection = self.slate.cycle.rectify(latest);
-                    if selection != self.slate.cycle {
-                        self.slate.cycle = selection;
+                    let selection = self.session_state.cycle.rectify(latest);
+                    if selection != self.session_state.cycle {
+                        self.session_state.cycle = selection;
                         self.mark_dirty();
                     }
                     let run = selection.bind(latest);
@@ -1638,7 +1631,7 @@ impl WeatherApp {
                     if self.run == Some(run) {
                         self.clamp_clock();
                         let active = self.active_key();
-                        if self.slate.overlay.active().is_some()
+                        if self.session_state.overlay.active().is_some()
                             && (active.is_none()
                                 || self
                                     .displayed_field
@@ -1765,12 +1758,12 @@ impl WeatherApp {
         }
     }
 
-    fn decree_status(&self, decree: Decree) -> CommandStatus<'static> {
-        match decree {
-            Decree::FollowLatest if self.latest_run.is_none() => {
+    fn edict_status(&self, edict: Edict) -> CommandStatus<'static> {
+        match edict {
+            Edict::FollowLatest if self.latest_run.is_none() => {
                 CommandStatus::Disabled("available forecasts are still loading")
             }
-            Decree::FollowLatestLong
+            Edict::FollowLatestLong
                 if self
                     .latest_run
                     .map(|latest| RunSelection::LatestLong.bind(latest))
@@ -1778,27 +1771,27 @@ impl WeatherApp {
             {
                 CommandStatus::Disabled("no 48-hour run is available")
             }
-            Decree::UndoMapChange if !self.map_undo.has_reversal_for(&self.active_view) => {
+            Edict::UndoMapChange if !self.map_undo.has_reversal_for(&self.active_view) => {
                 CommandStatus::Disabled("the active view has no map change to undo")
             }
-            Decree::FollowLatest | Decree::FollowLatestLong | Decree::UndoMapChange => {
+            Edict::FollowLatest | Edict::FollowLatestLong | Edict::UndoMapChange => {
                 CommandStatus::Enabled
             }
         }
     }
 
-    fn apply_decree(&mut self, dispatch: CommandDispatch<'_, Decree>) {
-        let decree = match dispatch {
-            CommandDispatch::Invoke(decree) => decree,
+    fn apply_edict(&mut self, dispatch: CommandDispatch<'_, Edict>) {
+        let edict = match dispatch {
+            CommandDispatch::Invoke(edict) => edict,
             CommandDispatch::Refused { reason, .. } => {
                 self.status = format!("unavailable: {reason}");
                 return;
             }
         };
-        match decree {
-            Decree::FollowLatest => self.follow_cycle(RunSelection::Latest),
-            Decree::FollowLatestLong => self.follow_cycle(RunSelection::LatestLong),
-            Decree::UndoMapChange => self.undo_map_object(),
+        match edict {
+            Edict::FollowLatest => self.follow_cycle(RunSelection::Latest),
+            Edict::FollowLatestLong => self.follow_cycle(RunSelection::LatestLong),
+            Edict::UndoMapChange => self.undo_map_object(),
         }
     }
 
@@ -1852,13 +1845,13 @@ impl WeatherApp {
                 }
                 ViewAction::ToggleShelf(shelf) => {
                     self.views.toggle_shelf(shelf);
-                    self.slate.closed_folders = self.views.closed_shelves();
+                    self.session_state.closed_folders = self.views.closed_shelves();
                     self.mark_dirty();
                 }
                 ViewAction::ScuttleShelf(shelf) => {
                     self.views.scuttle_shelf(shelf);
                     self.shelf_edit = None;
-                    self.slate.closed_folders = self.views.closed_shelves();
+                    self.session_state.closed_folders = self.views.closed_shelves();
                     self.mark_dirty();
                     self.mark_views_dirty();
                 }
@@ -1878,7 +1871,7 @@ impl WeatherApp {
                 ViewAction::CommitShelfRename => {
                     if let Some(edit) = self.shelf_edit.take() {
                         if self.views.rename_shelf(edit.shelf, &edit.name) {
-                            self.slate.closed_folders = self.views.closed_shelves();
+                            self.session_state.closed_folders = self.views.closed_shelves();
                             self.mark_dirty();
                             self.mark_views_dirty();
                         } else {
@@ -1900,7 +1893,7 @@ impl WeatherApp {
                 self.pins.clone(),
             ));
         }
-        self.slate.active_view = Some(self.active_view.clone());
+        self.session_state.active_view = Some(self.active_view.clone());
         self.mark_dirty();
         self.mark_views_dirty();
     }
@@ -1942,7 +1935,7 @@ impl WeatherApp {
         let view = SavedView::forge(name.clone(), self.viewport, self.pins.clone());
         self.views.adopt_beside(&source, view);
         self.active_view = name.clone();
-        self.slate.active_view = Some(name.clone());
+        self.session_state.active_view = Some(name.clone());
         self.view_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         self.status = format!("new view `{name}`");
@@ -1952,7 +1945,7 @@ impl WeatherApp {
 
     fn load_view(&mut self, view: SavedView) {
         self.active_view.clone_from(&view.name);
-        self.slate.active_view = Some(view.name.clone());
+        self.session_state.active_view = Some(view.name.clone());
         self.viewport = view.viewport;
         self.pins = view.pins;
         self.pin_tug = None;
@@ -2061,7 +2054,7 @@ impl WeatherApp {
         self.map_undo.rename_view(old, &new);
         if old == &self.active_view {
             self.active_view = new.clone();
-            self.slate.active_view = Some(new.clone());
+            self.session_state.active_view = Some(new.clone());
         }
         self.status = format!("renamed view `{old}` → `{new}`");
         self.mark_dirty();
@@ -2070,9 +2063,9 @@ impl WeatherApp {
     }
 
     fn strike_overlay(&mut self, product: Product) {
-        self.slate.overlay = self.slate.overlay.strike(product);
+        self.session_state.overlay = self.session_state.overlay.strike(product);
         self.mark_dirty();
-        if self.slate.overlay.active().is_some() {
+        if self.session_state.overlay.active().is_some() {
             self.clamp_clock();
             self.demand_active();
         } else {
@@ -2089,17 +2082,17 @@ impl WeatherApp {
             return;
         };
         let floor = self
-            .slate
+            .session_state
             .overlay
             .active()
             .filter(|product| product.has_baseline())
-            .map_or(Some(LeadHour::ZERO), |_| self.slate.base.next());
+            .map_or(Some(LeadHour::ZERO), |_| self.session_state.base.next());
         let Some(floor) = floor.filter(|floor| *floor <= frontier) else {
             return;
         };
         let lead = lead.clamp(floor, frontier);
-        if self.slate.lead != lead {
-            self.slate.lead = lead;
+        if self.session_state.lead != lead {
+            self.session_state.lead = lead;
             self.mark_dirty();
             self.demand_active();
         }
@@ -2107,24 +2100,24 @@ impl WeatherApp {
 
     fn choose_base(&mut self, base: LeadHour) {
         let cumulative = self
-            .slate
+            .session_state
             .overlay
             .active()
             .is_some_and(Product::has_baseline);
-        if !cumulative || self.slate.lead == LeadHour::ZERO {
+        if !cumulative || self.session_state.lead == LeadHour::ZERO {
             return;
         }
-        let base = base.min(self.slate.lead.saturating_previous());
-        if self.slate.base != base {
-            self.slate.base = base;
+        let base = base.min(self.session_state.lead.saturating_previous());
+        if self.session_state.base != base {
+            self.session_state.base = base;
             self.mark_dirty();
             self.demand_active();
         }
     }
 
     fn follow_cycle(&mut self, selection: RunSelection) {
-        if self.slate.cycle != selection {
-            self.slate.cycle = selection;
+        if self.session_state.cycle != selection {
+            self.session_state.cycle = selection;
             self.mark_dirty();
         }
         if let Some(latest) = self.latest_run {
@@ -2156,7 +2149,7 @@ impl WeatherApp {
     fn reconcile_forecast(&mut self) {
         self.clamp_clock();
         let active = self.active_key();
-        if self.slate.overlay.active().is_some()
+        if self.session_state.overlay.active().is_some()
             && (active.is_none()
                 || self
                     .displayed_field
@@ -2180,14 +2173,14 @@ impl WeatherApp {
             return;
         };
         let (lead, base) = lawful_clock(
-            self.slate.overlay.active(),
-            self.slate.lead,
-            self.slate.base,
+            self.session_state.overlay.active(),
+            self.session_state.lead,
+            self.session_state.base,
             ceiling,
         );
-        if (lead, base) != (self.slate.lead, self.slate.base) {
-            self.slate.lead = lead;
-            self.slate.base = base;
+        if (lead, base) != (self.session_state.lead, self.session_state.base) {
+            self.session_state.lead = lead;
+            self.session_state.base = base;
             self.mark_dirty();
         }
     }
@@ -2199,26 +2192,34 @@ impl WeatherApp {
             .copied()
             .or_else(|| run.horizon().ok())
             .unwrap_or(LeadHour::ZERO);
-        let (lead, base) = self
-            .run
-            .map_or((self.slate.lead, self.slate.base), |source| {
+        let (lead, base) = self.run.map_or(
+            (self.session_state.lead, self.session_state.base),
+            |source| {
                 (
-                    run.rebase_lead(source, self.slate.lead, frontier),
-                    run.rebase_lead(source, self.slate.base, frontier),
+                    run.rebase_lead(source, self.session_state.lead, frontier),
+                    run.rebase_lead(source, self.session_state.base, frontier),
                 )
-            });
-        let (lead, base) = lawful_clock(self.slate.overlay.active(), lead, base, frontier);
+            },
+        );
+        let (lead, base) = lawful_clock(self.session_state.overlay.active(), lead, base, frontier);
         self.run = Some(run);
-        self.slate.lead = lead;
-        self.slate.base = base;
+        self.session_state.lead = lead;
+        self.session_state.base = base;
     }
 
     fn active_key(&self) -> Option<FrameKey> {
         let run = self.run?;
         let published = self.run_extents.get(&run)?;
-        let product = self.slate.overlay.active()?;
-        (self.slate.lead <= *published)
-            .then(|| FrameKey::forge(run, product, self.slate.base, self.slate.lead))
+        let product = self.session_state.overlay.active()?;
+        (self.session_state.lead <= *published)
+            .then(|| {
+                FrameKey::forge(
+                    run,
+                    product,
+                    self.session_state.base,
+                    self.session_state.lead,
+                )
+            })
             .flatten()
     }
 
@@ -2410,7 +2411,7 @@ impl WeatherApp {
     }
 
     fn mark_dirty(&mut self) {
-        self.dirty.slate = true;
+        self.dirty.session_state = true;
         self.scribe.mark();
     }
 
@@ -2421,14 +2422,14 @@ impl WeatherApp {
 
     fn durable_state(&self) -> DurableState {
         DurableState {
-            slate: self.dirty.slate.then(|| self.slate.clone()),
+            session_state: self.dirty.session_state.then(|| self.session_state.clone()),
             views: self.dirty.views.then(|| self.views.clone()),
         }
     }
 
     fn durable_state_all(&self) -> DurableState {
         DurableState {
-            slate: Some(self.slate.clone()),
+            session_state: Some(self.session_state.clone()),
             views: Some(self.views.clone()),
         }
     }
@@ -2436,7 +2437,7 @@ impl WeatherApp {
     fn absorb_persistence(&mut self) {
         if let Some(ScribeOutcome::Fault { message, .. }) = self.scribe.take_outcome() {
             self.dirty = DirtyState {
-                slate: true,
+                session_state: true,
                 views: true,
             };
             self.status = format!("state save failed: {message}");

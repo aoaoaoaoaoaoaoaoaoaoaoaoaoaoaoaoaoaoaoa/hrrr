@@ -1,4 +1,4 @@
-use crate::{persist::save_toml, xdg::Lair};
+use crate::{application_paths::ApplicationPaths, persist::save_toml};
 use anyhow::{Context as _, Result, bail};
 #[cfg(target_os = "linux")]
 use flate2::read::GzDecoder;
@@ -173,32 +173,32 @@ fn legacy_tool_version() -> String {
     "legacy installer".to_owned()
 }
 
-pub fn install(lair: &Lair, day: Option<&str>) -> Result<PathBuf> {
+pub fn install(paths: &ApplicationPaths, day: Option<&str>) -> Result<PathBuf> {
     let cancel = AtomicBool::new(false);
-    install_attended(lair, day, &cancel, |_| {})
+    install_attended(paths, day, &cancel, |_| {})
 }
 
 pub fn install_attended(
-    lair: &Lair,
+    paths: &ApplicationPaths,
     day: Option<&str>,
     cancel: &AtomicBool,
     report: impl Fn(InstallProgress),
 ) -> Result<PathBuf> {
-    if Lair::basemap_is_external() {
+    if ApplicationPaths::basemap_is_external() {
         bail!(
             "HRRR_BASEMAP_ARCHIVE names an externally managed archive; unset it before installing"
         );
     }
     let day = day.map_or_else(|| Ok(today_utc()), validate_day)?;
     let asset = tool_asset().context("go-pmtiles has no binary for this target")?;
-    let destination = lair.basemap_path()?;
+    let destination = paths.basemap_path()?;
     let directory = destination
         .parent()
         .context("basemap destination has no parent")?;
     std::fs::create_dir_all(directory)
         .with_context(|| format!("create {}", directory.display()))?;
     reap_partials(directory)?;
-    let arena = Arena::forge(&lair.cache_root())?;
+    let arena = Arena::forge(&paths.cache_root())?;
     let package = arena.path.join(asset.name);
     let tool = arena.path.join(asset.executable);
     let url = format!("{TOOL_ORIGIN}/v{TOOL_VERSION}/{}", asset.name);
@@ -271,11 +271,11 @@ pub fn was_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Cancelled>().is_some()
 }
 
-pub fn detail_source(lair: &Lair) -> Result<Option<DetailSource>> {
-    if Lair::basemap_is_external() {
+pub fn detail_source(paths: &ApplicationPaths) -> Result<Option<DetailSource>> {
+    if ApplicationPaths::basemap_is_external() {
         return Ok(None);
     }
-    let archive = lair.basemap_path()?;
+    let archive = paths.basemap_path()?;
     let directory = archive.parent().context("basemap archive has no parent")?;
     let receipt = match std::fs::read_to_string(receipt_path(directory)) {
         Ok(receipt) => receipt,
@@ -286,15 +286,15 @@ pub fn detail_source(lair: &Lair) -> Result<Option<DetailSource>> {
     receipt.detail_source()
 }
 
-pub fn status(lair: &Lair) -> Result<()> {
-    let archive = lair.basemap_path()?;
+pub fn status(paths: &ApplicationPaths) -> Result<()> {
+    let archive = paths.basemap_path()?;
     let metadata = std::fs::metadata(&archive).with_context(|| {
         format!(
             "no basemap archive at {}; run `hrrr basemap install`",
             archive.display()
         )
     })?;
-    if Lair::basemap_is_external() {
+    if ApplicationPaths::basemap_is_external() {
         println!(
             "{}\n{} bytes · externally managed",
             archive.display(),
@@ -318,11 +318,11 @@ pub fn status(lair: &Lair) -> Result<()> {
     Ok(())
 }
 
-pub fn remove(lair: &Lair) -> Result<()> {
-    if Lair::basemap_is_external() {
+pub fn remove(paths: &ApplicationPaths) -> Result<()> {
+    if ApplicationPaths::basemap_is_external() {
         bail!("HRRR_BASEMAP_ARCHIVE names an externally managed archive; HRRR will not remove it");
     }
-    let archive = lair.basemap_path()?;
+    let archive = paths.basemap_path()?;
     let directory = archive.parent().context("basemap archive has no parent")?;
     let installed = archive.is_file();
     for path in [
@@ -336,7 +336,7 @@ pub fn remove(lair: &Lair) -> Result<()> {
             Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
         }
     }
-    lair.basemap_cache().clear()?;
+    paths.basemap_cache().clear()?;
     match std::fs::remove_dir(directory) {
         Ok(()) => {}
         Err(error)

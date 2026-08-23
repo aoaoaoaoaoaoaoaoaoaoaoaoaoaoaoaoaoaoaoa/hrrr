@@ -1,11 +1,11 @@
 use crate::{
     app::WeatherApp,
+    application_paths::{ApplicationPaths, InstanceGuard},
     basemap_artifact::{self, InstallPhase, InstallProgress},
     map::MapGpu,
     tray::{Signal as TraySignal, Tray},
     vector_map::VectorMapGpu,
     witness,
-    xdg::{InstanceGuard, Lair},
 };
 use anyhow::{Context as _, Result};
 use brass_poolrooms::{
@@ -92,8 +92,8 @@ impl NativeApp for ForecastViewer {
     const WINDOW: WindowSpec = WindowSpec::new(TITLE, [1_440.0, 920.0]);
 
     fn crash_reports() -> Option<CrashReportSpec> {
-        Lair::claim().ok().map(|lair| {
-            CrashReportSpec::new(CrashProduct::Hrrr, env!("CARGO_PKG_VERSION"), lair.state)
+        ApplicationPaths::claim().ok().map(|paths| {
+            CrashReportSpec::new(CrashProduct::Hrrr, env!("CARGO_PKG_VERSION"), paths.state)
         })
     }
 
@@ -187,23 +187,23 @@ impl NativeApp for ForecastViewer {
 }
 
 struct Seed {
-    lair: Lair,
+    paths: ApplicationPaths,
     instance: InstanceGuard,
 }
 
 impl Seed {
     fn claim() -> Result<Self> {
-        let lair = Lair::claim()?;
-        let instance = lair.lock_instance()?;
-        Ok(Self { lair, instance })
+        let paths = ApplicationPaths::claim()?;
+        let instance = paths.lock_instance()?;
+        Ok(Self { paths, instance })
     }
 
     fn archive(&self) -> Result<PathBuf> {
-        self.lair.basemap_path()
+        self.paths.basemap_path()
     }
 
     fn open(self, ctx: &egui::Context) -> Result<WeatherApp> {
-        WeatherApp::open_at(ctx, self.lair, self.instance)
+        WeatherApp::open_at(ctx, self.paths, self.instance)
     }
 }
 
@@ -222,7 +222,7 @@ impl Body {
         if archive.is_file() {
             return Ok(Self::Ready(Box::new(seed.open(ctx)?)));
         }
-        if Lair::basemap_is_external() {
+        if ApplicationPaths::basemap_is_external() {
             return Ok(Self::Fault(Fault {
                 seed: Some(seed),
                 title: "CONFIGURED BASEMAP NOT FOUND".to_owned(),
@@ -265,7 +265,7 @@ impl Body {
                     ..
                 }),
                 BodyEvent::Install,
-            ) => match Installer::spawn(&seed.lair, ctx) {
+            ) => match Installer::spawn(&seed.paths, ctx) {
                 Ok(worker) => Self::Installing { seed, worker },
                 Err(error) => Self::install_fault(seed, error),
             },
@@ -536,10 +536,10 @@ enum InstallEvent {
 }
 
 impl Installer {
-    fn spawn(lair: &Lair, ctx: &egui::Context) -> Result<Self> {
+    fn spawn(paths: &ApplicationPaths, ctx: &egui::Context) -> Result<Self> {
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
-        let lair = lair.clone();
+        let paths = paths.clone();
         let wake = NativeWake::from_context(ctx);
         let (send, events) = bounded(1);
         let progress_send = send.clone();
@@ -547,7 +547,7 @@ impl Installer {
             .name("hrrr-basemap-install".to_owned())
             .spawn(move || {
                 let result =
-                    basemap_artifact::install_attended(&lair, None, &thread_cancel, |progress| {
+                    basemap_artifact::install_attended(&paths, None, &thread_cancel, |progress| {
                         if progress_send
                             .try_send(InstallEvent::Progress(progress))
                             .is_ok()

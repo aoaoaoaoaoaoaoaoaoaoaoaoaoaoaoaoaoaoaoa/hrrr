@@ -1,8 +1,8 @@
 use crate::{
+    application_paths::ApplicationPaths,
     cache::CacheStore,
     decode,
     model::{BladeKey, LeadHour, Product, RunExtent, RunId},
-    xdg::Lair,
 };
 use anyhow::{Context as _, Result, bail};
 use jiff::Timestamp;
@@ -17,10 +17,10 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn new(lair: &Lair) -> Self {
+    pub fn new(paths: &ApplicationPaths) -> Self {
         Self {
             agent: ureq::Agent::new_with_defaults(),
-            cache: lair.field_cache(),
+            cache: paths.field_cache(),
         }
     }
 

@@ -8,13 +8,13 @@ use std::path::Path;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Config {
+pub struct Configuration {
     pub close_minimizes: bool,
 }
 
-impl eternalist_apps::configuration::Configuration for Config {}
+impl eternalist_apps::configuration::Configuration for Configuration {}
 
-impl Default for Config {
+impl Default for Configuration {
     fn default() -> Self {
         Self {
             close_minimizes: true,
@@ -24,14 +24,14 @@ impl Default for Config {
 
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-struct ConfigWire {
+struct ConfigurationWire {
     close_minimizes: bool,
     views: Option<ViewLibrary>,
 }
 
-impl Config {
+impl Configuration {
     pub fn migrate_legacy_views(path: &Path) -> Result<Option<ViewLibrary>> {
-        let wire = match load_toml::<ConfigWire>(path, "legacy preferences") {
+        let wire = match load_toml::<ConfigurationWire>(path, "legacy configuration") {
             Ok(Some(wire)) => wire,
             Ok(None) | Err(_) => return Ok(None),
         };
@@ -46,11 +46,11 @@ impl Config {
     }
 
     fn save(&self, path: &Path) -> Result<()> {
-        save_toml(self, path, "serialize preferences")
+        save_toml(self, path, "serialize configuration")
     }
 }
 
-impl Default for ConfigWire {
+impl Default for ConfigurationWire {
     fn default() -> Self {
         Self {
             close_minimizes: true,
@@ -101,13 +101,13 @@ mod tests {
         view.slot = ViewSlot::forge(7);
         view.pins
             .push(MercatorPoint::forge([0.25, 0.4]).context("map pin")?);
-        let legacy = toml::to_string(&ConfigWire {
+        let legacy = toml::to_string(&ConfigurationWire {
             close_minimizes: false,
             views: Some(views),
         })?;
         std::fs::write(&path, legacy)?;
 
-        let views = Config::migrate_legacy_views(&path)?.context("legacy views")?;
+        let views = Configuration::migrate_legacy_views(&path)?.context("legacy views")?;
         let view = views.saved.first().context("restored view")?;
         assert_eq!(view.name.as_str(), "default");
         assert_eq!(view.viewport.zoom, 9.25);

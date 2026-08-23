@@ -10,7 +10,7 @@ use std::{collections::BTreeSet, path::Path};
 const SCHEMA: u16 = 2;
 
 #[derive(Clone, Debug)]
-pub struct Slate {
+pub struct SessionState {
     pub overlay: Overlay,
     pub cycle: RunSelection,
     pub lead: LeadHour,
@@ -20,7 +20,7 @@ pub struct Slate {
     pub inspector_scroll: f32,
 }
 
-impl Default for Slate {
+impl Default for SessionState {
     fn default() -> Self {
         Self {
             overlay: Product::default().into(),
@@ -45,14 +45,14 @@ enum CycleMode {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum SlateWire {
-    Versioned(VersionedSlate),
-    Legacy(LegacySlate),
+enum SessionStateWire {
+    Versioned(VersionedSessionState),
+    Legacy(LegacySessionState),
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct VersionedSlate {
+struct VersionedSessionState {
     schema: u16,
     #[serde(alias = "product")]
     overlay: Overlay,
@@ -70,7 +70,7 @@ struct VersionedSlate {
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct LegacySlate {
+struct LegacySessionState {
     #[serde(alias = "product")]
     overlay: Overlay,
     cycle_tether: CycleMode,
@@ -83,7 +83,7 @@ struct LegacySlate {
     closed_folders: BTreeSet<String>,
 }
 
-impl Default for LegacySlate {
+impl Default for LegacySessionState {
     fn default() -> Self {
         Self {
             overlay: Product::default().into(),
@@ -98,17 +98,17 @@ impl Default for LegacySlate {
     }
 }
 
-impl Slate {
+impl SessionState {
     pub fn load(path: &Path) -> Result<(Self, bool)> {
         let Some(wire) = load_toml(path, "session state")? else {
             return Ok((Self::default(), false));
         };
         match wire {
-            SlateWire::Versioned(wire) => {
+            SessionStateWire::Versioned(wire) => {
                 let migrated = wire.schema != SCHEMA;
                 Ok((Self::from_versioned(wire)?, migrated))
             }
-            SlateWire::Legacy(wire) => Ok((Self::from_legacy(wire)?, true)),
+            SessionStateWire::Legacy(wire) => Ok((Self::from_legacy(wire)?, true)),
         }
     }
 
@@ -119,7 +119,7 @@ impl Slate {
             RunSelection::Fixed(run) => (CycleMode::Fixed, Some(run)),
         };
         save_toml(
-            &VersionedSlate {
+            &VersionedSessionState {
                 schema: SCHEMA,
                 overlay: self.overlay,
                 cycle,
@@ -135,7 +135,7 @@ impl Slate {
         )
     }
 
-    fn from_versioned(wire: VersionedSlate) -> Result<Self> {
+    fn from_versioned(wire: VersionedSessionState) -> Result<Self> {
         if !matches!(wire.schema, 1 | SCHEMA) {
             bail!("unsupported session-state schema {}", wire.schema);
         }
@@ -151,7 +151,7 @@ impl Slate {
         })
     }
 
-    fn from_legacy(mut wire: LegacySlate) -> Result<Self> {
+    fn from_legacy(mut wire: LegacySessionState) -> Result<Self> {
         wire.viewport.normalize();
         let _legacy_pins = wire
             .pins
@@ -194,18 +194,18 @@ mod tests {
 
     #[test]
     fn state_versions_rectify_legacy_qpf_and_introduce_the_base_hour() -> Result<()> {
-        let wire = toml::from_str::<SlateWire>("product = \"qpf\"")?;
-        let SlateWire::Legacy(wire) = wire else {
+        let wire = toml::from_str::<SessionStateWire>("product = \"qpf\"")?;
+        let SessionStateWire::Legacy(wire) = wire else {
             bail!("legacy state parsed as current state");
         };
-        let slate = Slate::from_legacy(wire)?;
-        assert_eq!(slate.overlay.active(), Some(Product::QpfRun));
+        let session_state = SessionState::from_legacy(wire)?;
+        assert_eq!(session_state.overlay.active(), Some(Product::QpfRun));
 
-        let prior = toml::from_str::<VersionedSlate>(
+        let prior = toml::from_str::<VersionedSessionState>(
             "schema = 1\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nclosed_folders = []\n",
         )?;
         assert_eq!(prior.base, LeadHour::ZERO);
-        let current = Slate::from_versioned(toml::from_str::<VersionedSlate>(
+        let current = SessionState::from_versioned(toml::from_str::<VersionedSessionState>(
             "schema = 2\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\n",
         )?)?;
         assert_eq!(current.base, LeadHour::forge(3)?);
@@ -222,17 +222,19 @@ cycle = \"latest\"
 lead = 49
 closed_folders = []
 ";
-        assert!(toml::from_str::<SlateWire>(text).is_err());
+        assert!(toml::from_str::<SessionStateWire>(text).is_err());
     }
 
     #[test]
     fn inspector_scroll_repels_nonfinite_and_negative_state() -> Result<()> {
-        let mut slate = Slate::from_versioned(toml::from_str::<VersionedSlate>(
+        let mut session_state = SessionState::from_versioned(toml::from_str::<
+            VersionedSessionState,
+        >(
             "schema = 1\noverlay = \"smoke\"\ncycle = \"latest\"\nlead = 0\nclosed_folders = []\ninspector_scroll = nan\n",
         )?)?;
-        assert_eq!(slate.inspector_scroll, 0.0);
-        slate.inspector_scroll = lawful_scroll(-8.0);
-        assert_eq!(slate.inspector_scroll, 0.0);
+        assert_eq!(session_state.inspector_scroll, 0.0);
+        session_state.inspector_scroll = lawful_scroll(-8.0);
+        assert_eq!(session_state.inspector_scroll, 0.0);
         Ok(())
     }
 }

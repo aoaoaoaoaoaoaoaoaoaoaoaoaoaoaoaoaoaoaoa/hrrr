@@ -5,7 +5,7 @@ use eternalist_apps::commands::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Decree {
+pub enum Edict {
     FollowLatest,
     FollowLatestLong,
     UndoMapChange,
@@ -18,9 +18,9 @@ const LATEST_LONG: [Shortcut; 1] = [Shortcut::new(
 )];
 const UNDO: [Shortcut; 1] = [Shortcut::primary('Z')];
 
-const DECREES: [CommandSpec<Decree, ()>; 3] = [
+const EDICTS: [CommandSpec<Edict, ()>; 3] = [
     CommandSpec::new(
-        Decree::FollowLatest,
+        Edict::FollowLatest,
         "forecast.follow_latest",
         "Latest run",
         CommandScope::Global,
@@ -29,7 +29,7 @@ const DECREES: [CommandSpec<Decree, ()>; 3] = [
     .with_default_shortcuts(&LATEST)
     .with_mnemonic('L'),
     CommandSpec::new(
-        Decree::FollowLatestLong,
+        Edict::FollowLatestLong,
         "forecast.follow_latest_long",
         "Latest long run",
         CommandScope::Global,
@@ -38,7 +38,7 @@ const DECREES: [CommandSpec<Decree, ()>; 3] = [
     .with_default_shortcuts(&LATEST_LONG)
     .with_mnemonic('G'),
     CommandSpec::new(
-        Decree::UndoMapChange,
+        Edict::UndoMapChange,
         "map.undo_change",
         "Undo map change",
         CommandScope::Global,
@@ -47,7 +47,7 @@ const DECREES: [CommandSpec<Decree, ()>; 3] = [
     .with_default_shortcuts(&UNDO),
 ];
 
-pub fn canon() -> &'static CommandCanon<Decree, ()> {
-    static CANON: OnceLock<CommandCanon<Decree, ()>> = OnceLock::new();
-    CANON.get_or_init(|| CommandCanon::new(&DECREES))
+pub fn canon() -> &'static CommandCanon<Edict, ()> {
+    static CANON: OnceLock<CommandCanon<Edict, ()>> = OnceLock::new();
+    CANON.get_or_init(|| CommandCanon::new(&EDICTS))
 }

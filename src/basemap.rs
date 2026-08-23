@@ -1,11 +1,11 @@
 use crate::{
+    application_paths::ApplicationPaths,
     basemap_artifact::{
         BOUNDS, DetailSource, LOCAL_MAX_ZOOM, MAX_ZOOM as MAX_SOURCE_ZOOM, detail_source,
     },
     cache::CacheStore,
     map,
     model::Viewport,
-    xdg::Lair,
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -175,8 +175,8 @@ pub struct Basemap {
 }
 
 impl Basemap {
-    pub fn spawn(ctx: Context, lair: &Lair) -> Result<Self> {
-        let archive = lair.basemap_path()?;
+    pub fn spawn(ctx: Context, paths: &ApplicationPaths) -> Result<Self> {
+        let archive = paths.basemap_path()?;
         if !archive.is_file() {
             anyhow::bail!(
                 "no basemap archive at {}; run `hrrr basemap install`",
@@ -186,7 +186,7 @@ impl Basemap {
         let workers = thread::available_parallelism()
             .map_or(4, std::num::NonZeroUsize::get)
             .clamp(2, 8);
-        let detail = detail_source(lair)?.map(|source| Detail::new(source, lair.basemap_cache()));
+        let detail = detail_source(paths)?.map(|source| Detail::new(source, paths.basemap_cache()));
         Self::spawn_with_workers(ctx, archive, detail, workers)
     }
 

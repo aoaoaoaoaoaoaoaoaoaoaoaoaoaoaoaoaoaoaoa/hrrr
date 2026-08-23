@@ -1,4 +1,4 @@
-use crate::{decode, model::*, source::Source, xdg::Lair};
+use crate::{application_paths::ApplicationPaths, decode, model::*, source::Source};
 use anyhow::{Context as _, Result, anyhow};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use eternalist_apps::{
@@ -73,13 +73,13 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn spawn(ctx: egui::Context, lair: &Lair) -> Result<Self> {
+    pub fn spawn(ctx: egui::Context, paths: &ApplicationPaths) -> Result<Self> {
         let (surveys, survey_rx) = superseding_channel();
         let (loads, load_rx) = superseding_channel();
         let (shutdown, shutdown_rx) = bounded(1);
         let (scout, scout_rx) = bounded(1);
         let (event_tx, events) = bounded(32);
-        let forge_source = Source::new(lair);
+        let forge_source = Source::new(paths);
         let forge_events = event_tx.clone();
         let wake = NativeWake::from_context(&ctx);
         let forge_wake = wake.clone();
@@ -96,7 +96,7 @@ impl Worker {
                 );
             })
             .context("spawn HRRR field forge")?;
-        let scout_source = Source::new(lair);
+        let scout_source = Source::new(paths);
         let scout_thread = thread::Builder::new()
             .name("hrrr-scout".to_owned())
             .spawn(move || scout_cycles(wake, scout_source, scout_rx, event_tx))

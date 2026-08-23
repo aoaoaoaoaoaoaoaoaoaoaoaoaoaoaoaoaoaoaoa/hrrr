@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn corrupt_primary_retreats_to_the_last_complete_generation() -> Result<()> {
         let root = TestRoot::forge()?;
-        let path = root.0.join("slate.toml");
+        let path = root.0.join("session_state.toml");
         let first = Testament {
             generation: 1,
             payload: "first".to_owned(),

@@ -5,7 +5,7 @@ fields. It renders surface smoke, two-metre temperature, ten-metre wind, total
 cloud cover, total precipitation, and one-hour precipitation over a locally
 indexed vector basemap. Standard wind barbs are stamped from application-owned
 3D bronze dies by the same build-time Foundry that makes Poolrooms chrome.
-Forecast animation, map navigation, probes, and saved views remain responsive
+Forecast animation, map navigation, probes, pins, and saved views remain responsive
 while network, GRIB, PMTiles, and mesh work run outside the UI thread.
 
 ## Install
@@ -79,13 +79,13 @@ repair. Accepted changes settle through format-preserving atomic replacement.
 
 Drag to pan and scroll at the pointer to zoom. The map scale appears at lower
 left; maximum zoom is roughly two kilometres across a full-HD viewport. A left
-click moves the transient probe; `Shift`-left-click creates a persistent probe.
-Drag a persistent probe by its bulb and remove it with its adjacent ×. `Esc`
-clears the transient probe. `Ctrl+Z` undoes probe placement, movement, removal,
-and transient clearing. Map navigation and saved-view operations remain outside
+click moves the transient probe; `Shift`-left-click creates a persistent pin.
+Drag a persistent pin by its bulb and remove it with its adjacent ×. `Esc`
+clears the transient probe. `Ctrl+Z` undoes pin placement, movement, removal,
+and transient-probe clearing. Map navigation and saved-view operations remain outside
 that history.
 
-Every map position and persistent-probe set belongs to the active saved view
+Every map position and persistent-pin set belongs to the active saved view
 and is autosaved. The + control clones the active view. Numeric keys select
 bound views; `Shift` plus a numeric key binds that slot to the active view.
 Autosave settlement is a semantic deadline rather than a repaint clock, and
@@ -113,7 +113,7 @@ On Linux the individual defaults are:
 
 | Meaning | Path |
 | --- | --- |
-| preferences | `$XDG_CONFIG_HOME/hrrr/config.toml` |
+| configuration | `$XDG_CONFIG_HOME/hrrr/config.toml` |
 | saved views and basemap | `$XDG_DATA_HOME/hrrr/` |
 | session state | `$XDG_STATE_HOME/hrrr/slate.toml` |
 | disposable forecasts | `$XDG_CACHE_HOME/hrrr/fields/` |
@@ -124,7 +124,7 @@ archive.
 
 Forecast and detailed-basemap caches each expire after seven days and are each
 capped at 512 MiB. Cargo, the macOS app bundle, and the Windows uninstaller
-remove installed machinery while preserving preferences, views, and the
+remove installed machinery while preserving configuration, views, and the
 explicitly installed basemap. Run `hrrr basemap remove` first to remove the
 local core and cached detail as well.
 

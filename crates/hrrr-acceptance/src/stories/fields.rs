@@ -3,7 +3,7 @@ use std::time::Duration;
 use egui_tester::{Button, Condition, Result, demand};
 
 use crate::{
-    harness::{Harness, SLATE},
+    harness::{Harness, SESSION_STATE},
     observation::{Observation, shows},
 };
 
@@ -55,7 +55,7 @@ fn prove_restart(harness: &Harness<'_>) -> Result<()> {
 fn prove_cumulative_interval(harness: &Harness<'_>) -> Result<()> {
     let _state = harness.testbed.create_private_dir("xdg/state/hrrr")?;
     let _slate = harness.testbed.write_private(
-        SLATE,
+        SESSION_STATE,
         b"schema = 2\n\
 overlay = \"qpf_run\"\n\
 cycle = \"fixed\"\n\
