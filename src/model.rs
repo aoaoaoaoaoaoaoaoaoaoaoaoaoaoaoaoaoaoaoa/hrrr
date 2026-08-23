@@ -304,11 +304,19 @@ field_arsenal! {
     ],
     [
         Temperature {
-            label: "TEMPERATURE · 2 M AGL",
+            label: "TEMPERATURE",
             cache: "temperature",
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":TMP:2 m above ground:"),
                 GribLaw::instant(0, 0, FixedSurfaceLaw::metres_above_ground(2)),
+            ),
+        },
+        DewPoint {
+            label: "DEW POINT",
+            cache: "dew-point",
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::Contains(":DPT:2 m above ground:"),
+                GribLaw::instant(0, 6, FixedSurfaceLaw::metres_above_ground(2)),
             ),
         },
     ],

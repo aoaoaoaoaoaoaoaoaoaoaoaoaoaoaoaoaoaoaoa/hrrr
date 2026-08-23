@@ -1,7 +1,7 @@
 # HRRR
 
 HRRR is a native viewer for NOAA High-Resolution Rapid Refresh forecast
-fields. It renders surface smoke, two-metre temperature, ten-metre wind, total
+fields. It renders surface smoke, temperature, dew point, ten-metre wind, total
 cloud cover, total precipitation, and one-hour precipitation over a locally
 indexed vector basemap. Standard wind barbs are stamped from application-owned
 3D bronze dies by the same build-time Foundry that makes Poolrooms chrome.

@@ -240,10 +240,11 @@ mod tests {
 90:300:d=2026071912:APCP:surface:1-2 hour acc fcst:\n\
 91:350:d=2026071912:MASSDEN:8 m above ground:2 hour fcst:\n\
 92:500:d=2026071912:TMP:2 m above ground:2 hour fcst:\n\
-93:800:d=2026071912:TCDC:entire atmosphere:2 hour fcst:\n\
-94:900:d=2026071912:UGRD:10 m above ground:2 hour fcst:\n\
-95:1000:d=2026071912:VGRD:10 m above ground:2 hour fcst:\n\
-96:1100:d=2026071912:DPT:2 m above ground:2 hour fcst:\n";
+93:800:d=2026071912:DPT:2 m above ground:2 hour fcst:\n\
+94:900:d=2026071912:TCDC:entire atmosphere:2 hour fcst:\n\
+95:1000:d=2026071912:UGRD:10 m above ground:2 hour fcst:\n\
+96:1100:d=2026071912:VGRD:10 m above ground:2 hour fcst:\n\
+97:1200:d=2026071912:VIS:surface:2 hour fcst:\n";
 
     #[test]
     fn inventory_selectors_distinguish_products_and_accumulation_windows() -> Result<()> {
@@ -269,16 +270,20 @@ mod tests {
             500..=799
         );
         assert_eq!(
-            select_range(INDEX, key(Product::CloudCover, Scalar)?)?,
+            select_range(INDEX, key(Product::DewPoint, Scalar)?)?,
             800..=899
         );
         assert_eq!(
-            select_range(INDEX, key(Product::Wind, Eastward)?)?,
+            select_range(INDEX, key(Product::CloudCover, Scalar)?)?,
             900..=999
         );
         assert_eq!(
-            select_range(INDEX, key(Product::Wind, Northward)?)?,
+            select_range(INDEX, key(Product::Wind, Eastward)?)?,
             1000..=1099
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::Wind, Northward)?)?,
+            1100..=1199
         );
 
         const ZERO: &str = "84:200:d=2026071912:APCP:surface:0-0 day acc fcst:\n\

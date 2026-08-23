@@ -209,15 +209,20 @@ scale_arsenal! {
     Temperature => temperature = ScaleFamily::Temperature {
         summer: Scale::forge(
             Unit::Fahrenheit,
-            temperature_bins(40, 120, &SUMMER_TEMPERATURE),
+            gradient_bins(40, 120, TEMPERATURE_ALPHA, &SUMMER_TEMPERATURE),
             TEMPERATURE_CONTOUR,
         ),
         winter: Scale::forge(
             Unit::Fahrenheit,
-            temperature_bins(-50, 80, &WINTER_TEMPERATURE),
+            gradient_bins(-50, 80, TEMPERATURE_ALPHA, &WINTER_TEMPERATURE),
             TEMPERATURE_CONTOUR,
         ),
     },
+    DewPoint => dew_point = ScaleFamily::Static(Scale::forge(
+        Unit::Fahrenheit,
+        gradient_bins(-40, 90, DEW_POINT_ALPHA, &DEW_POINT),
+        DEW_POINT_CONTOUR,
+    )),
     CloudCover => cloud_cover = ScaleFamily::Static(Scale::forge(
         Unit::Percent,
         CLOUD_COVER,
@@ -242,6 +247,10 @@ const SMOKE_CONTOUR: Contour = Contour {
 const TEMPERATURE_CONTOUR: Contour = Contour {
     width_points: 0.18,
     srgb: [35, 31, 26, 34],
+};
+const DEW_POINT_CONTOUR: Contour = Contour {
+    width_points: 0.18,
+    srgb: [35, 31, 26, 38],
 };
 const CLOUD_CONTOUR: Contour = Contour {
     width_points: 0.18,
@@ -319,6 +328,7 @@ const WIND: [Bin; 11] = [
     Bin::new(80.0, [69, 43, 74, 238]),
 ];
 const TEMPERATURE_ALPHA: u8 = 210;
+const DEW_POINT_ALPHA: u8 = 205;
 
 #[derive(Clone, Copy)]
 struct ColorStop {
@@ -364,18 +374,34 @@ const WINTER_TEMPERATURE: [ColorStop; 15] = [
     ColorStop::new(80.0, [171, 55, 89]),
 ];
 
-fn temperature_bins(minimum: i16, maximum: i16, stops: &[ColorStop]) -> Arc<[Bin]> {
-    assert!(!stops.is_empty(), "a temperature ramp needs color stops");
+const DEW_POINT: [ColorStop; 13] = [
+    ColorStop::new(-40.0, [104, 77, 67]),
+    ColorStop::new(-20.0, [126, 94, 72]),
+    ColorStop::new(0.0, [151, 119, 78]),
+    ColorStop::new(20.0, [166, 146, 88]),
+    ColorStop::new(32.0, [151, 164, 98]),
+    ColorStop::new(40.0, [116, 169, 106]),
+    ColorStop::new(50.0, [76, 165, 125]),
+    ColorStop::new(55.0, [57, 156, 143]),
+    ColorStop::new(60.0, [56, 143, 163]),
+    ColorStop::new(65.0, [67, 125, 174]),
+    ColorStop::new(70.0, [88, 100, 166]),
+    ColorStop::new(75.0, [108, 72, 143]),
+    ColorStop::new(90.0, [64, 39, 82]),
+];
+
+fn gradient_bins(minimum: i16, maximum: i16, alpha: u8, stops: &[ColorStop]) -> Arc<[Bin]> {
+    assert!(!stops.is_empty(), "a field ramp needs color stops");
     (minimum..=maximum)
         .step_by(2)
-        .map(|temperature| {
-            let ceiling = f32::from(temperature);
-            Bin::new(ceiling, temperature_color(ceiling, stops))
+        .map(|value| {
+            let ceiling = f32::from(value);
+            Bin::new(ceiling, gradient_color(ceiling, alpha, stops))
         })
         .collect()
 }
 
-fn temperature_color(value: f32, stops: &[ColorStop]) -> [u8; 4] {
+fn gradient_color(value: f32, alpha: u8, stops: &[ColorStop]) -> [u8; 4] {
     let mut lo = stops[0];
     for &hi in &stops[1..] {
         if value <= hi.value {
@@ -385,11 +411,11 @@ fn temperature_color(value: f32, stops: &[ColorStop]) -> [u8; 4] {
                     + (f32::from(hi.srgb[slot]) - f32::from(lo.srgb[slot])) * t)
                     .round() as u8
             };
-            return [channel(0), channel(1), channel(2), TEMPERATURE_ALPHA];
+            return [channel(0), channel(1), channel(2), alpha];
         }
         lo = hi;
     }
-    [lo.srgb[0], lo.srgb[1], lo.srgb[2], TEMPERATURE_ALPHA]
+    [lo.srgb[0], lo.srgb[1], lo.srgb[2], alpha]
 }
 
 #[cfg(test)]
