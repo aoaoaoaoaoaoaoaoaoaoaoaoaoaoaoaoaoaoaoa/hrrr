@@ -847,32 +847,6 @@ impl WeatherApp {
         crate::witness::response(ui, hrrr_contract::Target::Panel("views"), &views.header);
         self.water.fold(views.wake);
 
-        let mut toggle_close = None;
-        let window = panels.section(ui, "window", "window", true, |ui| {
-            let response = ui.add_sized(
-                [ui.available_width(), 26.0],
-                egui::Button::new(
-                    decrees::canon()
-                        .spec(Decree::ToggleCloseToTray)
-                        .widget_text(ui),
-                )
-                .selected(self.configuration.live().close_minimizes),
-            );
-            chrome::tension(ui, &response);
-            if response.hovered() {
-                self.water.hover("close-minimizes", response.rect);
-            }
-            if chrome::exact_activation(ui, &response) {
-                toggle_close = Some(response.rect);
-            }
-        });
-        crate::witness::response(ui, hrrr_contract::Target::Panel("window"), &window.header);
-        self.water.fold(window.wake);
-        if let Some(rect) = toggle_close {
-            self.apply_decree(CommandDispatch::Invoke(Decree::ToggleCloseToTray));
-            self.water.select(rect);
-        }
-
         let status = panels.section(ui, "status", "status", true, |ui| {
             let _status = ui.label(chrome::muted(&self.status));
             ui.add_space(3.0);
@@ -1807,10 +1781,9 @@ impl WeatherApp {
             Decree::UndoMapChange if !self.map_undo.has_reversal_for(&self.active_view) => {
                 CommandStatus::Disabled("the active view has no map change to undo")
             }
-            Decree::FollowLatest
-            | Decree::FollowLatestLong
-            | Decree::UndoMapChange
-            | Decree::ToggleCloseToTray => CommandStatus::Enabled,
+            Decree::FollowLatest | Decree::FollowLatestLong | Decree::UndoMapChange => {
+                CommandStatus::Enabled
+            }
         }
     }
 
@@ -1826,23 +1799,6 @@ impl WeatherApp {
             Decree::FollowLatest => self.follow_cycle(RunSelection::Latest),
             Decree::FollowLatestLong => self.follow_cycle(RunSelection::LatestLong),
             Decree::UndoMapChange => self.undo_map_object(),
-            Decree::ToggleCloseToTray => {
-                let close_minimizes = !self.configuration.live().close_minimizes;
-                let status = if close_minimizes {
-                    "close hides the window"
-                } else {
-                    "close quits"
-                };
-                match self
-                    .configuration
-                    .revise(|config| config.close_minimizes = close_minimizes)
-                {
-                    Ok(_) => status.clone_into(&mut self.status),
-                    Err(error) => {
-                        self.status = format!("configuration change failed: {error:#}");
-                    }
-                }
-            }
         }
     }
 

@@ -9,7 +9,6 @@ pub enum Decree {
     FollowLatest,
     FollowLatestLong,
     UndoMapChange,
-    ToggleCloseToTray,
 }
 
 const LATEST: [Shortcut; 1] = [Shortcut::primary('R')];
@@ -19,7 +18,7 @@ const LATEST_LONG: [Shortcut; 1] = [Shortcut::new(
 )];
 const UNDO: [Shortcut; 1] = [Shortcut::primary('Z')];
 
-const DECREES: [CommandSpec<Decree, ()>; 4] = [
+const DECREES: [CommandSpec<Decree, ()>; 3] = [
     CommandSpec::new(
         Decree::FollowLatest,
         "forecast.follow_latest",
@@ -46,14 +45,6 @@ const DECREES: [CommandSpec<Decree, ()>; 4] = [
     )
     .with_detail("Undo the last pin or probe change.")
     .with_default_shortcuts(&UNDO),
-    CommandSpec::new(
-        Decree::ToggleCloseToTray,
-        "application.toggle_close_to_tray",
-        "Close to tray",
-        CommandScope::Global,
-    )
-    .with_detail("Closing the window hides HRRR instead of quitting.")
-    .with_mnemonic('T'),
 ];
 
 pub fn canon() -> &'static CommandCanon<Decree, ()> {
