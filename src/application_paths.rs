@@ -13,9 +13,11 @@ pub const PRODUCT: ProductIdentity = ProductIdentity::declare(
 
 #[derive(Clone, Debug)]
 pub struct ApplicationPaths {
+    #[cfg(not(target_os = "android"))]
     pub config: PathBuf,
     pub state: PathBuf,
     pub data: PathBuf,
+    #[cfg(not(target_os = "android"))]
     local_data: PathBuf,
     runtime: Option<PathBuf>,
     cache: CacheManager,
@@ -27,6 +29,7 @@ pub struct InstanceGuard {
 }
 
 impl ApplicationPaths {
+    #[cfg(not(target_os = "android"))]
     pub fn claim() -> Result<Self> {
         let platform = eternalist_apps::ApplicationPaths::claim(PRODUCT)?;
         Ok(Self {
@@ -39,12 +42,24 @@ impl ApplicationPaths {
         })
     }
 
+    #[cfg(target_os = "android")]
+    pub fn claim_android(android: &eternalist_apps::AndroidApp) -> Result<Self> {
+        let root = android
+            .internal_data_path()
+            .context("Android did not provide HRRR's private data directory")?;
+        let state = root.join("state");
+        let data = root.join("data");
+        let cache = CacheManager::standard(root.join("cache"));
+        Ok(Self { state, data, cache })
+    }
+
     pub fn session_state_path(&self) -> PathBuf {
         // The legacy filename is durable XDG state ABI; only the Rust noun was
         // rectified.
         self.state.join("slate.toml")
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn config_path(&self) -> PathBuf {
         self.config.join("config.toml")
     }
@@ -61,10 +76,12 @@ impl ApplicationPaths {
         self.cache.store(CacheClass::Basemap)
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn cache_root(&self) -> PathBuf {
         self.cache.root().to_path_buf()
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn basemap_path(&self) -> Result<PathBuf> {
         let path = std::env::var_os("HRRR_BASEMAP_ARCHIVE").map_or_else(
             || managed_basemap(&self.data, &self.local_data),
@@ -77,6 +94,7 @@ impl ApplicationPaths {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn basemap_is_external() -> bool {
         std::env::var_os("HRRR_BASEMAP_ARCHIVE").is_some()
     }
@@ -90,6 +108,7 @@ impl ApplicationPaths {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn managed_basemap(roaming: &Path, local: &Path) -> PathBuf {
     let local = local
         .join("basemap")
@@ -121,7 +140,7 @@ impl InstanceGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};

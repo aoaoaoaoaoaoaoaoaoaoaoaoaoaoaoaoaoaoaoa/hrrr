@@ -1,9 +1,10 @@
+#[cfg(not(target_os = "android"))]
+use crate::configuration::Configuration;
 use crate::{
     application_paths::{ApplicationPaths, InstanceGuard},
     basemap::{self, Basemap, TileKey, VectorTile},
     cache::Custodian,
     commands::{self, Edict},
-    configuration::Configuration,
     library::EntryName,
     library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
     map::{self, FieldPaint},
@@ -24,20 +25,30 @@ use brass_poolrooms::{
     water::{Domain, Frame as WaterFrame, Surface, Wetness},
 };
 use egui::Color32;
+#[cfg(not(target_os = "android"))]
 use eternalist_apps::{
     ApplicationHeader, ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideGroup},
     commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     configuration::ConfigurationLedger,
     panel_navigation::PanelNavigator,
-    responsiveness::DrainBudget,
     settings::{SettingSpec, SettingsFile, SettingsSheet},
+};
+use eternalist_apps::{
+    ScribeOutcome, SettledScribe,
+    command_guide::{CommandGuide, GuideGesture, GuideGroup},
+    commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
+    responsiveness::DrainBudget,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "android")]
+#[path = "app_mobile.rs"]
+mod mobile;
 
 const STATE_SETTLE: Duration = Duration::from_millis(450);
 const SCALE_SETTLE: Duration = Duration::from_millis(180);
@@ -46,6 +57,7 @@ const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
 const EVENT_DRAIN: DrainBudget = DrainBudget::new(64, Duration::from_millis(3));
 const FIELD_CAPACITY: usize = 12;
 const VECTOR_CEILING: usize = 512 * 1_048_576;
+#[cfg(not(target_os = "android"))]
 const CLOSE_TO_TRAY: SettingSpec = SettingSpec::new(
     "close_to_tray",
     "CLOSE TO TRAY",
@@ -469,7 +481,9 @@ impl DurableState {
 
 pub struct WeatherApp {
     _instance: InstanceGuard,
+    #[cfg(not(target_os = "android"))]
     configuration: ConfigurationLedger<Configuration>,
+    #[cfg(not(target_os = "android"))]
     settings: SettingsSheet,
     views: ViewLibrary,
     session_state: SessionState,
@@ -494,7 +508,10 @@ pub struct WeatherApp {
     presented_basemap: Arc<[Arc<VectorTile>]>,
     tile_inflight: HashSet<TileKey>,
     tile_rejections: HashMap<TileKey, TileRejection>,
+    #[cfg(not(target_os = "android"))]
     panels: PanelNavigator,
+    #[cfg(target_os = "android")]
+    mobile_inspector: mobile::MobileInspector,
     guide: CommandGuide,
     transient_probe: Option<MercatorPoint>,
     pin_tug: Option<PinTug>,
@@ -520,15 +537,21 @@ impl WeatherApp {
         paths: ApplicationPaths,
         instance: InstanceGuard,
     ) -> Result<Self> {
+        #[cfg(not(target_os = "android"))]
         let legacy_views = Configuration::migrate_legacy_views(&paths.config_path())?;
+        #[cfg(target_os = "android")]
+        let legacy_views = None;
+        #[cfg(not(target_os = "android"))]
         let configuration: ConfigurationLedger<Configuration> = ConfigurationLedger::raise(
             "hrrr-configuration-scribe",
             ctx,
             paths.config_path(),
             STATE_SETTLE,
         )?;
+
         chrome::set_font_scale(ctx, configuration.live().font_scale);
         let mut settings = SettingsSheet::default();
+        #[cfg(not(target_os = "android"))]
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
         }
@@ -589,7 +612,9 @@ impl WeatherApp {
         }
         let app = Self {
             _instance: instance,
+            #[cfg(not(target_os = "android"))]
             configuration,
+            #[cfg(not(target_os = "android"))]
             settings,
             views,
             session_state,
@@ -614,7 +639,10 @@ impl WeatherApp {
             presented_basemap: Arc::from([]),
             tile_inflight: HashSet::new(),
             tile_rejections: HashMap::new(),
+            #[cfg(not(target_os = "android"))]
             panels: PanelNavigator::default(),
+            #[cfg(target_os = "android")]
+            mobile_inspector: mobile::MobileInspector::default(),
             guide: CommandGuide::default(),
             transient_probe: None,
             pin_tug: None,
@@ -637,6 +665,7 @@ impl WeatherApp {
         Ok(app)
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         chrome::set_font_scale(ui.ctx(), self.configuration.live().font_scale);
         self.absorb_events(ui.ctx());
@@ -684,10 +713,14 @@ impl WeatherApp {
     }
 
     pub fn service_deadline(&self, _now: Instant) -> Option<Instant> {
+        #[cfg(not(target_os = "android"))]
+        let configuration = self.configuration.deadline();
+        #[cfg(target_os = "android")]
+        let configuration = None;
         self.scribe
             .deadline()
             .into_iter()
-            .chain(self.configuration.deadline())
+            .chain(configuration)
             .chain(self.survey_deadline())
             .chain(self.tile_rejections.values().filter_map(|rejection| {
                 if let TileRejection::RetryAt(deadline) = rejection {
@@ -700,7 +733,10 @@ impl WeatherApp {
     }
 
     pub fn service_deadline_reached(&mut self, now: Instant) -> bool {
+        #[cfg(not(target_os = "android"))]
         let mut changed = self.configuration.service_deadline_reached(now);
+        #[cfg(target_os = "android")]
+        let mut changed = false;
         self.tile_rejections.retain(|_key, rejection| {
             let expired = matches!(rejection, TileRejection::RetryAt(deadline) if *deadline <= now);
             changed |= expired;
@@ -748,10 +784,17 @@ impl WeatherApp {
         self.dirty = DirtyState::default();
     }
 
+    #[cfg(target_os = "android")]
+    pub fn suspend(&mut self) {
+        self.retire();
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn close_to_tray_enabled(&self) -> bool {
         self.configuration.live().close_minimizes
     }
 
+    #[cfg(not(target_os = "android"))]
     fn reload_configuration(&mut self) {
         if (self.configuration.fault().is_some() || self.configuration.settled())
             && let Err(error) = self.configuration.request_reload()
@@ -760,6 +803,7 @@ impl WeatherApp {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn show_settings(&mut self, ctx: &egui::Context) {
         let path = self.configuration.path().to_owned();
         let fault = self.configuration.fault().map(ToString::to_string);
@@ -806,6 +850,7 @@ impl WeatherApp {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn inspector(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
         let _header = ApplicationHeader::new("HRRR")
             .settings_attention(self.configuration.fault().is_some())
@@ -1055,17 +1100,17 @@ impl WeatherApp {
         let mut run_step = None;
         let latest = ui
             .add_enabled_ui(latest_run.is_some(), |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 24.0],
+                let button =
                     egui::Button::new(commands::canon().spec(Edict::FollowLatest).widget_text(ui))
-                        .shortcut_text(
-                            commands::canon().shortcuts(Edict::FollowLatest)[0].label(ui.ctx()),
-                        )
                         .selected(
                             self.session_state.cycle == RunSelection::Latest
                                 && latest_run == Some(run.id),
-                        ),
-                )
+                        );
+                #[cfg(not(target_os = "android"))]
+                let button = button.shortcut_text(
+                    commands::canon().shortcuts(Edict::FollowLatest)[0].label(ui.ctx()),
+                );
+                ui.add_sized([ui.available_width(), 24.0], button)
             })
             .inner;
         if chrome::exact_activation(ui, &latest) {
@@ -1073,21 +1118,20 @@ impl WeatherApp {
         }
         let latest_long = ui
             .add_enabled_ui(latest_extended.is_some(), |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 24.0],
-                    egui::Button::new(
-                        commands::canon()
-                            .spec(Edict::FollowLatestLong)
-                            .widget_text(ui),
-                    )
-                    .shortcut_text(
-                        commands::canon().shortcuts(Edict::FollowLatestLong)[0].label(ui.ctx()),
-                    )
-                    .selected(
-                        self.session_state.cycle == RunSelection::LatestLong
-                            && latest_extended == Some(run.id),
-                    ),
+                let button = egui::Button::new(
+                    commands::canon()
+                        .spec(Edict::FollowLatestLong)
+                        .widget_text(ui),
                 )
+                .selected(
+                    self.session_state.cycle == RunSelection::LatestLong
+                        && latest_extended == Some(run.id),
+                );
+                #[cfg(not(target_os = "android"))]
+                let button = button.shortcut_text(
+                    commands::canon().shortcuts(Edict::FollowLatestLong)[0].label(ui.ctx()),
+                );
+                ui.add_sized([ui.available_width(), 24.0], button)
             })
             .inner;
         if chrome::exact_activation(ui, &latest_long) {
@@ -1463,7 +1507,7 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(feature = "egui-test")]
+    #[cfg(all(feature = "egui-test", not(target_os = "android")))]
     pub fn witness_state(&self) -> crate::witness::State {
         crate::witness::State {
             contract: hrrr_contract::UI_FINGERPRINT,

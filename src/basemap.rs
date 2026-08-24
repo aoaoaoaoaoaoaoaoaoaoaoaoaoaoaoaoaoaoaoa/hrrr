@@ -19,12 +19,22 @@ use lyon_tessellation::{
     BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers, math::point,
     path::Path,
 };
-use pmtiles::{AsyncPmTilesReader, HashMapCache, HttpBackend, MmapBackend, TileCoord};
+#[cfg(not(target_os = "android"))]
+use pmtiles::HttpBackend;
+#[cfg(not(target_os = "android"))]
+use pmtiles::MmapBackend;
+#[cfg(target_os = "android")]
+use pmtiles::{AsyncBackend, BackendResponse, PmtError};
+use pmtiles::{AsyncPmTilesReader, HashMapCache, TileCoord};
+#[cfg(target_os = "android")]
+use std::future::Future;
+#[cfg(not(target_os = "android"))]
+use std::{path::Path as FsPath, time::SystemTime};
 use std::{
-    path::{Path as FsPath, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 pub const PAPER_SRGB: [u8; 3] = [229; 3];
@@ -175,6 +185,7 @@ pub struct Basemap {
 }
 
 impl Basemap {
+    #[cfg(not(target_os = "android"))]
     pub fn spawn(ctx: Context, paths: &ApplicationPaths) -> Result<Self> {
         let archive = paths.basemap_path()?;
         if !archive.is_file() {
@@ -190,6 +201,7 @@ impl Basemap {
         Self::spawn_with_workers(ctx, archive, detail, workers)
     }
 
+    #[cfg(not(target_os = "android"))]
     fn spawn_with_workers(
         ctx: Context,
         archive: PathBuf,
@@ -206,6 +218,27 @@ impl Basemap {
             .name("vector-armory".to_owned())
             .spawn(move || armory(wake, archive, detail, command_rx, event_tx, workers))
             .context("spawn vector basemap armory")?;
+        Ok(Self {
+            commands,
+            events,
+            _thread: thread,
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn spawn(ctx: Context, paths: &ApplicationPaths) -> Result<Self> {
+        let source = detail_source(paths)?.context("Android basemap source is unavailable")?;
+        let remote = Detail::new(source, paths.basemap_cache());
+        let workers = thread::available_parallelism()
+            .map_or(2, std::num::NonZeroUsize::get)
+            .clamp(2, 4);
+        let (commands, command_rx) = bounded(256);
+        let (event_tx, events) = bounded(256);
+        let wake = NativeWake::from_context(&ctx);
+        let thread = thread::Builder::new()
+            .name("vector-armory".to_owned())
+            .spawn(move || armory(wake, remote, command_rx, event_tx, workers))
+            .context("spawn streamed vector basemap armory")?;
         Ok(Self {
             commands,
             events,
@@ -273,8 +306,90 @@ fn tile_distance(key: TileKey, center: [f64; 2]) -> f64 {
     (x - center[0]).mul_add(x - center[0], (y - center[1]).powi(2))
 }
 
+#[cfg(not(target_os = "android"))]
 type Archive = AsyncPmTilesReader<MmapBackend, HashMapCache>;
+#[cfg(not(target_os = "android"))]
 type DetailArchive = AsyncPmTilesReader<HttpBackend, HashMapCache>;
+#[cfg(target_os = "android")]
+type DetailArchive = AsyncPmTilesReader<AndroidHttpBackend, HashMapCache>;
+
+#[cfg(target_os = "android")]
+struct AndroidHttpBackend {
+    agent: ureq::Agent,
+    url: String,
+}
+
+#[cfg(target_os = "android")]
+impl AndroidHttpBackend {
+    fn new(url: String) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(DETAIL_CONNECT_LIMIT))
+            .timeout_global(Some(DETAIL_TRANSFER_LIMIT))
+            .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
+            .build();
+        Self {
+            agent: config.into(),
+            url,
+        }
+    }
+
+    fn read_range(&self, offset: usize, length: usize) -> pmtiles::PmtResult<BackendResponse> {
+        let end = offset
+            .checked_add(length)
+            .and_then(|exclusive| exclusive.checked_sub(1))
+            .ok_or_else(|| pmt_io("PMTiles byte range overflow"))?;
+        let mut response = self
+            .agent
+            .get(&self.url)
+            .header("Range", format!("bytes={offset}-{end}"))
+            .call()
+            .map_err(pmt_io)?;
+        if response.status().as_u16() != 206 {
+            return Err(pmt_io(format!(
+                "PMTiles server ignored byte range with status {}",
+                response.status()
+            )));
+        }
+        let version = response
+            .headers()
+            .get("etag")
+            .or_else(|| response.headers().get("last-modified"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(u64::try_from(length).unwrap_or(u64::MAX).saturating_add(1))
+            .read_to_vec()
+            .map_err(pmt_io)?;
+        if bytes.len() > length {
+            return Err(pmt_io(format!(
+                "PMTiles response exceeded requested {length} bytes"
+            )));
+        }
+        let bytes = Bytes::from(bytes);
+        Ok(match version {
+            Some(version) => BackendResponse::new_with_version(bytes, version),
+            None => BackendResponse::new(bytes),
+        })
+    }
+}
+
+#[cfg(target_os = "android")]
+impl AsyncBackend for AndroidHttpBackend {
+    fn read(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> impl Future<Output = pmtiles::PmtResult<BackendResponse>> + Send {
+        std::future::ready(self.read_range(offset, length))
+    }
+}
+
+#[cfg(target_os = "android")]
+fn pmt_io(error: impl std::fmt::Display) -> PmtError {
+    PmtError::Reading(std::io::Error::other(error.to_string()))
+}
 
 struct Detail {
     source: DetailSource,
@@ -292,7 +407,12 @@ impl Detail {
     }
 
     fn fetch(&self, runtime: &tokio::runtime::Runtime, key: TileKey) -> Result<Option<Bytes>> {
+        #[cfg(not(target_os = "android"))]
         if key.zoom <= LOCAL_MAX_ZOOM || !within_detail_bounds(key) {
+            return Ok(None);
+        }
+        #[cfg(target_os = "android")]
+        if !within_detail_bounds(key) {
             return Ok(None);
         }
         let blade = PathBuf::from(&self.source.generation)
@@ -325,18 +445,26 @@ impl Detail {
         if let Some(archive) = slot.as_ref() {
             return Ok(Arc::clone(archive));
         }
-        let client = pmtiles::reqwest::Client::builder()
-            .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(DETAIL_CONNECT_LIMIT)
-            .timeout(DETAIL_TRANSFER_LIMIT)
-            .build()
-            .context("build basemap detail client")?;
-        let archive = runtime
-            .block_on(DetailArchive::new_with_cached_url(
+        #[cfg(not(target_os = "android"))]
+        let archive = {
+            let client = pmtiles::reqwest::Client::builder()
+                .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(DETAIL_CONNECT_LIMIT)
+                .timeout(DETAIL_TRANSFER_LIMIT)
+                .build()
+                .context("build basemap detail client")?;
+            runtime.block_on(DetailArchive::new_with_cached_url(
                 HashMapCache::default(),
                 client,
                 &self.source.url,
             ))
+        };
+        #[cfg(target_os = "android")]
+        let archive = runtime.block_on(DetailArchive::try_from_cached_source(
+            AndroidHttpBackend::new(self.source.url.clone()),
+            HashMapCache::default(),
+        ));
+        let archive = archive
             .map_err(anyhow::Error::new)
             .context("open remote basemap detail")?;
         let archive = Arc::new(archive);
@@ -358,6 +486,7 @@ fn within_detail_bounds(key: TileKey) -> bool {
     east >= BOUNDS[0] && west <= BOUNDS[2] && north >= BOUNDS[1] && south <= BOUNDS[3]
 }
 
+#[cfg(not(target_os = "android"))]
 fn armory(
     wake: NativeWake,
     archive: PathBuf,
@@ -423,6 +552,59 @@ fn armory(
     }
 }
 
+#[cfg(target_os = "android")]
+fn armory(
+    wake: NativeWake,
+    remote: Detail,
+    commands: Receiver<TileKey>,
+    events: Sender<Event>,
+    worker_count: usize,
+) {
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            send_fault(&wake, &events, None, &error);
+            return;
+        }
+    };
+    if let Err(error) = remote.open(&runtime) {
+        send_fault(&wake, &events, None, &error);
+        return;
+    }
+    if events.send(Event::Ready).is_err() {
+        return;
+    }
+    let _woken = wake.request_foreground_repaint();
+    let remote = Arc::new(remote);
+    let mut workers = Vec::with_capacity(worker_count);
+    for slot in 0..worker_count {
+        let worker_wake = wake.clone();
+        let remote = Arc::clone(&remote);
+        let commands = commands.clone();
+        let worker_events = events.clone();
+        let worker = thread::Builder::new()
+            .name(format!("vector-quarry-{slot}"))
+            .spawn(move || quarry(worker_wake, remote, commands, worker_events));
+        match worker {
+            Ok(worker) => workers.push(worker),
+            Err(error) => {
+                send_fault(
+                    &wake,
+                    &events,
+                    None,
+                    &anyhow::Error::new(error).context("spawn streamed vector quarry"),
+                );
+                break;
+            }
+        }
+    }
+    drop(commands);
+    drop(events);
+    for worker in workers {
+        let _joined = worker.join();
+    }
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -430,6 +612,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .context("build basemap runtime")
 }
 
+#[cfg(not(target_os = "android"))]
 fn quarry(
     wake: NativeWake,
     archive: Arc<Archive>,
@@ -473,6 +656,50 @@ fn quarry(
     }
 }
 
+#[cfg(target_os = "android")]
+fn quarry(
+    wake: NativeWake,
+    remote: Arc<Detail>,
+    commands: Receiver<TileKey>,
+    events: Sender<Event>,
+) {
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            send_fault(&wake, &events, None, &error);
+            return;
+        }
+    };
+    while let Ok(key) = commands.recv() {
+        let bytes = match remote.fetch(&runtime, key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                if events.send(Event::Missing(key)).is_err() {
+                    break;
+                }
+                let _woken = wake.request_foreground_repaint();
+                continue;
+            }
+            Err(error) => {
+                send_fault(&wake, &events, Some(key), &error);
+                continue;
+            }
+        };
+        let event = match decode_tile(key, &bytes) {
+            Ok(tile) => Event::Loaded(Arc::new(tile)),
+            Err(error) => Event::Fault {
+                key: Some(key),
+                message: format!("decode vector tile {key:?}: {error:#}"),
+            },
+        };
+        if events.send(event).is_err() {
+            break;
+        }
+        let _woken = wake.request_foreground_repaint();
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn load_tile(
     runtime: &tokio::runtime::Runtime,
     archive: &Archive,
@@ -1078,6 +1305,7 @@ fn direction(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn purge_partials(directory: &FsPath) -> Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
@@ -1103,7 +1331,7 @@ fn purge_partials(directory: &FsPath) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
     use crate::cache::{CacheClass, CacheManager};

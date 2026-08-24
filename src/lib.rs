@@ -4,11 +4,20 @@ mod air_quality;
 mod app;
 mod application_paths;
 mod basemap;
+#[cfg(not(target_os = "android"))]
+mod basemap_artifact;
+#[cfg(target_os = "android")]
+#[path = "basemap_artifact_android.rs"]
 mod basemap_artifact;
 mod cache;
 mod commands;
+#[cfg(not(target_os = "android"))]
 mod configuration;
 mod decode;
+#[cfg(not(target_os = "android"))]
+mod host;
+#[cfg(target_os = "android")]
+#[path = "host_android.rs"]
 mod host;
 mod library;
 mod library_ui;
@@ -18,6 +27,7 @@ mod persist;
 mod source;
 mod spec;
 mod state;
+#[cfg(not(target_os = "android"))]
 mod tray;
 mod vector_map;
 mod view;
@@ -30,6 +40,7 @@ mod worker;
 /// # Errors
 ///
 /// Returns startup, command, storage, or native-host failures.
+#[cfg(not(target_os = "android"))]
 pub fn run() -> Result<()> {
     cleanse_relative_xdg()?;
     let mut arguments = std::env::args_os().skip(1);
@@ -56,6 +67,7 @@ pub fn run() -> Result<()> {
 /// # Errors
 ///
 /// Returns native-host, storage, or application startup failures.
+#[cfg(not(target_os = "android"))]
 pub fn run_gui() -> Result<()> {
     let ctx = egui::Context::default();
     brass_poolrooms::chrome::install(&ctx);
@@ -65,6 +77,7 @@ pub fn run_gui() -> Result<()> {
     result
 }
 
+#[cfg(not(target_os = "android"))]
 fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let operation = arguments
         .next()
@@ -99,6 +112,7 @@ fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Resul
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn print_help() {
     println!(
         "\
@@ -119,6 +133,7 @@ in the bounded disposable cache."
     );
 }
 
+#[cfg(not(target_os = "android"))]
 fn cleanse_relative_xdg() -> Result<()> {
     const ROOTS: [&str; 5] = [
         "XDG_CACHE_HOME",
@@ -139,7 +154,7 @@ fn cleanse_relative_xdg() -> Result<()> {
     reexec_without(&invalid)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn reexec_without(names: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
@@ -152,7 +167,28 @@ fn reexec_without(names: &[&str]) -> Result<()> {
     Err(command.exec().into())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(target_os = "android")))]
 fn reexec_without(_names: &[&str]) -> Result<()> {
     Ok(())
+}
+
+/// Enter HRRR through Android's `NativeActivity` boundary.
+#[cfg(target_os = "android")]
+pub fn run_android(android: eternalist_apps::AndroidApp) -> Result<()> {
+    let ctx = egui::Context::default();
+    brass_poolrooms::chrome::install(&ctx);
+    host::run(android, ctx)
+}
+
+/// `NativeActivity` entry point discovered by Android's loader.
+#[cfg(target_os = "android")]
+#[allow(
+    unsafe_code,
+    reason = "Android's NativeActivity ABI requires an unmangled exported entry point"
+)]
+#[unsafe(no_mangle)]
+pub extern "Rust" fn android_main(android: eternalist_apps::AndroidApp) {
+    if let Err(error) = run_android(android) {
+        eprintln!("HRRR Android startup failed: {error:#}");
+    }
 }
