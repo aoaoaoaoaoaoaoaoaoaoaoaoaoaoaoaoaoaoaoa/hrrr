@@ -8,6 +8,7 @@ pub enum Unit {
     Fahrenheit,
     Percent,
     MilesPerHour,
+    Hectopascal,
     AirQualityIndex,
 }
 
@@ -19,6 +20,7 @@ impl Unit {
             Self::Fahrenheit => "°F",
             Self::Percent => "%",
             Self::MilesPerHour => "mph",
+            Self::Hectopascal => "hPa",
             Self::AirQualityIndex => "AQI",
         }
     }
@@ -35,6 +37,7 @@ impl Unit {
             Self::Fahrenheit => [1.8, -459.67],
             Self::Percent => [1.0, 0.0],
             Self::MilesPerHour => [2.236_936_3, 0.0],
+            Self::Hectopascal => [0.01, 0.0],
             Self::AirQualityIndex => [1.0, 0.0],
         }
     }
@@ -46,6 +49,7 @@ impl Unit {
             Self::Fahrenheit => format!("{value:.1}{}", self.symbol()),
             Self::Percent => format!("{value:.0}{}", self.symbol()),
             Self::MilesPerHour => format!("{value:.1} {}", self.symbol()),
+            Self::Hectopascal => format!("{value:.0} {}", self.symbol()),
             Self::AirQualityIndex => format!("{value:.0} {}", self.symbol()),
         }
     }
@@ -56,6 +60,7 @@ impl Unit {
             Self::Inch
             | Self::MicrogramPerCubicMetre
             | Self::MilesPerHour
+            | Self::Hectopascal
             | Self::AirQualityIndex => {
                 format!("{value:.0} {}", self.symbol())
             }
@@ -284,6 +289,11 @@ scale_arsenal! {
         CLOUD_COVER,
         CLOUD_CONTOUR,
     )),
+    Pressure => pressure = ScaleFamily::Static(Scale::forge(
+        Unit::Hectopascal,
+        gradient_bins(880, 1080, PRESSURE_ALPHA, &PRESSURE),
+        PRESSURE_CONTOUR,
+    )),
     Wind => wind = ScaleFamily::Static(Scale::forge(
         Unit::MilesPerHour,
         WIND,
@@ -320,6 +330,10 @@ const DEW_POINT_CONTOUR: Contour = Contour {
 const CLOUD_CONTOUR: Contour = Contour {
     width_points: 0.18,
     srgb: [35, 31, 26, 38],
+};
+const PRESSURE_CONTOUR: Contour = Contour {
+    width_points: 0.22,
+    srgb: [35, 31, 26, 58],
 };
 const WIND_CONTOUR: Contour = Contour {
     width_points: 0.22,
@@ -480,6 +494,7 @@ const WIND: [Bin; 11] = [
 ];
 const TEMPERATURE_ALPHA: u8 = 210;
 const DEW_POINT_ALPHA: u8 = 205;
+const PRESSURE_ALPHA: u8 = 152;
 
 #[derive(Clone, Copy)]
 struct ColorStop {
@@ -541,6 +556,18 @@ const DEW_POINT: [ColorStop; 13] = [
     ColorStop::new(90.0, [64, 39, 82]),
 ];
 
+const PRESSURE: [ColorStop; 9] = [
+    ColorStop::new(880.0, [53, 58, 106]),
+    ColorStop::new(940.0, [57, 91, 137]),
+    ColorStop::new(980.0, [76, 126, 151]),
+    ColorStop::new(1000.0, [117, 150, 148]),
+    ColorStop::new(1012.0, [164, 166, 143]),
+    ColorStop::new(1020.0, [188, 164, 116]),
+    ColorStop::new(1040.0, [191, 124, 82]),
+    ColorStop::new(1060.0, [154, 76, 76]),
+    ColorStop::new(1080.0, [91, 48, 71]),
+];
+
 fn gradient_bins(minimum: i16, maximum: i16, alpha: u8, stops: &[ColorStop]) -> Arc<[Bin]> {
     assert!(!stops.is_empty(), "a field ramp needs color stops");
     (minimum..=maximum)
@@ -578,6 +605,7 @@ mod tests {
         assert!((Unit::Inch.convert(25.4) - 1.0).abs() < 1e-6);
         assert!((Unit::Fahrenheit.convert(273.15) - 32.0).abs() < 1e-4);
         assert_eq!(Unit::MicrogramPerCubicMetre.convert(1e-9), 1.0);
+        assert_eq!(Unit::Hectopascal.convert(101_325.0), 1013.25);
     }
 
     #[test]

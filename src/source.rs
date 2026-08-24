@@ -384,9 +384,10 @@ mod tests {
 92:500:d=2026071912:TMP:2 m above ground:2 hour fcst:\n\
 93:800:d=2026071912:DPT:2 m above ground:2 hour fcst:\n\
 94:900:d=2026071912:TCDC:entire atmosphere:2 hour fcst:\n\
-95:1000:d=2026071912:UGRD:10 m above ground:2 hour fcst:\n\
-96:1100:d=2026071912:VGRD:10 m above ground:2 hour fcst:\n\
-97:1200:d=2026071912:VIS:surface:2 hour fcst:\n";
+95:1000:d=2026071912:MSLMA:mean sea level:2 hour fcst:\n\
+96:1100:d=2026071912:UGRD:10 m above ground:2 hour fcst:\n\
+97:1200:d=2026071912:VGRD:10 m above ground:2 hour fcst:\n\
+98:1300:d=2026071912:VIS:surface:2 hour fcst:\n";
 
     #[test]
     fn inventory_selectors_distinguish_products_and_accumulation_windows() -> Result<()> {
@@ -421,12 +422,16 @@ mod tests {
             900..=999
         );
         assert_eq!(
-            select_range(INDEX, key(Product::Wind, Eastward)?)?,
+            select_range(INDEX, key(Product::Pressure, Scalar)?)?,
             1000..=1099
         );
         assert_eq!(
-            select_range(INDEX, key(Product::Wind, Northward)?)?,
+            select_range(INDEX, key(Product::Wind, Eastward)?)?,
             1100..=1199
+        );
+        assert_eq!(
+            select_range(INDEX, key(Product::Wind, Northward)?)?,
+            1200..=1299
         );
 
         const ZERO: &str = "84:200:d=2026071912:APCP:surface:0-0 day acc fcst:\n\

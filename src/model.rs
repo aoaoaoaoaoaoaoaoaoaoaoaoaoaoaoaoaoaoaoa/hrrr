@@ -30,6 +30,11 @@ impl FixedSurfaceLaw {
         scale_factor: 0,
         scaled_value: 0,
     };
+    const MEAN_SEA_LEVEL: Self = Self {
+        kind: 101,
+        scale_factor: 0,
+        scaled_value: 0,
+    };
     const SIGMA_ONE: Self = Self {
         kind: 104,
         scale_factor: 4,
@@ -442,6 +447,14 @@ field_arsenal! {
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":TCDC:entire atmosphere:"),
                 GribLaw::instant(6, 1, FixedSurfaceLaw::ENTIRE_ATMOSPHERE),
+            ),
+        },
+        Pressure {
+            label: "SEA-LEVEL PRESSURE",
+            cache: "pressure",
+            recipe: FieldRecipe::scalar(
+                InventoryLaw::Contains(":MSLMA:mean sea level:"),
+                GribLaw::instant(3, 198, FixedSurfaceLaw::MEAN_SEA_LEVEL),
             ),
         },
     ],
