@@ -103,7 +103,7 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
 }
 
 fn visible(frame: &Frame) -> bool {
-    let pixels = frame.rgba().chunks_exact(4);
+    let pixels = frame.rgba().as_chunks::<4>().0.iter();
     let total = pixels.len();
     let painted = pixels.filter(|pixel| pixel[..3] != [0, 0, 0]).count();
     painted > total / 4

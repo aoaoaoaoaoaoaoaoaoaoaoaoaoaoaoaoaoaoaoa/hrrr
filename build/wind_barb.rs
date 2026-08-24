@@ -86,7 +86,7 @@ fn calm() -> Model {
             Vertex::new(outer_b, V3::new(0.0, 0.0, 1.0)),
             Vertex::new(inner_b, V3::new(0.0, 0.0, 1.0)),
         ]);
-        let outer_normal = V3::new((cos_a + cos_b) * 0.5, (sin_a + sin_b) * 0.5, 0.0).normalized();
+        let outer_normal = V3::new(cos_a.midpoint(cos_b), sin_a.midpoint(sin_b), 0.0).normalized();
         model.quad([
             Vertex::new(V3::new(OUTER * cos_a, OUTER * sin_a, 0.0), outer_normal),
             Vertex::new(V3::new(OUTER * cos_b, OUTER * sin_b, 0.0), outer_normal),

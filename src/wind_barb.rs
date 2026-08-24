@@ -152,7 +152,10 @@ fn stride(field: &FieldGrid, view: Viewport, rect: egui::Rect) -> u32 {
     let center = map::screen_at(view, rect, world_at_grid_fractional(field, i, j));
     let east = map::screen_at(view, rect, world_at_grid_fractional(field, i + 1.0, j));
     let north = map::screen_at(view, rect, world_at_grid_fractional(field, i, j + 1.0));
-    let cell = ((center.distance(east) + center.distance(north)) * 0.5).max(0.01);
+    let cell = center
+        .distance(east)
+        .midpoint(center.distance(north))
+        .max(0.01);
     let demand = (TARGET_PITCH / cell).max(1.0);
     2_u32.pow(demand.log2().ceil().clamp(0.0, 8.0) as u32)
 }
