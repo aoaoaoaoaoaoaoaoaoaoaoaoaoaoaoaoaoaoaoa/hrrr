@@ -1007,10 +1007,21 @@ impl WeatherApp {
         let current = axis.map_or(0, |axis| axis.index_at_or_before(self.session_state.lead));
         let mut step = None;
         let _row = ui.horizontal(|ui| {
+            #[cfg(target_os = "android")]
+            let previous = ui
+                .add_enabled_ui(lead_ready && current > allowed_floor, |ui| {
+                    chrome::Monoglyph::symbol(chrome::Symbol::ArrowLeft).show(ui)
+                })
+                .inner
+                .on_hover_text("Previous valid time");
+            #[cfg(not(target_os = "android"))]
             let previous = ui.add_enabled(
                 lead_ready && current > allowed_floor,
                 egui::Button::new("◀"),
             );
+            #[cfg(target_os = "android")]
+            self.water.monoglyph(&previous);
+            #[cfg(not(target_os = "android"))]
             chrome::tension(ui, &previous);
             if previous.clicked()
                 && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_sub(1)))
@@ -1018,10 +1029,22 @@ impl WeatherApp {
                 step = Some((lead, previous.rect));
             }
             let _lead = ui.label(chrome::section_title(&valid_label));
+            #[cfg(target_os = "android")]
+            let next = ui
+                .add_enabled_ui(
+                    ready_ceiling.is_some_and(|ceiling| lead_ready && current < ceiling),
+                    |ui| chrome::Monoglyph::symbol(chrome::Symbol::ArrowRight).show(ui),
+                )
+                .inner
+                .on_hover_text("Next valid time");
+            #[cfg(not(target_os = "android"))]
             let next = ui.add_enabled(
                 ready_ceiling.is_some_and(|ceiling| lead_ready && current < ceiling),
                 egui::Button::new("▶"),
             );
+            #[cfg(target_os = "android")]
+            self.water.monoglyph(&next);
+            #[cfg(not(target_os = "android"))]
             chrome::tension(ui, &next);
             if next.clicked()
                 && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_add(1)))
@@ -1139,6 +1162,9 @@ impl WeatherApp {
         }
         let _step = ui.horizontal(|ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            #[cfg(target_os = "android")]
+            let older = ui.add_sized([width, 44.0], egui::Button::new("OLDER"));
+            #[cfg(not(target_os = "android"))]
             let older = ui.add_sized([width, 22.0], egui::Button::new("OLDER"));
             if older.clicked() {
                 run_step = run
@@ -1146,17 +1172,21 @@ impl WeatherApp {
                     .ok()
                     .map(|candidate| (RunSelection::Fixed(candidate.id), older.rect));
             }
-            let newer = ui.add_enabled_ui(latest_run.is_some_and(|latest| run.id < latest), |ui| {
-                ui.add_sized([width, 22.0], egui::Button::new("NEWER"))
-            });
-            if newer.inner.clicked() {
+            #[cfg(target_os = "android")]
+            let newer = ui.add_enabled(
+                latest_run.is_some_and(|latest| run.id < latest),
+                egui::Button::new("NEWER").min_size(egui::vec2(width, 44.0)),
+            );
+            #[cfg(not(target_os = "android"))]
+            let newer = ui
+                .add_enabled_ui(latest_run.is_some_and(|latest| run.id < latest), |ui| {
+                    ui.add_sized([width, 22.0], egui::Button::new("NEWER"))
+                })
+                .inner;
+            if newer.clicked() {
                 run_step = run.next().ok().and_then(|candidate| {
-                    latest_run.map(|latest| {
-                        (
-                            RunSelection::Fixed(candidate.id.min(latest)),
-                            newer.inner.rect,
-                        )
-                    })
+                    latest_run
+                        .map(|latest| (RunSelection::Fixed(candidate.id.min(latest)), newer.rect))
                 });
             }
         });

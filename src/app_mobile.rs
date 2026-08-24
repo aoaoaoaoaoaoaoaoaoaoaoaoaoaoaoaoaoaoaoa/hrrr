@@ -33,7 +33,11 @@ impl Default for MobileInspector {
 }
 
 impl MobileInspector {
-    fn show(&mut self, ui: &mut egui::Ui, mut add: impl FnMut(&mut egui::Ui, usize)) {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        mut add: impl FnMut(&mut egui::Ui, usize),
+    ) -> Vec<chrome::MonoglyphResponse> {
         let available = ui.available_rect_before_wrap();
         let columns = ((available.width() / PANEL_WIDTH).floor() as usize).clamp(1, PANELS.len());
         let last_start = PANELS.len().saturating_sub(columns);
@@ -54,6 +58,7 @@ impl MobileInspector {
         let mut requested_expansion = None;
         let first = &mut self.first;
         let swipe = &mut self.swipe;
+        let mut controls = Vec::with_capacity(3);
         let _panel = egui::Panel::show_switched(
             ui,
             &mut expanded_state,
@@ -68,20 +73,25 @@ impl MobileInspector {
                         columns,
                         last_start,
                         &mut requested_expansion,
+                        &mut controls,
                         &mut add,
                     );
                 } else {
-                    let _bar = ui.horizontal_centered(|ui| {
-                        if ui
-                            .add_sized([48.0, 32.0], egui::Button::new("▲"))
-                            .on_hover_text("Raise the Inspector")
-                            .clicked()
-                        {
-                            requested_expansion = Some(true);
-                        }
-                        let _title = ui.label(chrome::section_title(PANELS[*first].to_uppercase()));
-                        let _hint = ui.label(chrome::muted("SWIPE PANELS"));
-                    });
+                    let (_title, raise, _hint) = navigation_row(
+                        ui,
+                        "collapsed",
+                        |ui| ui.label(chrome::section_title(PANELS[*first].to_uppercase())),
+                        |ui| {
+                            chrome::Monoglyph::symbol(chrome::Symbol::ArrowUp)
+                                .show(ui)
+                                .on_hover_text("Raise the Inspector")
+                        },
+                        |ui| ui.label(chrome::muted("SWIPE PANELS")),
+                    );
+                    if raise.clicked() {
+                        requested_expansion = Some(true);
+                    }
+                    controls.push(raise);
                 }
             },
         );
@@ -89,6 +99,7 @@ impl MobileInspector {
         if self.expanded != expanded_state {
             ui.ctx().request_repaint();
         }
+        controls
     }
 }
 
@@ -99,47 +110,64 @@ fn show_expanded(
     columns: usize,
     last_start: usize,
     requested_expansion: &mut Option<bool>,
+    controls: &mut Vec<chrome::MonoglyphResponse>,
     add: &mut impl FnMut(&mut egui::Ui, usize),
 ) {
-    let _navigation = ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                *first > 0,
-                egui::Button::new("◀").min_size(egui::vec2(48.0, 36.0)),
-            )
-            .on_hover_text("Previous Inspector panel")
-            .clicked()
-        {
-            *first = first.saturating_sub(1);
-        }
-        if ui
-            .add_enabled(
-                *first < last_start,
-                egui::Button::new("▶").min_size(egui::vec2(48.0, 36.0)),
-            )
-            .on_hover_text("Next Inspector panel")
-            .clicked()
-        {
-            *first = (*first + 1).min(last_start);
-        }
-        let shown_end = (*first + columns).min(PANELS.len());
-        let _position = ui.label(chrome::section_title(format!(
-            "{} · {}–{} / {}",
+    let shown_end = (*first + columns).min(PANELS.len());
+    let position = if columns == 1 {
+        format!(
+            "{} · {}/{}",
+            PANELS[*first].to_uppercase(),
+            *first + 1,
+            PANELS.len()
+        )
+    } else {
+        format!(
+            "{} · {}–{}/{}",
             PANELS[*first].to_uppercase(),
             *first + 1,
             shown_end,
-            PANELS.len(),
-        )));
-        let _right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_sized([48.0, 36.0], egui::Button::new("▼"))
+            PANELS.len()
+        )
+    };
+    let previous_enabled = *first > 0;
+    let next_enabled = *first < last_start;
+    let (previous, lower, next) = navigation_row(
+        ui,
+        "expanded",
+        |ui| {
+            let previous = ui
+                .add_enabled_ui(previous_enabled, |ui| {
+                    chrome::Monoglyph::symbol(chrome::Symbol::ArrowLeft).show(ui)
+                })
+                .inner
+                .on_hover_text("Previous Inspector panel");
+            let _position = ui.label(chrome::section_title(&position));
+            previous
+        },
+        |ui| {
+            chrome::Monoglyph::symbol(chrome::Symbol::ArrowDown)
+                .show(ui)
                 .on_hover_text("Lower the Inspector")
-                .clicked()
-            {
-                *requested_expansion = Some(false);
-            }
-        });
-    });
+        },
+        |ui| {
+            ui.add_enabled_ui(next_enabled, |ui| {
+                chrome::Monoglyph::symbol(chrome::Symbol::ArrowRight).show(ui)
+            })
+            .inner
+            .on_hover_text("Next Inspector panel")
+        },
+    );
+    if previous.clicked() {
+        step_panel(first, last_start, -1);
+    }
+    if next.clicked() {
+        step_panel(first, last_start, 1);
+    }
+    if lower.clicked() {
+        *requested_expansion = Some(false);
+    }
+    controls.extend([previous, lower, next]);
 
     let body = ui.available_rect_before_wrap();
     let touches = ui.input(|input| {
@@ -172,9 +200,9 @@ fn show_expanded(
                     let delta = pos - origin;
                     if delta.x.abs() >= SWIPE_THRESHOLD && delta.x.abs() > delta.y.abs() * 1.25 {
                         if delta.x < 0.0 {
-                            *first = (*first + 1).min(last_start);
+                            step_panel(first, last_start, 1);
                         } else {
-                            *first = first.saturating_sub(1);
+                            step_panel(first, last_start, -1);
                         }
                         ui.ctx().request_repaint();
                     }
@@ -194,7 +222,6 @@ fn show_expanded(
         }
     }
 
-    ui.spacing_mut().interact_size.y = ui.spacing().interact_size.y.max(44.0);
     ui.columns(columns, |columns_ui| {
         for (column, panel_ui) in columns_ui.iter_mut().enumerate() {
             let panel = *first + column;
@@ -213,6 +240,45 @@ fn show_expanded(
     });
 }
 
+fn navigation_row<L, C, R>(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    left: impl FnOnce(&mut egui::Ui) -> L,
+    center: impl FnOnce(&mut egui::Ui) -> C,
+    right: impl FnOnce(&mut egui::Ui) -> R,
+) -> (L, C, R) {
+    let side = chrome::MechanismSize::Large.side();
+    let (rect, _response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), side), egui::Sense::hover());
+    let mut left_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt((id, "left"))
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let left = left(&mut left_ui);
+    let center_rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+    let mut center_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt((id, "center"))
+            .max_rect(center_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let center = center(&mut center_ui);
+    let mut right_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt((id, "right"))
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    let right = right(&mut right_ui);
+    (left, center, right)
+}
+
+fn step_panel(first: &mut usize, last_start: usize, displacement: isize) {
+    *first = first.saturating_add_signed(displacement).min(last_start);
+}
+
 impl WeatherApp {
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         self.absorb_events(ui.ctx());
@@ -227,8 +293,11 @@ impl WeatherApp {
         self.take_keys(ui.ctx());
 
         let mut inspector = std::mem::take(&mut self.mobile_inspector);
-        inspector.show(ui, |ui, panel| self.mobile_panel(ui, panel));
+        let controls = inspector.show(ui, |ui, panel| self.mobile_panel(ui, panel));
         self.mobile_inspector = inspector;
+        for control in &controls {
+            self.water.monoglyph(control);
+        }
 
         let _center = egui::CentralPanel::default().show(ui, |ui| self.map(ui));
         let mut guide = std::mem::take(&mut self.guide);
