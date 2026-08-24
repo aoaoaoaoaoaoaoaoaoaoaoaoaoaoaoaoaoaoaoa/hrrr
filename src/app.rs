@@ -1,10 +1,9 @@
-#[cfg(not(target_os = "android"))]
-use crate::configuration::Configuration;
 use crate::{
     application_paths::{ApplicationPaths, InstanceGuard},
     basemap::{self, Basemap, TileKey, VectorTile},
     cache::Custodian,
     commands::{self, Edict},
+    configuration::Configuration,
     library::EntryName,
     library_ui::{self, Action as ViewAction, EntryEdit, NameEdit, ShelfEdit},
     map::{self, FieldPaint},
@@ -25,7 +24,8 @@ use brass_poolrooms::{
     water::{Domain, Frame as WaterFrame, Surface, Wetness},
 };
 use egui::Color32;
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "android")]
+use eternalist_apps::settings::MOBILE_WATER_EFFECTS;
 use eternalist_apps::{
     ApplicationHeader, ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideGroup},
@@ -39,6 +39,13 @@ use eternalist_apps::{
     command_guide::{CommandGuide, GuideGesture, GuideGroup},
     commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     responsiveness::DrainBudget,
+    settings::SettingsSheet,
+};
+#[cfg(not(target_os = "android"))]
+use eternalist_apps::{
+    configuration::ConfigurationLedger,
+    panel_navigation::PanelNavigator,
+    settings::{SettingSpec, SettingsFile},
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -445,17 +452,27 @@ impl RangeSurvey {
 struct DirtyState {
     session_state: bool,
     views: bool,
+    #[cfg(target_os = "android")]
+    configuration: bool,
 }
 
 impl DirtyState {
+    #[cfg(not(target_os = "android"))]
     const fn any(self) -> bool {
         self.session_state || self.views
+    }
+
+    #[cfg(target_os = "android")]
+    const fn any(self) -> bool {
+        self.session_state || self.views || self.configuration
     }
 }
 
 struct DurableState {
     session_state: Option<SessionState>,
     views: Option<ViewLibrary>,
+    #[cfg(target_os = "android")]
+    configuration: Option<Configuration>,
 }
 
 impl DurableState {
@@ -471,6 +488,12 @@ impl DurableState {
         {
             faults.push(format!("saved views: {error:#}"));
         }
+        #[cfg(target_os = "android")]
+        if let Some(configuration) = self.configuration
+            && let Err(error) = configuration.save(&paths.config_path())
+        {
+            faults.push(format!("configuration: {error:#}"));
+        }
         if faults.is_empty() {
             Ok(())
         } else {
@@ -483,7 +506,8 @@ pub struct WeatherApp {
     _instance: InstanceGuard,
     #[cfg(not(target_os = "android"))]
     configuration: ConfigurationLedger<Configuration>,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "android")]
+    configuration: Configuration,
     settings: SettingsSheet,
     views: ViewLibrary,
     session_state: SessionState,
@@ -548,9 +572,14 @@ impl WeatherApp {
             paths.config_path(),
             STATE_SETTLE,
         )?;
+        #[cfg(target_os = "android")]
+        let configuration = Configuration::load(&paths.config_path())?;
+        #[cfg(not(target_os = "android"))]
 
         chrome::set_font_scale(ctx, configuration.live().font_scale);
         let mut settings = SettingsSheet::default();
+        #[cfg(target_os = "android")]
+        let settings = SettingsSheet::default();
         #[cfg(not(target_os = "android"))]
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
@@ -582,7 +611,15 @@ impl WeatherApp {
         let run_extents = witnessed_frontier(run).into_iter().collect();
         #[cfg(not(feature = "egui-test"))]
         let run_extents = HashMap::new();
-        let mut water = Surface::new(Wetness::Wet);
+        #[cfg(not(target_os = "android"))]
+        let wetness = Wetness::Wet;
+        #[cfg(target_os = "android")]
+        let wetness = if configuration.water_effects {
+            Wetness::Wet
+        } else {
+            Wetness::Dry
+        };
+        let mut water = Surface::new(wetness);
         {
             let (chemistry, agitation) = water.laboratory_mut();
             chemistry.refract_px = 0.34;
@@ -606,6 +643,8 @@ impl WeatherApp {
         let dirty = DirtyState {
             session_state: migrated_slate,
             views: migrated_views,
+            #[cfg(target_os = "android")]
+            configuration: false,
         };
         if dirty.any() {
             scribe.mark();
@@ -614,7 +653,8 @@ impl WeatherApp {
             _instance: instance,
             #[cfg(not(target_os = "android"))]
             configuration,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(target_os = "android")]
+            configuration,
             settings,
             views,
             session_state,
@@ -2639,10 +2679,18 @@ impl WeatherApp {
         self.scribe.mark();
     }
 
+    #[cfg(target_os = "android")]
+    fn mark_configuration_dirty(&mut self) {
+        self.dirty.configuration = true;
+        self.scribe.mark();
+    }
+
     fn durable_state(&self) -> DurableState {
         DurableState {
             session_state: self.dirty.session_state.then(|| self.session_state.clone()),
             views: self.dirty.views.then(|| self.views.clone()),
+            #[cfg(target_os = "android")]
+            configuration: self.dirty.configuration.then(|| self.configuration.clone()),
         }
     }
 
@@ -2650,6 +2698,8 @@ impl WeatherApp {
         DurableState {
             session_state: Some(self.session_state.clone()),
             views: Some(self.views.clone()),
+            #[cfg(target_os = "android")]
+            configuration: Some(self.configuration.clone()),
         }
     }
 
@@ -2658,6 +2708,8 @@ impl WeatherApp {
             self.dirty = DirtyState {
                 session_state: true,
                 views: true,
+                #[cfg(target_os = "android")]
+                configuration: true,
             };
             self.status = format!("state save failed: {message}");
         }

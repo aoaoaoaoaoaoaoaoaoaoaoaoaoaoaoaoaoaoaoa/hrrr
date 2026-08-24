@@ -11,7 +11,6 @@ mod basemap_artifact;
 mod basemap_artifact;
 mod cache;
 mod commands;
-#[cfg(not(target_os = "android"))]
 mod configuration;
 mod decode;
 #[cfg(not(target_os = "android"))]

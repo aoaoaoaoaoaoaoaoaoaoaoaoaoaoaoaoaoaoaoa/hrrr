@@ -1,21 +1,26 @@
-use crate::{
-    persist::{load_toml, save_toml},
-    view::ViewLibrary,
-};
+use crate::persist::{load_toml, save_toml};
+#[cfg(not(target_os = "android"))]
+use crate::view::ViewLibrary;
 use anyhow::Result;
 use brass_poolrooms::chrome::FontScale;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(target_os = "android", derive(Default))]
 #[serde(default, deny_unknown_fields)]
 pub struct Configuration {
+    #[cfg(not(target_os = "android"))]
     pub close_minimizes: bool,
     pub font_scale: FontScale,
+    #[cfg(target_os = "android")]
+    pub water_effects: bool,
 }
 
+#[cfg(not(target_os = "android"))]
 impl eternalist_apps::configuration::Configuration for Configuration {}
 
+#[cfg(not(target_os = "android"))]
 impl Default for Configuration {
     fn default() -> Self {
         Self {
@@ -25,6 +30,7 @@ impl Default for Configuration {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct ConfigurationWire {
@@ -34,6 +40,12 @@ struct ConfigurationWire {
 }
 
 impl Configuration {
+    #[cfg(target_os = "android")]
+    pub fn load(path: &Path) -> Result<Self> {
+        Ok(load_toml(path, "mobile configuration")?.unwrap_or_default())
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn migrate_legacy_views(path: &Path) -> Result<Option<ViewLibrary>> {
         let wire = match load_toml::<ConfigurationWire>(path, "legacy configuration") {
             Ok(Some(wire)) => wire,
@@ -50,11 +62,12 @@ impl Configuration {
         Ok(Some(views))
     }
 
-    fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(&self, path: &Path) -> Result<()> {
         save_toml(self, path, "serialize configuration")
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Default for ConfigurationWire {
     fn default() -> Self {
         Self {

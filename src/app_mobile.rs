@@ -283,8 +283,10 @@ impl WeatherApp {
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         self.absorb_events(ui.ctx());
         self.absorb_persistence();
+        let settings_invoked = self.settings.take_shortcut(ui.ctx());
         let guide_invoked = self.guide.take_shortcuts(ui.ctx());
-        if !guide_invoked
+        if !settings_invoked
+            && !guide_invoked
             && let Some(dispatch) =
                 commands::canon().route(ui.ctx(), &[], |edict| self.edict_status(edict))
         {
@@ -310,6 +312,7 @@ impl WeatherApp {
             &GUIDE_GROUPS,
         );
         self.guide = guide;
+        self.show_mobile_settings(ui.ctx());
     }
 
     fn mobile_panel(&mut self, ui: &mut egui::Ui, panel: usize) {
@@ -332,13 +335,12 @@ impl WeatherApp {
     }
 
     fn mobile_application_panel(&mut self, ui: &mut egui::Ui) {
-        let _header = ui.horizontal(|ui| {
-            let _title = ui.label(chrome::title("HRRR").size(20.0));
-            let _actions = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let help = self.guide.activator(ui).on_hover_text("Open command guide");
-                self.water.monoglyph(&help);
-            });
-        });
+        let _header = ApplicationHeader::new("HRRR").show(
+            ui,
+            &mut self.guide,
+            &mut self.settings,
+            &mut self.water,
+        );
         ui.add_space(8.0);
         let _identity = ui.label(chrome::muted(
             "HIGH-RESOLUTION RAPID REFRESH\nNOAA FORECAST FIELD VIEWER",
@@ -347,6 +349,32 @@ impl WeatherApp {
         let _navigation = ui.label(chrome::muted(
             "SWIPE LEFT OR RIGHT FOR THE NEXT PANEL. SCROLL VERTICALLY WITHIN A PANEL.",
         ));
+    }
+
+    fn show_mobile_settings(&mut self, ctx: &egui::Context) {
+        let mut water_effects = self.configuration.water_effects;
+        let mut changed = false;
+        self.settings
+            .show_managed(ctx, &mut self.water, |settings| {
+                settings.group("PRESENTATION");
+                changed |= settings.boolean(MOBILE_WATER_EFFECTS, &mut water_effects);
+            });
+        if !changed {
+            return;
+        }
+        self.configuration.water_effects = water_effects;
+        self.water.set_wetness(if water_effects {
+            Wetness::Wet
+        } else {
+            Wetness::Dry
+        });
+        if water_effects {
+            "water effects enabled · battery use will increase"
+        } else {
+            "water effects disabled"
+        }
+        .clone_into(&mut self.status);
+        self.mark_configuration_dirty();
     }
 
     fn mobile_field_panel(&mut self, ui: &mut egui::Ui) {

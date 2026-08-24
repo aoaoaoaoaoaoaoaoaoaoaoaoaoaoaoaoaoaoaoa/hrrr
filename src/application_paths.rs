@@ -13,7 +13,6 @@ pub const PRODUCT: ProductIdentity = ProductIdentity::declare(
 
 #[derive(Clone, Debug)]
 pub struct ApplicationPaths {
-    #[cfg(not(target_os = "android"))]
     pub config: PathBuf,
     pub state: PathBuf,
     pub data: PathBuf,
@@ -47,10 +46,16 @@ impl ApplicationPaths {
         let root = android
             .internal_data_path()
             .context("Android did not provide HRRR's private data directory")?;
+        let config = root.join("config");
         let state = root.join("state");
         let data = root.join("data");
         let cache = CacheManager::standard(root.join("cache"));
-        Ok(Self { state, data, cache })
+        Ok(Self {
+            config,
+            state,
+            data,
+            cache,
+        })
     }
 
     pub fn session_state_path(&self) -> PathBuf {
@@ -59,7 +64,6 @@ impl ApplicationPaths {
         self.state.join("slate.toml")
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn config_path(&self) -> PathBuf {
         self.config.join("config.toml")
     }
