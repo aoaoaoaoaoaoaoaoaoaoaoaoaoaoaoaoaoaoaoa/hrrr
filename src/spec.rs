@@ -103,24 +103,37 @@ impl Scale {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SmokeRegime {
+pub enum RangeRegime {
     #[default]
-    Light,
-    Heavy,
+    Fine,
+    Broad,
 }
 
-impl SmokeRegime {
-    const HEAVY_ONSET: f32 = 40.0;
-    const LIGHT_RETURN: f32 = 20.0;
-
-    pub fn reckon(self, visible_peak: Option<f32>) -> Self {
+impl RangeRegime {
+    fn reckon(self, visible_peak: Option<f32>, gate: RangeGate) -> Self {
         let Some(visible_peak) = visible_peak else {
             return self;
         };
         match self {
-            Self::Light if visible_peak > Self::HEAVY_ONSET => Self::Heavy,
-            Self::Heavy if visible_peak < Self::LIGHT_RETURN => Self::Light,
+            Self::Fine if visible_peak > gate.broad_onset => Self::Broad,
+            Self::Broad if visible_peak < gate.fine_return => Self::Fine,
             _ => self,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RangeGate {
+    broad_onset: f32,
+    fine_return: f32,
+}
+
+impl RangeGate {
+    const fn forge(broad_onset: f32, fine_return: f32) -> Self {
+        assert!(fine_return < broad_onset);
+        Self {
+            broad_onset,
+            fine_return,
         }
     }
 }
@@ -152,18 +165,36 @@ impl TemperatureSeason {
 #[derive(Clone, Debug)]
 enum ScaleFamily {
     Static(Scale),
-    Smoke { light: Scale, heavy: Scale },
-    Temperature { summer: Scale, winter: Scale },
+    Adaptive {
+        fine: Scale,
+        broad: Scale,
+        gate: RangeGate,
+    },
+    Seasonal {
+        summer: Scale,
+        winter: Scale,
+    },
 }
 
 impl ScaleFamily {
-    fn resolve(&self, smoke: SmokeRegime, temperature: TemperatureSeason) -> &Scale {
-        match (self, smoke, temperature) {
+    const fn adaptive(&self) -> bool {
+        matches!(self, Self::Adaptive { .. })
+    }
+
+    fn reckon(&self, settled: RangeRegime, raw_peak: Option<f32>) -> RangeRegime {
+        let Self::Adaptive { fine, gate, .. } = self else {
+            return settled;
+        };
+        settled.reckon(raw_peak.map(|raw| fine.unit.convert(raw)), *gate)
+    }
+
+    fn resolve(&self, regime: RangeRegime, temperature: TemperatureSeason) -> &Scale {
+        match (self, regime, temperature) {
             (Self::Static(scale), _, _) => scale,
-            (Self::Smoke { light, .. }, SmokeRegime::Light, _) => light,
-            (Self::Smoke { heavy, .. }, SmokeRegime::Heavy, _) => heavy,
-            (Self::Temperature { summer, .. }, _, TemperatureSeason::Summer) => summer,
-            (Self::Temperature { winter, .. }, _, TemperatureSeason::Winter) => winter,
+            (Self::Adaptive { fine, .. }, RangeRegime::Fine, _) => fine,
+            (Self::Adaptive { broad, .. }, RangeRegime::Broad, _) => broad,
+            (Self::Seasonal { summer, .. }, _, TemperatureSeason::Summer) => summer,
+            (Self::Seasonal { winter, .. }, _, TemperatureSeason::Winter) => winter,
         }
     }
 }
@@ -184,16 +215,32 @@ macro_rules! scale_arsenal {
         }
 
         impl ScaleAtlas {
-            pub fn get(
-                &self,
-                product: Product,
-                smoke: SmokeRegime,
-                temperature: TemperatureSeason,
-            ) -> &Scale {
+            fn family(&self, product: Product) -> &ScaleFamily {
                 match product {
                     $(Product::$product => &self.$field),+
                 }
-                .resolve(smoke, temperature)
+            }
+
+            pub fn adaptive(&self, product: Product) -> bool {
+                self.family(product).adaptive()
+            }
+
+            pub fn reckon(
+                &self,
+                product: Product,
+                settled: RangeRegime,
+                raw_peak: Option<f32>,
+            ) -> RangeRegime {
+                self.family(product).reckon(settled, raw_peak)
+            }
+
+            pub fn get(
+                &self,
+                product: Product,
+                regime: RangeRegime,
+                temperature: TemperatureSeason,
+            ) -> &Scale {
+                self.family(product).resolve(regime, temperature)
             }
         }
     };
@@ -210,11 +257,12 @@ scale_arsenal! {
         &QPF[..QPF_HOURLY_BINS],
         PRECIPITATION_CONTOUR,
     )),
-    Smoke => smoke = ScaleFamily::Smoke {
-        light: Scale::forge(Unit::MicrogramPerCubicMetre, LIGHT_SMOKE, SMOKE_CONTOUR),
-        heavy: Scale::forge(Unit::MicrogramPerCubicMetre, HEAVY_SMOKE, SMOKE_CONTOUR),
+    Smoke => smoke = ScaleFamily::Adaptive {
+        fine: Scale::forge(Unit::MicrogramPerCubicMetre, FINE_SMOKE, SMOKE_CONTOUR),
+        broad: Scale::forge(Unit::MicrogramPerCubicMetre, BROAD_SMOKE, SMOKE_CONTOUR),
+        gate: RangeGate::forge(40.0, 20.0),
     },
-    Temperature => temperature = ScaleFamily::Temperature {
+    Temperature => temperature = ScaleFamily::Seasonal {
         summer: Scale::forge(
             Unit::Fahrenheit,
             gradient_bins(40, 120, TEMPERATURE_ALPHA, &SUMMER_TEMPERATURE),
@@ -241,11 +289,15 @@ scale_arsenal! {
         WIND,
         WIND_CONTOUR,
     )),
-    AirQuality => air_quality = ScaleFamily::Static(Scale::forge(
-        Unit::AirQualityIndex,
-        AIR_QUALITY,
-        AIR_QUALITY_CONTOUR,
-    )),
+    AirQuality => air_quality = ScaleFamily::Adaptive {
+        fine: Scale::forge(
+            Unit::AirQualityIndex,
+            atmospheric_gradient_bins(0, 100, 5, &AIR_QUALITY_RAMP),
+            AIR_QUALITY_CONTOUR,
+        ),
+        broad: Scale::forge(Unit::AirQualityIndex, BROAD_AIR_QUALITY, AIR_QUALITY_CONTOUR),
+        gate: RangeGate::forge(100.0, 75.0),
+    },
 }
 
 const VOID: [u8; 4] = [10, 10, 8, 0];
@@ -298,26 +350,108 @@ const QPF: [Bin; 18] = [
     Bin::new(8.00, [237, 156, 78, 244]),
     Bin::new(10.0, [247, 207, 126, 247]),
 ];
-const SMOKE_0: Bin = Bin::new(0.0, VOID);
-const SMOKE_0_1: Bin = Bin::new(0.1, [132, 161, 179, 58]);
-const SMOKE_0_25: Bin = Bin::new(0.25, [112, 151, 176, 69]);
-const SMOKE_0_5: Bin = Bin::new(0.5, [92, 140, 169, 81]);
-const SMOKE_1: Bin = Bin::new(1.0, [73, 127, 158, 95]);
-const SMOKE_2: Bin = Bin::new(2.0, [76, 132, 144, 109]);
-const SMOKE_5: Bin = Bin::new(5.0, [142, 145, 102, 126]);
-const SMOKE_10: Bin = Bin::new(10.0, [195, 155, 78, 148]);
-const SMOKE_20: Bin = Bin::new(20.0, [219, 112, 58, 176]);
-const SMOKE_40: Bin = Bin::new(40.0, [194, 67, 56, 201]);
-const SMOKE_80: Bin = Bin::new(80.0, [147, 52, 85, 221]);
-const SMOKE_160: Bin = Bin::new(160.0, [91, 48, 103, 236]);
-const SMOKE_320: Bin = Bin::new(320.0, [39, 31, 42, 246]);
-const LIGHT_SMOKE: [Bin; 10] = [
-    SMOKE_0, SMOKE_0_1, SMOKE_0_25, SMOKE_0_5, SMOKE_1, SMOKE_2, SMOKE_5, SMOKE_10, SMOKE_20,
-    SMOKE_40,
+const ATMOSPHERIC_RAMP: [[u8; 4]; 13] = [
+    VOID,
+    [132, 161, 179, 58],
+    [112, 151, 176, 69],
+    [92, 140, 169, 81],
+    [73, 127, 158, 95],
+    [76, 132, 144, 109],
+    [142, 145, 102, 126],
+    [195, 155, 78, 148],
+    [219, 112, 58, 176],
+    [194, 67, 56, 201],
+    [147, 52, 85, 221],
+    [91, 48, 103, 236],
+    [39, 31, 42, 246],
 ];
-const HEAVY_SMOKE: [Bin; 9] = [
-    SMOKE_0, SMOKE_1, SMOKE_5, SMOKE_10, SMOKE_20, SMOKE_40, SMOKE_80, SMOKE_160, SMOKE_320,
+const FINE_ATMOSPHERIC_TONES: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const BROAD_ATMOSPHERIC_TONES: [usize; 9] = [0, 4, 6, 7, 8, 9, 10, 11, 12];
+const FINE_SMOKE: [Bin; 10] = atmospheric_bins(
+    [0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 40.0],
+    FINE_ATMOSPHERIC_TONES,
+);
+const BROAD_SMOKE: [Bin; 9] = atmospheric_bins(
+    [0.0, 1.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0],
+    BROAD_ATMOSPHERIC_TONES,
+);
+const BROAD_AIR_QUALITY: [Bin; 9] = atmospheric_bins(
+    [0.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0],
+    BROAD_ATMOSPHERIC_TONES,
+);
+
+const fn atmospheric_bins<const N: usize>(ceilings: [f32; N], tones: [usize; N]) -> [Bin; N] {
+    let mut bins = [Bin::new(0.0, VOID); N];
+    let mut slot = 0;
+    while slot < N {
+        bins[slot] = Bin::new(ceilings[slot], ATMOSPHERIC_RAMP[tones[slot]]);
+        slot += 1;
+    }
+    bins
+}
+
+#[derive(Clone, Copy)]
+struct RampAnchor {
+    value: f32,
+    tone: f32,
+}
+
+impl RampAnchor {
+    const fn new(value: f32, tone: u8) -> Self {
+        Self {
+            value,
+            tone: tone as f32,
+        }
+    }
+}
+
+const AIR_QUALITY_RAMP: [RampAnchor; 5] = [
+    RampAnchor::new(0.0, 0),
+    RampAnchor::new(25.0, 4),
+    RampAnchor::new(50.0, 6),
+    RampAnchor::new(75.0, 7),
+    RampAnchor::new(100.0, 8),
 ];
+
+fn atmospheric_gradient_bins(
+    minimum: i16,
+    maximum: i16,
+    step: usize,
+    anchors: &[RampAnchor],
+) -> Arc<[Bin]> {
+    assert!(!anchors.is_empty(), "an atmospheric ramp needs anchors");
+    (minimum..=maximum)
+        .step_by(step)
+        .map(|value| {
+            let ceiling = f32::from(value);
+            Bin::new(ceiling, atmospheric_gradient_color(ceiling, anchors))
+        })
+        .collect()
+}
+
+fn atmospheric_gradient_color(value: f32, anchors: &[RampAnchor]) -> [u8; 4] {
+    let mut lo = anchors[0];
+    for &hi in &anchors[1..] {
+        if value <= hi.value {
+            let phase = ((value - lo.value) / (hi.value - lo.value)).clamp(0.0, 1.0);
+            return atmospheric_tone(lo.tone + (hi.tone - lo.tone) * phase);
+        }
+        lo = hi;
+    }
+    atmospheric_tone(lo.tone)
+}
+
+fn atmospheric_tone(tone: f32) -> [u8; 4] {
+    let lo = tone.floor().max(0.0) as usize;
+    let hi = tone.ceil().min((ATMOSPHERIC_RAMP.len() - 1) as f32) as usize;
+    let phase = tone.fract();
+    std::array::from_fn(|channel| {
+        (f32::from(ATMOSPHERIC_RAMP[lo][channel])
+            + (f32::from(ATMOSPHERIC_RAMP[hi][channel]) - f32::from(ATMOSPHERIC_RAMP[lo][channel]))
+                * phase)
+            .round() as u8
+    })
+}
 const CLOUD_COVER: [Bin; 11] = [
     Bin::new(0.0, VOID),
     Bin::new(10.0, [91, 122, 143, 34]),
@@ -343,15 +477,6 @@ const WIND: [Bin; 11] = [
     Bin::new(50.0, [188, 69, 67, 204]),
     Bin::new(60.0, [137, 55, 86, 222]),
     Bin::new(80.0, [69, 43, 74, 238]),
-];
-const AIR_QUALITY: [Bin; 7] = [
-    Bin::new(0.0, [0, 228, 0, 76]),
-    Bin::new(50.0, [0, 228, 0, 76]),
-    Bin::new(100.0, [255, 255, 0, 112]),
-    Bin::new(150.0, [255, 126, 0, 148]),
-    Bin::new(200.0, [255, 0, 0, 176]),
-    Bin::new(300.0, [143, 63, 151, 198]),
-    Bin::new(500.0, [126, 0, 35, 218]),
 ];
 const TEMPERATURE_ALPHA: u8 = 210;
 const DEW_POINT_ALPHA: u8 = 205;
@@ -459,7 +584,7 @@ mod tests {
     fn defaults_are_strictly_ordered() {
         let atlas = ScaleAtlas::default();
         for product in Product::ALL {
-            for regime in [SmokeRegime::Light, SmokeRegime::Heavy] {
+            for regime in [RangeRegime::Fine, RangeRegime::Broad] {
                 for season in [TemperatureSeason::Summer, TemperatureSeason::Winter] {
                     let scale = atlas.get(product, regime, season);
                     assert!(
@@ -474,35 +599,80 @@ mod tests {
     }
 
     #[test]
-    fn smoke_regimes_are_fixed_consistent_and_hysteretic() {
+    fn adaptive_ranges_preserve_one_color_law() {
         let atlas = ScaleAtlas::default();
-        let light = atlas.get(
-            Product::Smoke,
-            SmokeRegime::Light,
-            TemperatureSeason::Summer,
-        );
-        let heavy = atlas.get(
-            Product::Smoke,
-            SmokeRegime::Heavy,
-            TemperatureSeason::Summer,
-        );
-        for shared in [0.0, 1.0, 5.0, 10.0, 20.0, 40.0] {
-            let light_color = light
-                .bins
-                .iter()
-                .find(|bin| bin.ceiling == shared)
-                .map(|bin| bin.srgb);
-            let heavy_color = heavy
-                .bins
-                .iter()
-                .find(|bin| bin.ceiling == shared)
-                .map(|bin| bin.srgb);
-            assert_eq!(light_color, heavy_color);
+        let season = TemperatureSeason::Summer;
+        for (product, shared, onset, retreat) in [
+            (Product::Smoke, [0.0, 5.0, 10.0, 20.0, 40.0], 40.0, 20.0),
+            (
+                Product::AirQuality,
+                [0.0, 25.0, 50.0, 75.0, 100.0],
+                100.0,
+                75.0,
+            ),
+        ] {
+            let fine = atlas.get(product, RangeRegime::Fine, season);
+            let broad = atlas.get(product, RangeRegime::Broad, season);
+            for value in shared {
+                let color = |scale: &Scale| {
+                    scale
+                        .bins
+                        .iter()
+                        .find(|bin| bin.ceiling == value)
+                        .map(|bin| bin.srgb)
+                };
+                assert_eq!(color(fine), color(broad));
+            }
+            let [gain, bias] = fine.unit.affine();
+            let raw = |value: f32| (value - bias) / gain;
+            assert_eq!(
+                atlas.reckon(product, RangeRegime::Fine, Some(raw(onset))),
+                RangeRegime::Fine
+            );
+            assert_eq!(
+                atlas.reckon(product, RangeRegime::Fine, Some(raw(onset + 0.1))),
+                RangeRegime::Broad
+            );
+            assert_eq!(
+                atlas.reckon(product, RangeRegime::Broad, Some(raw(retreat))),
+                RangeRegime::Broad
+            );
+            assert_eq!(
+                atlas.reckon(product, RangeRegime::Broad, Some(raw(retreat - 0.1))),
+                RangeRegime::Fine
+            );
         }
-        assert_eq!(SmokeRegime::Light.reckon(Some(40.0)), SmokeRegime::Light);
-        assert_eq!(SmokeRegime::Light.reckon(Some(40.1)), SmokeRegime::Heavy);
-        assert_eq!(SmokeRegime::Heavy.reckon(Some(20.0)), SmokeRegime::Heavy);
-        assert_eq!(SmokeRegime::Heavy.reckon(Some(19.9)), SmokeRegime::Light);
+
+        let colors = |product, regime| {
+            atlas
+                .get(product, regime, season)
+                .bins
+                .iter()
+                .map(|bin| bin.srgb)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            colors(Product::Smoke, RangeRegime::Broad),
+            colors(Product::AirQuality, RangeRegime::Broad)
+        );
+        let fine_air = atlas.get(Product::AirQuality, RangeRegime::Fine, season);
+        assert_eq!(
+            fine_air
+                .bins
+                .iter()
+                .map(|bin| bin.ceiling)
+                .collect::<Vec<_>>(),
+            (0..=100)
+                .step_by(5)
+                .map(|value| value as f32)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            fine_air
+                .bins
+                .windows(2)
+                .all(|pair| pair[0].srgb != pair[1].srgb)
+        );
     }
 
     #[test]
@@ -510,12 +680,12 @@ mod tests {
         let atlas = ScaleAtlas::default();
         let run = atlas.get(
             Product::QpfRun,
-            SmokeRegime::Light,
+            RangeRegime::Fine,
             TemperatureSeason::Summer,
         );
         let hour = atlas.get(
             Product::QpfHour,
-            SmokeRegime::Light,
+            RangeRegime::Fine,
             TemperatureSeason::Summer,
         );
         assert_eq!(run.bins.len(), 18);

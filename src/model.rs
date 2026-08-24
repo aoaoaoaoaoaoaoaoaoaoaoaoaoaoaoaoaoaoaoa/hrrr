@@ -522,6 +522,104 @@ impl Product {
             .clamp(0, i16::from(AqmBundle::DAY_SLOTS - 1));
         u8::try_from(slot).ok()
     }
+
+    pub(crate) fn lead_axis(self, run: ForecastRun) -> Result<LeadAxis> {
+        LeadAxis::forge(run, self)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LeadAxis {
+    run: ForecastRun,
+    product: Product,
+    horizon: LeadHour,
+}
+
+#[derive(Clone, Copy)]
+struct LeadDetent {
+    valid_from: LeadHour,
+    valid_through: LeadHour,
+}
+
+impl LeadAxis {
+    fn forge(run: ForecastRun, product: Product) -> Result<Self> {
+        Ok(Self {
+            run,
+            product,
+            horizon: product.horizon(run)?,
+        })
+    }
+
+    fn detents(self) -> impl Iterator<Item = LeadDetent> {
+        (0..=self.horizon.get()).filter_map(move |hour| {
+            let valid_from = LeadHour(hour);
+            let valid_through = self.product.canonical_lead(self.run, valid_from)?;
+            let repeats_prior = hour
+                .checked_sub(1)
+                .map(LeadHour)
+                .and_then(|prior| self.product.canonical_lead(self.run, prior))
+                == Some(valid_through);
+            (!repeats_prior).then_some(LeadDetent {
+                valid_from,
+                valid_through,
+            })
+        })
+    }
+
+    pub(crate) fn detent_count(self) -> u16 {
+        self.detents().fold(0_u16, |count, _detent| count + 1)
+    }
+
+    pub(crate) fn index_at_or_before(self, lead: LeadHour) -> u16 {
+        self.detents()
+            .take_while(|detent| detent.valid_from <= lead)
+            .fold(0_u16, |count, _detent| count + 1)
+            .saturating_sub(1)
+    }
+
+    pub(crate) fn index_at_or_after(self, lead: LeadHour) -> u16 {
+        self.detents()
+            .zip(0_u16..)
+            .find_map(|(detent, index)| (detent.valid_from >= lead).then_some(index))
+            .unwrap_or_else(|| self.detent_count().saturating_sub(1))
+    }
+
+    pub(crate) fn at(self, index: u16) -> Option<LeadHour> {
+        self.detents()
+            .nth(usize::from(index))
+            .map(|detent| detent.valid_from)
+    }
+
+    pub(crate) fn ready_ceiling(self, frontier: LeadHour) -> Option<u16> {
+        self.detents()
+            .take_while(|detent| detent.valid_through <= frontier)
+            .fold(0_u16, |count, _detent| count + 1)
+            .checked_sub(1)
+    }
+
+    pub(crate) fn snap(self, lead: LeadHour, frontier: LeadHour) -> Option<LeadHour> {
+        self.detents()
+            .take_while(|detent| detent.valid_from <= lead)
+            .filter(|detent| detent.valid_through <= frontier)
+            .last()
+            .map(|detent| detent.valid_from)
+    }
+
+    pub(crate) fn ready(self, lead: LeadHour, frontier: LeadHour) -> bool {
+        self.detents()
+            .any(|detent| detent.valid_from == lead && detent.valid_through <= frontier)
+    }
+
+    pub(crate) fn local_label(self, lead: LeadHour) -> Result<String> {
+        if self
+            .detents()
+            .any(|detent| detent.valid_through.get() - detent.valid_from.get() >= 23)
+        {
+            self.run.id.valid_local_date_label(lead)
+        } else {
+            self.run.valid_local_label(lead)
+        }
+    }
 }
 
 fn aqm_day_zero(run: RunId) -> Result<i8> {
@@ -837,6 +935,14 @@ impl RunId {
             .valid_timestamp(lead)?
             .to_zoned(TimeZone::system())
             .strftime("%a %b %e · %I:%M %p %Z")
+            .to_string())
+    }
+
+    fn valid_local_date_label(self, lead: LeadHour) -> Result<String> {
+        Ok(self
+            .valid_timestamp(lead)?
+            .to_zoned(TimeZone::system())
+            .strftime("%a %b %e")
             .to_string())
     }
 }
@@ -1653,6 +1759,20 @@ mod tests {
         let aqm = ForecastRun::forge(ForecastSystem::Aqm, run);
         assert_eq!(Product::AirQuality.horizon(aqm)?.get(), 64);
         assert_eq!(Product::AirQuality.horizon(aqm.previous()?)?.get(), 70);
+        let axis = Product::AirQuality.lead_axis(aqm)?;
+        assert_eq!(
+            (0..axis.detent_count())
+                .filter_map(|index| axis.at(index).map(LeadHour::get))
+                .collect::<Vec<_>>(),
+            [0, 17, 41]
+        );
+        let prior_axis = Product::AirQuality.lead_axis(aqm.previous()?)?;
+        assert_eq!(
+            (0..prior_axis.detent_count())
+                .filter_map(|index| prior_axis.at(index).map(LeadHour::get))
+                .collect::<Vec<_>>(),
+            [0, 23, 47]
+        );
         assert_eq!(aqm.previous()?.id, run.hours_ago(6));
         assert_eq!(aqm.previous()?.previous()?.id, run.hours_ago(24));
         assert_eq!(

@@ -11,7 +11,7 @@ use crate::{
         FieldGrid, ForecastRun, ForecastSystem, FrameKey, LeadHour, MercatorPoint, Product, RunId,
         RunSelection, Viewport,
     },
-    spec::{Scale, ScaleAtlas, SmokeRegime, TemperatureSeason},
+    spec::{RangeRegime, Scale, ScaleAtlas, TemperatureSeason},
     state::SessionState,
     vector_map::VectorPaint,
     view::{SavedView, ViewLibrary, ViewSlot},
@@ -157,15 +157,16 @@ impl TileRejection {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-struct SmokeScene {
+struct RangeScene {
     key: FrameKey,
     viewport: Viewport,
     extent: [f32; 2],
 }
 
 #[derive(Default)]
-struct SmokeSurvey {
-    scene: Option<SmokeScene>,
+struct RangeSurvey {
+    product: Option<Product>,
+    scene: Option<RangeScene>,
     peak: Option<f32>,
 }
 
@@ -213,6 +214,13 @@ impl<S: Copy + Eq> ScaleLatch<S> {
 
     fn arrest(&mut self) {
         self.contender = None;
+    }
+
+    fn reset(&mut self)
+    where
+        S: Default,
+    {
+        *self = Self::default();
     }
 }
 
@@ -390,7 +398,17 @@ struct PlaqueResponse {
     rect: egui::Rect,
 }
 
-impl SmokeSurvey {
+impl RangeSurvey {
+    fn select(&mut self, product: Product) -> bool {
+        if self.product == Some(product) {
+            return false;
+        }
+        self.product = Some(product);
+        self.scene = None;
+        self.peak = None;
+        true
+    }
+
     fn discern(
         &mut self,
         key: FrameKey,
@@ -398,7 +416,7 @@ impl SmokeSurvey {
         viewport: Viewport,
         rect: egui::Rect,
     ) -> Option<f32> {
-        let scene = SmokeScene {
+        let scene = RangeScene {
             key,
             viewport,
             extent: [rect.width(), rect.height()],
@@ -486,8 +504,8 @@ pub struct WeatherApp {
     shelf_edit: Option<ShelfEdit>,
     entry_edit: Option<EntryEdit>,
     scales: ScaleAtlas,
-    smoke_scale: ScaleLatch<SmokeRegime>,
-    smoke_survey: SmokeSurvey,
+    range_scale: ScaleLatch<RangeRegime>,
+    range_survey: RangeSurvey,
     scale_bar: map::ScaleBar,
     water: Surface,
     scribe: SettledScribe<DurableState>,
@@ -605,8 +623,8 @@ impl WeatherApp {
             shelf_edit: None,
             entry_edit: None,
             scales: ScaleAtlas::default(),
-            smoke_scale: ScaleLatch::default(),
-            smoke_survey: SmokeSurvey::default(),
+            range_scale: ScaleLatch::default(),
+            range_survey: RangeSurvey::default(),
             scale_bar: map::ScaleBar::default(),
             water,
             scribe,
@@ -895,13 +913,15 @@ impl WeatherApp {
         let run_label = run
             .local_label()
             .unwrap_or_else(|_| "invalid cycle time".to_owned());
-        let valid_label = run
-            .valid_local_label(self.session_state.lead)
-            .unwrap_or_else(|_| "invalid valid time".to_owned());
         let _run = ui.label(chrome::eyebrow(format!("RUN · {run_label}")));
         ui.add_space(3.0);
 
         let product = self.session_state.overlay.active();
+        let axis = product.and_then(|product| product.lead_axis(run).ok());
+        let valid_label = axis
+            .and_then(|axis| axis.local_label(self.session_state.lead).ok())
+            .or_else(|| run.valid_local_label(self.session_state.lead).ok())
+            .unwrap_or_else(|| "invalid valid time".to_owned());
         let horizon = product
             .and_then(|product| product.horizon(run).ok())
             .unwrap_or(LeadHour::ZERO);
@@ -910,7 +930,6 @@ impl WeatherApp {
             .get(&run)
             .copied()
             .map(|published| published.min(horizon));
-        let gate = published.unwrap_or(LeadHour::ZERO);
         let cumulative = self
             .session_state
             .overlay
@@ -921,41 +940,54 @@ impl WeatherApp {
         } else {
             Some(LeadHour::ZERO)
         };
-        let lead_ready = lead_floor.is_some_and(|floor| published.is_some() && floor <= gate);
+        let rail_ceiling = axis.map_or(0, |axis| axis.detent_count().saturating_sub(1));
+        let ready_ceiling = axis
+            .zip(published)
+            .and_then(|(axis, frontier)| axis.ready_ceiling(frontier));
+        let allowed_floor = axis
+            .zip(lead_floor)
+            .map_or(0, |(axis, floor)| axis.index_at_or_after(floor));
+        let lead_ready = ready_ceiling.is_some_and(|ceiling| allowed_floor <= ceiling);
+        let current = axis.map_or(0, |axis| axis.index_at_or_before(self.session_state.lead));
         let mut step = None;
         let _row = ui.horizontal(|ui| {
             let previous = ui.add_enabled(
-                lead_floor.is_some_and(|floor| lead_ready && self.session_state.lead > floor),
+                lead_ready && current > allowed_floor,
                 egui::Button::new("◀"),
             );
             chrome::tension(ui, &previous);
-            if previous.clicked() {
-                step = Some((self.session_state.lead.saturating_previous(), previous.rect));
+            if previous.clicked()
+                && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_sub(1)))
+            {
+                step = Some((lead, previous.rect));
             }
             let _lead = ui.label(chrome::section_title(&valid_label));
             let next = ui.add_enabled(
-                lead_ready && self.session_state.lead < gate,
+                ready_ceiling.is_some_and(|ceiling| lead_ready && current < ceiling),
                 egui::Button::new("▶"),
             );
             chrome::tension(ui, &next);
-            if next.clicked() {
-                step = Some((self.session_state.lead.saturating_next(gate), next.rect));
+            if next.clicked()
+                && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_add(1)))
+            {
+                step = Some((lead, next.rect));
             }
         });
         if let Some((lead, rect)) = step {
             self.choose_lead(lead);
             self.water.lever(rect, 1.0);
         }
-        let rail_ceiling = u16::from(horizon.get());
         let rail_detents = rail_ceiling + 1;
-        let allowed_floor = lead_floor
-            .filter(|_| lead_ready)
-            .map_or(0, |floor| u16::from(floor.get()));
-        let mut raw_lead = u16::from(self.session_state.lead.get());
+        let mut raw_lead = current;
+        let rail_allowed = if lead_ready {
+            allowed_floor..=ready_ceiling.unwrap_or(allowed_floor)
+        } else {
+            0..=0
+        };
         let rail = ui
             .add_enabled_ui(lead_ready, |ui| {
                 chrome::Rail::new(&mut raw_lead, 0..=rail_ceiling)
-                    .allowed(allowed_floor..=u16::from(gate.get()))
+                    .allowed(rail_allowed)
                     .detents(rail_detents)
                     .show(ui)
             })
@@ -964,8 +996,7 @@ impl WeatherApp {
         self.water.rail(&rail);
         if rail.changed()
             && lead_ready
-            && let Ok(raw_lead) = u8::try_from(raw_lead)
-            && let Ok(lead) = LeadHour::forge(raw_lead)
+            && let Some(lead) = axis.and_then(|axis| axis.at(raw_lead))
         {
             self.choose_lead(lead);
         }
@@ -986,11 +1017,12 @@ impl WeatherApp {
             });
             let base_ceiling = self.session_state.lead.saturating_previous();
             let mut raw_base = u16::from(self.session_state.base.get());
+            let base_rail_ceiling = u16::from(horizon.get());
             let base_rail = ui
                 .add_enabled_ui(lead_ready, |ui| {
-                    chrome::Rail::new(&mut raw_base, 0..=rail_ceiling)
+                    chrome::Rail::new(&mut raw_base, 0..=base_rail_ceiling)
                         .allowed(0..=u16::from(base_ceiling.get()))
-                        .detents(rail_detents)
+                        .detents(base_rail_ceiling + 1)
                         .show(ui)
                 })
                 .inner;
@@ -1136,23 +1168,25 @@ impl WeatherApp {
 
         let painted_field = self.active_field().or_else(|| self.displayed_field.clone());
         let mut legend_scale = None;
-        let paints_smoke = painted_field
+        let paints_adaptive = painted_field
             .as_ref()
-            .is_some_and(|(key, _field)| key.product == Product::Smoke);
-        if !paints_smoke {
-            self.smoke_scale.arrest();
+            .is_some_and(|(key, _field)| self.scales.adaptive(key.product));
+        if !paints_adaptive {
+            self.range_scale.arrest();
         }
         if let Some((key, field)) = painted_field {
-            if key.product == Product::Smoke {
+            if self.scales.adaptive(key.product) {
+                if self.range_survey.select(key.product) {
+                    self.range_scale.reset();
+                }
                 if navigating {
-                    self.smoke_scale.arrest();
+                    self.range_scale.arrest();
                 } else {
-                    let peak = self
-                        .smoke_survey
-                        .discern(key, &field, self.viewport, rect)
-                        .map(|raw| self.scale_for(key).unit.convert(raw));
-                    let proposed = self.smoke_scale.settled().reckon(peak);
-                    if let Some(repaint_after) = self.smoke_scale.observe(proposed, Instant::now())
+                    let peak = self.range_survey.discern(key, &field, self.viewport, rect);
+                    let proposed =
+                        self.scales
+                            .reckon(key.product, self.range_scale.settled(), peak);
+                    if let Some(repaint_after) = self.range_scale.observe(proposed, Instant::now())
                     {
                         ui.ctx().request_repaint_after(repaint_after);
                     }
@@ -1479,12 +1513,18 @@ impl WeatherApp {
                     .inner_margin(margin)
                     .show(ui, |ui| {
                         let valid = key
-                            .map(|key| (key.run, key.valid))
-                            .or_else(|| self.run.map(|run| (run, self.session_state.lead)))
+                            .map(|key| (key.run, key.product, key.valid))
+                            .or_else(|| {
+                                self.run
+                                    .zip(self.session_state.overlay.active())
+                                    .map(|(run, product)| (run, product, self.session_state.lead))
+                            })
                             .map_or_else(
                                 || "NO FORECAST".to_owned(),
-                                |(run, lead)| {
-                                    run.valid_local_label(lead)
+                                |(run, product, lead)| {
+                                    product
+                                        .lead_axis(run)
+                                        .and_then(|axis| axis.local_label(lead))
                                         .unwrap_or_else(|_| "INVALID TIME".to_owned())
                                 },
                             );
@@ -2123,7 +2163,13 @@ impl WeatherApp {
     }
 
     fn choose_lead(&mut self, lead: LeadHour) {
-        let Some(frontier) = self.run.and_then(|run| self.frontier_for(run)) else {
+        let Some((run, product, frontier)) = self.run.and_then(|run| {
+            Some((
+                run,
+                self.session_state.overlay.active()?,
+                self.frontier_for(run)?,
+            ))
+        }) else {
             return;
         };
         let floor = self
@@ -2135,7 +2181,15 @@ impl WeatherApp {
         let Some(floor) = floor.filter(|floor| *floor <= frontier) else {
             return;
         };
-        let lead = lead.clamp(floor, frontier);
+        let bounded = lead.clamp(floor, frontier);
+        let Some(lead) = product
+            .lead_axis(run)
+            .ok()
+            .and_then(|axis| axis.snap(bounded, frontier))
+            .filter(|lead| *lead >= floor)
+        else {
+            return;
+        };
         if self.session_state.lead != lead {
             self.session_state.lead = lead;
             self.mark_dirty();
@@ -2219,12 +2273,18 @@ impl WeatherApp {
         }) else {
             return;
         };
-        let (lead, base) = lawful_clock(
-            self.session_state.overlay.active(),
+        let product = self.session_state.overlay.active();
+        let (mut lead, base) = lawful_clock(
+            product,
             self.session_state.lead,
             self.session_state.base,
             ceiling,
         );
+        if let Some(axis) = product.and_then(|product| product.lead_axis(run).ok())
+            && let Some(snapped) = axis.snap(lead, ceiling)
+        {
+            lead = snapped;
+        }
         if (lead, base) != (self.session_state.lead, self.session_state.base) {
             self.session_state.lead = lead;
             self.session_state.base = base;
@@ -2249,7 +2309,13 @@ impl WeatherApp {
                 )
             },
         );
-        let (lead, base) = lawful_clock(self.session_state.overlay.active(), lead, base, frontier);
+        let product = self.session_state.overlay.active();
+        let (mut lead, base) = lawful_clock(product, lead, base, frontier);
+        if let Some(axis) = product.and_then(|product| product.lead_axis(run).ok())
+            && let Some(snapped) = axis.snap(lead, frontier)
+        {
+            lead = snapped;
+        }
         self.run = Some(run);
         self.session_state.lead = lead;
         self.session_state.base = base;
@@ -2259,7 +2325,10 @@ impl WeatherApp {
         let run = self.run?;
         let product = self.session_state.overlay.active()?;
         let published = self.frontier_for(run)?;
-        (self.session_state.lead <= published)
+        product
+            .lead_axis(run)
+            .ok()?
+            .ready(self.session_state.lead, published)
             .then(|| {
                 FrameKey::forge(
                     run,
@@ -2284,7 +2353,7 @@ impl WeatherApp {
     fn scale_for(&self, key: FrameKey) -> &Scale {
         self.scales.get(
             key.product,
-            self.smoke_scale.settled(),
+            self.range_scale.settled(),
             TemperatureSeason::at(key),
         )
     }
@@ -2428,16 +2497,27 @@ impl WeatherApp {
     }
 
     fn seed_prefetch(&mut self, key: FrameKey) {
-        let horizon = self.frontier_for(key.run).unwrap_or(LeadHour::ZERO);
-        for distance in 1..=2 {
-            if let Ok(lead) = LeadHour::forge(key.valid.get().saturating_add(distance))
-                && lead <= horizon
+        let Some((axis, ceiling)) = key
+            .product
+            .lead_axis(key.run)
+            .ok()
+            .zip(self.frontier_for(key.run))
+            .and_then(|(axis, frontier)| Some((axis, axis.ready_ceiling(frontier)?)))
+        else {
+            return;
+        };
+        let current = axis.index_at_or_before(key.valid);
+        for distance in 1_u16..=2 {
+            if let Some(next) = current
+                .checked_add(distance)
+                .filter(|next| *next <= ceiling)
+                && let Some(lead) = axis.at(next)
                 && let Some(frame) = key.with_valid(lead)
             {
                 self.prefetch.push_back(frame);
             }
-            if key.valid.get() >= distance
-                && let Ok(lead) = LeadHour::forge(key.valid.get() - distance)
+            if let Some(previous) = current.checked_sub(distance)
+                && let Some(lead) = axis.at(previous)
                 && let Some(frame) = key.with_valid(lead)
             {
                 self.prefetch.push_back(frame);
@@ -2695,31 +2775,31 @@ mod tests {
 
     #[test]
     fn scale_latch_requires_quiet_after_navigation() {
-        // A pan can cross both smoke thresholds in one frame. Value hysteresis
+        // A pan can cross both range thresholds in one frame. Value hysteresis
         // alone therefore cannot keep the field and legend stable under drag.
         let begun = Instant::now();
-        let mut latch = ScaleLatch::<SmokeRegime>::default();
+        let mut latch = ScaleLatch::<RangeRegime>::default();
 
-        assert_eq!(latch.observe(SmokeRegime::Heavy, begun), Some(SCALE_SETTLE));
+        assert_eq!(latch.observe(RangeRegime::Broad, begun), Some(SCALE_SETTLE));
         latch.arrest();
         let released = begun + SCALE_SETTLE;
         assert_eq!(
-            latch.observe(SmokeRegime::Heavy, released),
+            latch.observe(RangeRegime::Broad, released),
             Some(SCALE_SETTLE)
         );
         assert_eq!(
             latch.observe(
-                SmokeRegime::Heavy,
+                RangeRegime::Broad,
                 released + SCALE_SETTLE.saturating_sub(Duration::from_millis(1)),
             ),
             Some(Duration::from_millis(1))
         );
-        assert_eq!(latch.settled(), SmokeRegime::Light);
+        assert_eq!(latch.settled(), RangeRegime::Fine);
         assert_eq!(
-            latch.observe(SmokeRegime::Heavy, released + SCALE_SETTLE),
+            latch.observe(RangeRegime::Broad, released + SCALE_SETTLE),
             None
         );
-        assert_eq!(latch.settled(), SmokeRegime::Heavy);
+        assert_eq!(latch.settled(), RangeRegime::Broad);
     }
 
     #[test]

@@ -65,9 +65,8 @@ Click an active field button again to show only the basemap. Focus a forecast
 rail to adjust it with the arrow keys; a hovered rail also accepts the mouse
 wheel. `Ctrl+R` and `Ctrl+Shift+R` select the latest run and latest 48-hour run.
 Cumulative fields add a **Base hour** rail; their map shows the increment from
-that hour through the selected forecast hour. Air quality uses the same hourly
-forecast controls while retaining the daily period represented by its source
-field.
+that hour through the selected forecast hour. Air quality collapses its daily
+source periods into one rail detent per valid date.
 
 Press `F1` or `?` for the generated command guide. `Tab` and `Shift+Tab` move
 within the active inspector panel; `Ctrl+Tab` and `Ctrl+Shift+Tab` cross panels.
