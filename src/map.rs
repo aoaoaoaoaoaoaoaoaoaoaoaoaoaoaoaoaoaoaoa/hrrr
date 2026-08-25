@@ -15,6 +15,12 @@ const VISIBLE_SAMPLE_PITCH: f32 = 16.0;
 /// A North American overview: about 59°N to 9°N at the default center.
 const MAX_VERTICAL_WORLD_SPAN: f64 = 0.18;
 const SCALE_CAPACITY: usize = 128;
+#[cfg(target_os = "android")]
+const FIELD_MESH_CELLS: u32 = 64 * 64;
+#[cfg(target_os = "android")]
+const FIELD_UNIFORM_VISIBILITY: wgpu::ShaderStages = wgpu::ShaderStages::VERTEX_FRAGMENT;
+#[cfg(not(target_os = "android"))]
+const FIELD_UNIFORM_VISIBILITY: wgpu::ShaderStages = wgpu::ShaderStages::FRAGMENT;
 
 #[derive(Debug, Default)]
 pub struct ScaleBar {
@@ -94,7 +100,10 @@ impl CallbackTrait for FieldPaint {
         if let Some(gpu) = resources.get::<MapGpu>() {
             pass.set_pipeline(&gpu.pipeline);
             pass.set_bind_group(0, &gpu.bind, &[]);
+            #[cfg(not(target_os = "android"))]
             pass.draw(0..3, 0..1);
+            #[cfg(target_os = "android")]
+            pass.draw(0..6, 0..FIELD_MESH_CELLS);
         }
     }
 }
@@ -127,7 +136,7 @@ impl MapGpu {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: FIELD_UNIFORM_VISIBILITY,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -146,18 +155,22 @@ impl MapGpu {
             label: Some("hrrr-field"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
         });
+        #[cfg(not(target_os = "android"))]
+        let (vertex_entry, fragment_entry) = ("vertex", "fragment");
+        #[cfg(target_os = "android")]
+        let (vertex_entry, fragment_entry) = ("mesh_vertex", "mesh_fragment");
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("hrrr-field"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vertex"),
+                entry_point: Some(vertex_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fragment"),
+                entry_point: Some(fragment_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -394,6 +407,29 @@ pub fn screen_at(view: Viewport, rect: egui::Rect, world: [f64; 2]) -> egui::Pos
         )
 }
 
+pub fn pinch_viewport(
+    mut view: Viewport,
+    rect: egui::Rect,
+    center: egui::Pos2,
+    translation: egui::Vec2,
+    zoom_delta: f32,
+    minimum_zoom: f64,
+) -> Viewport {
+    let prior_center = center - translation;
+    let anchor = world_at(view, rect, prior_center);
+    let zoom_step = f64::from(zoom_delta);
+    if zoom_step.is_finite() && zoom_step > 0.0 {
+        view.zoom = (view.zoom + zoom_step.log2()).clamp(minimum_zoom, Viewport::MAX_ZOOM);
+    }
+    let scale = world_pixels(view);
+    view.center_mercator = [
+        anchor[0] - f64::from(center.x - rect.center().x) / scale,
+        anchor[1] - f64::from(center.y - rect.center().y) / scale,
+    ];
+    view.normalize();
+    view
+}
+
 pub fn lon_lat_at(world: [f64; 2]) -> [f64; 2] {
     let longitude = world[0].mul_add(360.0, -180.0);
     let latitude = (std::f64::consts::PI * (1.0 - 2.0 * world[1]))
@@ -524,6 +560,11 @@ struct VertexOut {
     @location(0) uv: vec2f,
 };
 
+struct MeshOut {
+    @builtin(position) position: vec4f,
+    @location(0) cell: vec2f,
+};
+
 @vertex
 fn vertex(@builtin(vertex_index) index: u32) -> VertexOut {
     let positions = array(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -531,6 +572,29 @@ fn vertex(@builtin(vertex_index) index: u32) -> VertexOut {
     var out: VertexOut;
     out.position = vec4f(positions[index], 0.0, 1.0);
     out.uv = uvs[index];
+    return out;
+}
+
+@vertex
+fn mesh_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> MeshOut {
+    let edge = 64u;
+    let offsets = array(
+        vec2u(0u, 0u),
+        vec2u(1u, 0u),
+        vec2u(0u, 1u),
+        vec2u(0u, 1u),
+        vec2u(1u, 0u),
+        vec2u(1u, 1u),
+    );
+    let tile = vec2u(instance_index % edge, instance_index / edge);
+    let uv = vec2f(tile + offsets[vertex_index]) / f32(edge);
+    let world = mix(u.world.xy, u.world.zw, uv);
+    var out: MeshOut;
+    out.position = vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    out.cell = grid_at(world);
     return out;
 }
 
@@ -599,10 +663,7 @@ fn incise_contours(value: f32, base: vec4f) -> vec4f {
     return vec4f(mix(base.rgb, u.contour.rgb, ink), max(base.a, ink));
 }
 
-@fragment
-fn fragment(in: VertexOut) -> @location(0) vec4f {
-    let world = mix(u.world.xy, u.world.zw, in.uv);
-    let cell = grid_at(world);
+fn color_at(cell: vec2f) -> vec4f {
     let edge = vec2f(u.grid - vec2u(1u));
     if non_finite(cell.x)
         || non_finite(cell.y)
@@ -614,6 +675,17 @@ fn fragment(in: VertexOut) -> @location(0) vec4f {
     if non_finite(raw) { return vec4f(0.0); }
     let value = raw * u.affine.x + u.affine.y;
     return incise_contours(value, bin_color(value));
+}
+
+@fragment
+fn fragment(in: VertexOut) -> @location(0) vec4f {
+    let world = mix(u.world.xy, u.world.zw, in.uv);
+    return color_at(grid_at(world));
+}
+
+@fragment
+fn mesh_fragment(in: MeshOut) -> @location(0) vec4f {
+    return color_at(in.cell);
 }
 ";
 
@@ -655,5 +727,18 @@ mod tests {
             assert!([1.0, 2.0, 5.0].contains(&(length / decade)));
             assert!(length <= target);
         }
+    }
+
+    #[test]
+    fn pinch_keeps_the_ground_beneath_its_translated_centroid() {
+        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 40.0), egui::vec2(900.0, 700.0));
+        let before = Viewport::default();
+        let center = egui::pos2(570.0, 330.0);
+        let translation = egui::vec2(24.0, -18.0);
+        let ground = world_at(before, rect, center - translation);
+        let after = pinch_viewport(before, rect, center, translation, 1.25, Viewport::MIN_ZOOM);
+
+        assert!((after.zoom - before.zoom - 1.25_f64.log2()).abs() < 1e-12);
+        assert!(screen_at(after, rect, ground).distance(center) < 0.001);
     }
 }

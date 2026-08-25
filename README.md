@@ -111,6 +111,7 @@ platform roots are:
 | Linux | XDG config, data, and state roots under `hrrr/` | `$XDG_CACHE_HOME/hrrr/` |
 | macOS | `~/Library/Application Support/moe.swarm.hrrr/` | `~/Library/Caches/moe.swarm.hrrr/` |
 | Windows | `%APPDATA%\swarm\hrrr\` | `%LOCALAPPDATA%\swarm\hrrr\cache\` |
+| Android | app-private files for `moe.swarm.hrrr` | app-private cache |
 
 On Linux the individual defaults are:
 
@@ -153,6 +154,38 @@ generated-help presentation and keyboard containment; panel traversal; field
 selection and restart restoration; transient and persistent probes; pin drag
 and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence is
 retained under `/tmp/hrrr-acceptance-artifacts` by default.
+
+The Android projection builds a native Vulkan APK with `cargo-apk`. Install the
+APK and the egui-tester driver on a physical device, then run the maintained
+platform-neutral score through its Android projection:
+
+```sh
+cargo apk apk build --release --lib
+adb install -r "$CARGO_TARGET_DIR/release/apk/HRRR.apk"
+../egui_tester/scripts/build-android-driver driver.apk
+cargo run --release -p hrrr-android-playtest -- \
+  --serial "$ANDROID_SERIAL" --driver driver.apk \
+  --score comprehensive --fresh
+```
+
+`--fresh` is the explicit destructive boundary that clears app-private state.
+Omit it to exercise restart restoration. `--captures DIRECTORY` retains one
+settled screen after each act for functional diagnosis and cannot be combined
+with profiling. The `fields`, `forecast`, `inspector`, `map`, `panels`, `views`,
+and `water` scores isolate narrower mechanisms.
+
+Perfetto is a separate projection of the same score, so screenshot I/O cannot
+contaminate its wall-clock evidence:
+
+```sh
+cargo run --release -p hrrr-android-playtest -- \
+  --serial "$ANDROID_SERIAL" --score comprehensive --fresh \
+  --trace-processor trace_processor \
+  --profile scripts/android/perfetto.pbtxt trace.pftrace events.jsonl report.md
+```
+
+Android packages are development artifacts at present; the release ledger does
+not yet claim an Android distribution channel.
 
 The Foundry contract runs one native runtime proof on Linux/X11,
 Linux/Wayland, macOS arm64, macOS x86_64, and Windows x86_64. The Wayland cell

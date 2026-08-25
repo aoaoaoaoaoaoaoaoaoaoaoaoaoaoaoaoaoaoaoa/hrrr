@@ -39,6 +39,12 @@ use std::{
 
 pub const PAPER_SRGB: [u8; 3] = [229; 3];
 pub const APPARITION_SPAN: f32 = 1.35;
+#[cfg(target_os = "android")]
+const MATERIAL_COUNT: u32 = 10;
+#[cfg(target_os = "android")]
+const MATERIAL_STACK: usize = 4;
+#[cfg(target_os = "android")]
+pub const MATERIAL_MASK_EDGE: u32 = 512;
 const RETAINED_DEPTH: u8 = 4;
 const DETAIL_CONNECT_LIMIT: Duration = Duration::from_secs(8);
 const DETAIL_TRANSFER_LIMIT: Duration = Duration::from_secs(30);
@@ -129,23 +135,35 @@ pub struct Label {
     pub onset_zoom: f32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Mesh<V> {
     pub vertices: Arc<[V]>,
     pub indices: Arc<[u32]>,
+}
+
+impl<V> Default for Mesh<V> {
+    fn default() -> Self {
+        Self {
+            vertices: Arc::from([]),
+            indices: Arc::from([]),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct VectorTile {
     pub key: TileKey,
     pub fills: Mesh<FillPoint>,
+    #[cfg(target_os = "android")]
+    pub material_mask: Arc<[u16]>,
     pub strokes: Mesh<StrokePoint>,
     pub labels: Arc<[Label]>,
 }
 
 impl VectorTile {
     pub fn resident_bytes(&self) -> usize {
-        self.fills
+        let geometry = self
+            .fills
             .vertices
             .len()
             .saturating_mul(size_of::<FillPoint>())
@@ -163,7 +181,15 @@ impl VectorTile {
                     .iter()
                     .map(|label| label.text.len())
                     .sum::<usize>(),
-            )
+            );
+        #[cfg(target_os = "android")]
+        {
+            geometry.saturating_add(self.material_mask.len().saturating_mul(size_of::<u16>()))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            geometry
+        }
     }
 }
 
@@ -1045,12 +1071,27 @@ impl Forge {
 
     fn finish(mut self) -> VectorTile {
         self.labels.sort_unstable_by_key(|label| label.rank);
-        VectorTile {
-            key: self.key,
-            fills: Mesh {
+        #[cfg(target_os = "android")]
+        let material_mask = raster_materials(&self.fills.vertices, &self.fills.indices).into();
+        #[cfg(target_os = "android")]
+        let fills = if self.key.is_detail() {
+            Mesh {
                 vertices: self.fills.vertices.into(),
                 indices: self.fills.indices.into(),
-            },
+            }
+        } else {
+            Mesh::default()
+        };
+        #[cfg(not(target_os = "android"))]
+        let fills = Mesh {
+            vertices: self.fills.vertices.into(),
+            indices: self.fills.indices.into(),
+        };
+        VectorTile {
+            key: self.key,
+            fills,
+            #[cfg(target_os = "android")]
+            material_mask,
             strokes: Mesh {
                 vertices: self.strokes.vertices.into(),
                 indices: self.strokes.indices.into(),
@@ -1058,6 +1099,93 @@ impl Forge {
             labels: self.labels.into(),
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn raster_materials(vertices: &[FillPoint], indices: &[u32]) -> Vec<u16> {
+    let pixels = MATERIAL_MASK_EDGE as usize * MATERIAL_MASK_EDGE as usize;
+    let mut mask = vec![0; pixels * MATERIAL_STACK];
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = triangle else { continue };
+        let [Some(a), Some(b), Some(c)] = [a, b, c].map(|index| {
+            usize::try_from(*index)
+                .ok()
+                .and_then(|index| vertices.get(index))
+        }) else {
+            continue;
+        };
+        raster_material_triangle(&mut mask, [a, b, c]);
+    }
+    mask
+}
+
+#[cfg(target_os = "android")]
+fn raster_material_triangle(mask: &mut [u16], triangle: [&FillPoint; 3]) {
+    let edge = MATERIAL_MASK_EDGE as f32;
+    let points = triangle.map(|vertex| [vertex.local[0] * edge, vertex.local[1] * edge]);
+    let signed_area = raster_edge(points[0], points[1], points[2]);
+    if signed_area.abs() <= f32::EPSILON {
+        return;
+    }
+    let minimum = [
+        points.iter().map(|point| point[0]).fold(edge, f32::min),
+        points.iter().map(|point| point[1]).fold(edge, f32::min),
+    ];
+    let maximum = [
+        points.iter().map(|point| point[0]).fold(0.0, f32::max),
+        points.iter().map(|point| point[1]).fold(0.0, f32::max),
+    ];
+    let x0 = minimum[0].floor().clamp(0.0, edge) as u32;
+    let y0 = minimum[1].floor().clamp(0.0, edge) as u32;
+    let x1 = maximum[0].ceil().clamp(0.0, edge) as u32;
+    let y1 = maximum[1].ceil().clamp(0.0, edge) as u32;
+    let material = triangle[0].material.min(MATERIAL_COUNT - 1) as u16;
+    let material = (u16::from(encode_material_onset(triangle[0].onset_zoom)) << 4)
+        | material.saturating_add(1);
+    let positive = signed_area > 0.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let sample = [x as f32 + 0.5, y as f32 + 0.5];
+            let edges = [
+                raster_edge(points[0], points[1], sample),
+                raster_edge(points[1], points[2], sample),
+                raster_edge(points[2], points[0], sample),
+            ];
+            if edges.iter().all(|edge| (*edge >= 0.0) == positive) {
+                let pixel =
+                    (y as usize * MATERIAL_MASK_EDGE as usize + x as usize) * MATERIAL_STACK;
+                push_material(&mut mask[pixel..pixel + MATERIAL_STACK], material);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn push_material(stack: &mut [u16], material: u16) {
+    let depth = stack.iter().position(|&resident| resident == 0);
+    let top = depth
+        .and_then(|depth| depth.checked_sub(1))
+        .unwrap_or(stack.len() - 1);
+    if stack[top] == material {
+        return;
+    }
+    if let Some(depth) = depth {
+        stack[depth] = material;
+    } else {
+        stack.copy_within(2.., 1);
+        stack[stack.len() - 1] = material;
+    }
+}
+
+#[cfg(target_os = "android")]
+fn raster_edge(a: [f32; 2], b: [f32; 2], point: [f32; 2]) -> f32 {
+    (point[0] - a[0]).mul_add(b[1] - a[1], -(point[1] - a[1]) * (b[0] - a[0]))
+}
+
+#[cfg(target_os = "android")]
+fn encode_material_onset(onset: f32) -> u8 {
+    let maximum = f32::from(MAX_SOURCE_ZOOM);
+    ((onset.clamp(0.0, maximum) * 16.0).round() as u8).saturating_add(1)
 }
 
 fn boundary_style(detail: Option<i64>, min_zoom: Option<f64>) -> StrokeStyle {

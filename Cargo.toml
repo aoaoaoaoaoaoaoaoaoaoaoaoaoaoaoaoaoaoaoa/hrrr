@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/hrrr-acceptance",
+    "crates/hrrr-android-playtest",
+    "crates/hrrr-choreography",
     "crates/hrrr-contract",
     "crates/hrrr-portability",
 ]
@@ -58,7 +60,7 @@ ureq = "3.4.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 directories = "6.0.0"
-egui-tester-witness = { version = "0.9.7", optional = true, features = ["egui"] }
+egui-tester-witness = { version = "0.9.8", optional = true, features = ["egui"] }
 pmtiles = { version = "0.24.0", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls"] }
 sha2 = "0.11.0"
 

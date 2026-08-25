@@ -1,0 +1,18 @@
+[package]
+name = "hrrr-android-playtest"
+version = "0.1.0"
+description = "Physical Android interaction choreography for HRRR"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/hrrr"
+rust-version = "1.98"
+publish = false
+
+[dependencies]
+csv = "1.4.0"
+egui-tester = "0.9.8"
+hrrr-choreography = { path = "../hrrr-choreography" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true
