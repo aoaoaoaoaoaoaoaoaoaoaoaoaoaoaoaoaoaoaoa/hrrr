@@ -16,7 +16,7 @@ HRRR requires a working wgpu-compatible graphics stack. Releases support Linux
 on X11 and Wayland, macOS 13 or newer on Apple Silicon and Intel, and 64-bit
 Windows.
 
-On Linux, install the ordinary command-line package with Rust 1.96 or newer:
+On Linux, install the ordinary command-line package with Rust 1.98.0 or newer:
 
 ```sh
 cargo install hrrr --locked
