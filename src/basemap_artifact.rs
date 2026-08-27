@@ -2,7 +2,7 @@ use crate::{application_paths::ApplicationPaths, persist::save_toml};
 use anyhow::{Context as _, Result, bail};
 #[cfg(target_os = "linux")]
 use flate2::read::GzDecoder;
-use jiff::{Timestamp, civil::Date, tz::TimeZone};
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -25,6 +25,8 @@ pub const BOUNDS: [f64; 4] = [-135.0, 21.0, -60.0, 54.0];
 const TOOL_VERSION: &str = "1.31.2";
 const TOOL_ORIGIN: &str = "https://github.com/protomaps/go-pmtiles/releases/download";
 const MAP_ORIGIN: &str = "https://build.protomaps.com";
+const BUILD_CATALOG: &str = "https://build-metadata.protomaps.dev/builds.json";
+const MAX_CATALOG_BYTES: u64 = 1 << 20;
 static ARENA_NONCE: AtomicU64 = AtomicU64::new(0);
 const CHILD_POLL: Duration = Duration::from_millis(150);
 
@@ -78,6 +80,11 @@ struct ToolAsset {
     name: &'static str,
     sha256: &'static str,
     executable: &'static str,
+}
+
+#[derive(Deserialize)]
+struct CatalogEntry {
+    key: String,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -189,7 +196,10 @@ pub fn install_attended(
             "HRRR_BASEMAP_ARCHIVE names an externally managed archive; unset it before installing"
         );
     }
-    let day = day.map_or_else(|| Ok(today_utc()), validate_day)?;
+    let day = match day {
+        Some(day) => validate_day(day)?,
+        None => latest_day()?,
+    };
     let asset = tool_asset().context("go-pmtiles has no binary for this target")?;
     let destination = paths.basemap_path()?;
     let directory = destination
@@ -359,16 +369,34 @@ pub fn remove(paths: &ApplicationPaths) -> Result<()> {
     Ok(())
 }
 
-fn today_utc() -> String {
-    Timestamp::now()
-        .to_zoned(TimeZone::UTC)
-        .strftime("%Y%m%d")
-        .to_string()
-}
-
 fn validate_day(day: &str) -> Result<String> {
     let _date = Date::strptime("%Y%m%d", day).context("basemap date must be YYYYMMDD")?;
     Ok(day.to_owned())
+}
+
+fn latest_day() -> Result<String> {
+    let mut response = ureq::Agent::new_with_defaults()
+        .get(BUILD_CATALOG)
+        .call()
+        .with_context(|| format!("fetch {BUILD_CATALOG}"))?;
+    let catalog = serde_json::from_reader::<_, Vec<CatalogEntry>>(
+        response
+            .body_mut()
+            .with_config()
+            .limit(MAX_CATALOG_BYTES)
+            .reader(),
+    )
+    .context("parse Protomaps build catalog")?;
+    newest_day(catalog.iter().map(|entry| entry.key.as_str()))
+        .context("Protomaps build catalog contains no dated PMTiles archive")
+}
+
+fn newest_day<'a>(keys: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    keys.into_iter()
+        .filter_map(|key| key.strip_suffix(".pmtiles"))
+        .filter(|day| day.len() == 8 && validate_day(day).is_ok())
+        .max()
+        .map(str::to_owned)
 }
 
 fn tool_asset() -> Option<ToolAsset> {
@@ -628,6 +656,18 @@ mod tests {
         assert_eq!(validate_day("20260728")?.as_str(), "20260728");
         assert!(validate_day("20260230").is_err());
         assert!(validate_day("../../28").is_err());
+        assert_eq!(
+            newest_day([
+                "20260824.pmtiles",
+                "20260826.layerstats.parquet",
+                "../../27.pmtiles",
+                "20260230.pmtiles",
+                "20260826.pmtiles",
+            ])
+            .as_deref(),
+            Some("20260826")
+        );
+        assert_eq!(newest_day(["latest.pmtiles", "20260826.parquet"]), None);
         Ok(())
     }
 

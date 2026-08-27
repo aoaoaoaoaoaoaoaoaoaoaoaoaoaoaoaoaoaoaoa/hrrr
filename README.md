@@ -36,7 +36,7 @@ binary is not yet code-signed, so SmartScreen may require explicit approval.
 First launch explains and offers the basemap installation. Approval downloads
 about 1.1 GB and leaves a roughly 1.01 GiB North American map core available
 offline through zoom 11. HRRR obtains a pinned, SHA-256-verified `go-pmtiles`
-binary for the current platform, extracts the current [Protomaps daily
+binary for the current platform, extracts the newest published [Protomaps daily
 build](https://maps.protomaps.com/), verifies the result, and discards the tool.
 At zoom 12, only visible detail tiles are fetched by HTTP range request. Those
 tiles enter a 512 MiB, seven-day disposable cache; zoom 11 remains visible when
