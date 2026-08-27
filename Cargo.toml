@@ -45,7 +45,7 @@ eternalist-apps = { version = "0.9.3", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.17.1", default-features = false }
-hrrr-contract = { path = "crates/hrrr-contract", version = "0.5.1" }
+hrrr-contract = { path = "crates/hrrr-contract", version = "0.5.2" }
 jiff = "0.2.35"
 lyon_tessellation = "1.0.20"
 pmtiles = { version = "0.24.0", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls"] }

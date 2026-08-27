@@ -1,6 +1,6 @@
 [package]
 name = "hrrr-contract"
-version = "0.5.1"
+version = "0.5.2"
 description = "Stable UI identity shared by HRRR and its native acceptance stories"
 edition = "2024"
 license = "MIT"
