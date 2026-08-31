@@ -3,6 +3,7 @@ use crate::{
     view::ViewLibrary,
 };
 use anyhow::Result;
+use brass_poolrooms::chrome::FontScale;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -10,6 +11,7 @@ use std::path::Path;
 #[serde(default, deny_unknown_fields)]
 pub struct Configuration {
     pub close_minimizes: bool,
+    pub font_scale: FontScale,
 }
 
 impl eternalist_apps::configuration::Configuration for Configuration {}
@@ -18,6 +20,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             close_minimizes: true,
+            font_scale: FontScale::Standard,
         }
     }
 }
@@ -26,6 +29,7 @@ impl Default for Configuration {
 #[serde(default, deny_unknown_fields)]
 struct ConfigurationWire {
     close_minimizes: bool,
+    font_scale: FontScale,
     views: Option<ViewLibrary>,
 }
 
@@ -40,6 +44,7 @@ impl Configuration {
         };
         Self {
             close_minimizes: wire.close_minimizes,
+            font_scale: wire.font_scale,
         }
         .save(path)?;
         Ok(Some(views))
@@ -54,6 +59,7 @@ impl Default for ConfigurationWire {
     fn default() -> Self {
         Self {
             close_minimizes: true,
+            font_scale: FontScale::Standard,
             views: None,
         }
     }
@@ -103,6 +109,7 @@ mod tests {
             .push(MercatorPoint::forge([0.25, 0.4]).context("map pin")?);
         let legacy = toml::to_string(&ConfigurationWire {
             close_minimizes: false,
+            font_scale: FontScale::Standard,
             views: Some(views),
         })?;
         std::fs::write(&path, legacy)?;

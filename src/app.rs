@@ -26,7 +26,7 @@ use brass_poolrooms::{
 use egui::Color32;
 use eternalist_apps::{
     ApplicationHeader, ScribeOutcome, SettledScribe,
-    command_guide::{CommandGuide, GuideGesture, GuideSection},
+    command_guide::{CommandGuide, GuideGesture, GuideGroup},
     commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     configuration::ConfigurationLedger,
     panel_navigation::PanelNavigator,
@@ -132,10 +132,10 @@ const VIEW_GESTURES: [GuideGesture; 2] = [
         &ASSIGN_VIEW_SLOT_KEYS,
     ),
 ];
-const FORECAST_CONTROL_GUIDE_GROUP: GuideSection =
-    GuideSection::new("FORECAST CONTROLS", &FORECAST_CONTROL_GESTURES);
-const VIEW_GUIDE_GROUP: GuideSection = GuideSection::new("VIEW SHORTCUTS", &VIEW_GESTURES);
-const GUIDE_GROUPS: [GuideSection; 2] = [FORECAST_CONTROL_GUIDE_GROUP, VIEW_GUIDE_GROUP];
+const FORECAST_CONTROL_GUIDE_GROUP: GuideGroup =
+    GuideGroup::new("FORECAST CONTROLS", &FORECAST_CONTROL_GESTURES);
+const VIEW_GUIDE_GROUP: GuideGroup = GuideGroup::new("VIEW SHORTCUTS", &VIEW_GESTURES);
+const GUIDE_GROUPS: [GuideGroup; 2] = [FORECAST_CONTROL_GUIDE_GROUP, VIEW_GUIDE_GROUP];
 
 #[derive(Clone, Copy)]
 enum TileRejection {
@@ -521,12 +521,13 @@ impl WeatherApp {
         instance: InstanceGuard,
     ) -> Result<Self> {
         let legacy_views = Configuration::migrate_legacy_views(&paths.config_path())?;
-        let configuration = ConfigurationLedger::raise(
+        let configuration: ConfigurationLedger<Configuration> = ConfigurationLedger::raise(
             "hrrr-configuration-scribe",
             ctx,
             paths.config_path(),
             STATE_SETTLE,
         )?;
+        chrome::set_font_scale(ctx, configuration.live().font_scale);
         let mut settings = SettingsSheet::default();
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
@@ -637,6 +638,7 @@ impl WeatherApp {
     }
 
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
+        chrome::set_font_scale(ui.ctx(), self.configuration.live().font_scale);
         self.absorb_events(ui.ctx());
         self.absorb_persistence();
         let _configuration_changed = self.configuration.absorb();
@@ -762,6 +764,7 @@ impl WeatherApp {
         let path = self.configuration.path().to_owned();
         let fault = self.configuration.fault().map(ToString::to_string);
         let mut close_minimizes = self.configuration.live().close_minimizes;
+        let mut font_scale = self.configuration.live().font_scale;
         let file = fault.as_deref().map_or_else(
             || SettingsFile::ready(&path),
             |message| SettingsFile::fault(&path, message),
@@ -769,23 +772,31 @@ impl WeatherApp {
         let file = file
             .reloading(self.configuration.reload_pending())
             .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
-        let mut changed = false;
+        let mut close_changed = false;
+        let mut font_scale_changed = false;
         let response = self.settings.show(ctx, &mut self.water, file, |settings| {
-            settings.section("WINDOW");
-            changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
+            settings.group("APPEARANCE");
+            font_scale_changed |= settings.font_scale(&mut font_scale);
+            settings.group("WINDOW");
+            close_changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
         });
-        if changed {
-            match self
-                .configuration
-                .revise(|config| config.close_minimizes = close_minimizes)
-            {
+        if close_changed || font_scale_changed {
+            match self.configuration.revise(|config| {
+                config.close_minimizes = close_minimizes;
+                config.font_scale = font_scale;
+            }) {
                 Ok(_) => {
-                    if close_minimizes {
-                        "close hides the window"
-                    } else {
-                        "close quits"
+                    if font_scale_changed {
+                        chrome::set_font_scale(ctx, font_scale);
                     }
-                    .clone_into(&mut self.status);
+                    if close_changed {
+                        if close_minimizes {
+                            "close hides the window"
+                        } else {
+                            "close quits"
+                        }
+                        .clone_into(&mut self.status);
+                    }
                 }
                 Err(error) => self.status = format!("configuration change failed: {error:#}"),
             }
@@ -802,7 +813,7 @@ impl WeatherApp {
         ui.add_space(5.0);
         let mut panels = navigator.frame(ui.ctx());
         let mut chosen_product = None;
-        let field = panels.section(ui, "product", "field", true, |ui| {
+        let field = panels.panel(ui, "product", "field", true, |ui| {
             for &row in Product::ROWS {
                 let _row = ui.horizontal(|ui| {
                     let spacing = ui.spacing().item_spacing.x * row.len().saturating_sub(1) as f32;
@@ -836,7 +847,7 @@ impl WeatherApp {
             self.strike_overlay(product);
         }
 
-        let forecast = panels.section(ui, "forecast", "forecast", true, |ui| {
+        let forecast = panels.panel(ui, "forecast", "forecast", true, |ui| {
             self.forecast_controls(ui);
         });
         crate::witness::response(
@@ -846,7 +857,7 @@ impl WeatherApp {
         );
         self.water.fold(forecast.wake);
 
-        let active_view = panels.section(ui, "active-view", "active view", true, |ui| {
+        let active_view = panels.panel(ui, "active-view", "active view", true, |ui| {
             self.active_view_panel(ui);
         });
         crate::witness::response(
@@ -856,13 +867,13 @@ impl WeatherApp {
         );
         self.water.fold(active_view.wake);
 
-        let views = panels.section(ui, "view-library", "views", true, |ui| {
+        let views = panels.panel(ui, "view-library", "views", true, |ui| {
             self.view_library_panel(ui);
         });
         crate::witness::response(ui, hrrr_contract::Target::Panel("views"), &views.header);
         self.water.fold(views.wake);
 
-        let status = panels.section(ui, "status", "status", true, |ui| {
+        let status = panels.panel(ui, "status", "status", true, |ui| {
             let _status = ui.label(chrome::muted(&self.status));
             ui.add_space(3.0);
             let _source = ui.label(chrome::muted(format!(
@@ -1596,7 +1607,7 @@ impl WeatherApp {
             egui::Stroke::new(1.0_f32, Color32::from_rgb(35, 31, 26)),
             egui::StrokeKind::Inside,
         );
-        let font = egui::FontId::monospace(FONT_SIZE);
+        let font = chrome::spatial_font(painter.ctx(), FONT_SIZE, egui::FontFamily::Monospace);
         let minimum = format!("{:.1}", scale.bins[0].ceiling);
         Self::legend_text(
             painter,
@@ -2426,7 +2437,7 @@ impl WeatherApp {
             if occupied.len() >= 180 {
                 break;
             }
-            let font = egui::FontId::proportional(size);
+            let font = chrome::spatial_font(painter.ctx(), size, egui::FontFamily::Proportional);
             let halo = Color32::from_rgba_unmultiplied(
                 basemap::PAPER_SRGB[0],
                 basemap::PAPER_SRGB[1],

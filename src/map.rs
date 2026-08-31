@@ -481,7 +481,8 @@ fn paint_scale_length(
         format!("{meters:.0} m")
     };
     let anchor = origin + egui::vec2(width * 0.5, -5.0);
-    let font = egui::FontId::monospace(11.0);
+    let font =
+        brass_poolrooms::chrome::spatial_font(painter.ctx(), 11.0, egui::FontFamily::Monospace);
     for offset in [
         egui::vec2(-1.0, 0.0),
         egui::vec2(1.0, 0.0),

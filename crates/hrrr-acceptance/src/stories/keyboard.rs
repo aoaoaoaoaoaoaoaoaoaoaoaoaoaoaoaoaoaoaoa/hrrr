@@ -81,7 +81,7 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     let toggled = !initial_close;
     let _toggled = story
         .tap(
-            "eternalist.settings.close_to_tray",
+            "eternalist.settings.entry/close_to_tray",
             Button::Primary,
             Motion::default(),
         )?
@@ -89,6 +89,14 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
             "central close-to-tray setting applied",
             move |state: &Observation| state.close_to_tray == toggled,
         ))?;
+    let _font_rail = story
+        .tap(
+            "eternalist.settings.entry/font_scale",
+            Button::Primary,
+            Motion::default(),
+        )?
+        .next_frame()?;
+    let _extra_large = story.key(Key::End)?.next_frame()?;
     let _closed = story
         .chord(Modifiers::CTRL, Key::Character(','))?
         .until(Condition::new(
