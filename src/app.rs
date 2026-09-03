@@ -816,12 +816,12 @@ impl WeatherApp {
         let field = panels.panel(ui, "product", "field", true, |ui| {
             for &row in Product::ROWS {
                 let _row = ui.horizontal(|ui| {
-                    let spacing = ui.spacing().item_spacing.x * row.len().saturating_sub(1) as f32;
-                    let width = (ui.available_width() - spacing) / row.len() as f32;
-                    for &product in row {
+                    let widths = apportion_product_widths(ui, row);
+                    for (index, &product) in row.iter().enumerate() {
                         let response = ui.add_sized(
-                            [width, 26.0],
+                            [widths[index], 26.0],
                             egui::Button::new(product.label())
+                                .truncate()
                                 .selected(self.session_state.overlay.active() == Some(product)),
                         );
                         crate::witness::anchor(
@@ -2665,6 +2665,64 @@ fn view_slot_command(event: &egui::Event) -> Option<(ViewSlot, bool)> {
         _ => return None,
     };
     ViewSlot::forge(digit).map(|slot| (slot, modifiers.shift))
+}
+
+fn apportion_product_widths(ui: &egui::Ui, row: &[Product]) -> [f32; Product::ALL.len()] {
+    debug_assert!(!row.is_empty());
+    let gap = ui.spacing().item_spacing.x * row.len().saturating_sub(1) as f32;
+    let available = (ui.available_width() - gap).max(0.0);
+    let style = ui.style().button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let rim = style.frame.total_margin().sum().x;
+    let mut minima = [0.0; Product::ALL.len()];
+    for (index, product) in row.iter().enumerate() {
+        minima[index] = ui
+            .painter()
+            .layout_no_wrap(
+                product.label().to_owned(),
+                style.text_style.font_id.clone(),
+                style.text_style.color,
+            )
+            .size()
+            .x
+            + rim;
+    }
+
+    let minimum = minima[..row.len()].iter().sum::<f32>();
+    let mut widths = minima;
+    if minimum > available {
+        let contraction = available / minimum;
+        for width in &mut widths[..row.len()] {
+            *width *= contraction;
+        }
+        return widths;
+    }
+
+    let mut fluid = [true; Product::ALL.len()];
+    let mut fluid_count = row.len();
+    let mut remainder = available;
+    loop {
+        let share = remainder / fluid_count as f32;
+        let mut claimed = false;
+        for index in 0..row.len() {
+            if fluid[index] && minima[index] > share {
+                fluid[index] = false;
+                fluid_count -= 1;
+                remainder -= minima[index];
+                claimed = true;
+            }
+        }
+        if !claimed {
+            for index in 0..row.len() {
+                if fluid[index] {
+                    widths[index] = share;
+                }
+            }
+            return widths;
+        }
+    }
 }
 
 fn sample_point(point: MercatorPoint, field: &FieldGrid) -> Option<f32> {
