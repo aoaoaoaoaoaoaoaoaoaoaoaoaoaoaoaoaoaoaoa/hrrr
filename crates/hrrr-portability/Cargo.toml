@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
-egui-tester-witness = "0.9.7"
+egui-tester-witness = "0.9.8"
 hrrr-contract = { path = "../hrrr-contract", version = "0.5.2" }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
