@@ -40,8 +40,8 @@ directories = "6.0.0"
 brass_poolrooms = "0.14.7"
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
-egui-tester-witness = { version = "0.9.8", optional = true, features = ["egui"] }
-eternalist-apps = { version = "0.9.4", features = ["serde"] }
+egui-tester-witness = { version = "0.9.9", optional = true, features = ["egui"] }
+eternalist-apps = { version = "0.9.5", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.18.2", default-features = false }
