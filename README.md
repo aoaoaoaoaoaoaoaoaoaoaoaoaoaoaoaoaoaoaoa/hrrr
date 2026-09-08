@@ -165,13 +165,11 @@ also forge a universal DMG and an NSIS package, install or mount the exact
 artifact, rerun the controller against the packaged executable, and prove
 uninstallation without user-data loss.
 
-The UI vocabulary is a separately versioned dependency.
-`scripts/release-contract VERSION publish` can release it independently;
-`scripts/release VERSION publish` proves and publishes any missing contract
-version, waits for the registry boundary, verifies the isolated application
-tarball against that exact dependency, then publishes the application. Both
-release commands require a clean, pushed `main` checkout and a valid signed tag
-at `HEAD`. Registry publication remains deliberate, but a version tag cannot
+The UI vocabulary is a separately versioned dependency. The Poolrooms line's
+`scripts/release hrrr VERSION --publish` bumps the application version, proves
+the Linux coordinates, tags, publishes any unpublished contract version before
+the application in dependency order, then pushes; a contract that changed
+without a version bump refuses the release. Registry publication remains deliberate, but a version tag cannot
 publish the installers until that exact crate version is visible. Foundry must
 also judge the complete source, security, package, host, lifecycle,
 native-acceptance, and artifact evidence graph.
