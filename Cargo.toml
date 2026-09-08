@@ -8,7 +8,7 @@ resolver = "3"
 
 [package]
 name = "hrrr"
-version = "1.2.17"
+version = "1.2.18"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98.0"
@@ -36,13 +36,13 @@ atomic-write-file = "0.3.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
-brass_poolrooms = "0.14.8"
+brass_poolrooms = "0.15.0"
 egui = "=0.36.1"
-eternalist-apps = { version = "0.9.6", features = ["serde"] }
+eternalist-apps = { version = "0.10.0", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.18.2", default-features = false }
-hrrr-contract = { path = "crates/hrrr-contract", version = "0.5.2" }
+hrrr-contract = { path = "crates/hrrr-contract", version = "0.5.3" }
 jiff = "0.2.35"
 lyon_tessellation = "1.0.21"
 pmtiles = { version = "0.24.0", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls"] }
@@ -59,7 +59,7 @@ pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
 tiny_http = "0.12.0"
 
 [build-dependencies]
-brass_foundry = "0.14.8"
+brass_foundry = "0.15.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"
@@ -180,8 +180,3 @@ compression = "lzma"
 installer-mode = "currentUser"
 installer-icon = "assets/hrrr.ico"
 languages = ["English"]
-
-[patch.crates-io]
-brass_poolrooms = { path = "../../../brass_poolrooms/.worktrees/cell-walls" }
-eternalist-apps = { path = "../../../eternalist_apps/.worktrees/cell-walls" }
-egui-tester-witness = { git = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/egui-tester", rev = "2411accb64b9c4012190d1bd0915d68113b8dcf1" }
