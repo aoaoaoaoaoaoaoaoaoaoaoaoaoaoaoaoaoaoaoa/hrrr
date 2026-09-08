@@ -2,6 +2,10 @@
 
 use std::{borrow::Cow, fmt};
 
+/// Reverse-DNS product identifier; the sole source of HRRR's platform and crash identity.
+pub const PRODUCT_IDENTIFIER: &str = "moe.swarm.hrrr";
+/// Product display name.
+pub const PRODUCT_NAME: &str = "HRRR";
 pub const UI_FINGERPRINT: &str = "hrrr.ui/7";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

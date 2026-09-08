@@ -1,6 +1,6 @@
 use crate::{
     app::WeatherApp,
-    application_paths::{ApplicationPaths, InstanceGuard},
+    application_paths::{ApplicationPaths, InstanceGuard, PRODUCT},
     basemap_artifact::{self, InstallPhase, InstallProgress},
     map::MapGpu,
     tray::{Signal as TraySignal, Tray},
@@ -14,7 +14,8 @@ use brass_poolrooms::{
 };
 use crossbeam_channel::{Receiver, bounded};
 use eternalist_apps::{
-    CloseDisposition, CrashProduct, CrashReportSpec, LivingWait, NativeApp, NativeWake, WindowSpec,
+    CloseDisposition, LivingWait, NativeApp, NativeWake, ProductIdentity, WindowSpec,
+    egui_wgpu::{Renderer, wgpu},
 };
 use std::{
     path::PathBuf,
@@ -25,8 +26,6 @@ use std::{
     thread::{self, JoinHandle},
     time::Instant,
 };
-
-const TITLE: &str = "HRRR";
 
 pub fn run(ctx: egui::Context) -> Result<()> {
     eternalist_apps::run_with(ctx, ForecastViewer::open)
@@ -89,13 +88,10 @@ impl ForecastViewer {
 }
 
 impl NativeApp for ForecastViewer {
-    const WINDOW: WindowSpec = WindowSpec::new(TITLE, [1_440.0, 920.0]);
-
-    fn crash_reports() -> Option<CrashReportSpec> {
-        ApplicationPaths::claim().ok().map(|paths| {
-            CrashReportSpec::new(CrashProduct::Hrrr, env!("CARGO_PKG_VERSION"), paths.state)
-        })
-    }
+    const PRODUCT: ProductIdentity = PRODUCT;
+    const RELEASE: &'static str = env!("CARGO_PKG_VERSION");
+    const WINDOW: WindowSpec = WindowSpec::new(PRODUCT.name(), [1_440.0, 920.0]);
+    const CRASH_REPORTS: bool = true;
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.arm_tray(ui.ctx());
@@ -142,10 +138,6 @@ impl NativeApp for ForecastViewer {
         }
     }
 
-    fn after_present(&mut self) -> bool {
-        false
-    }
-
     fn water(
         &mut self,
         ctx: &egui::Context,
@@ -161,11 +153,7 @@ impl NativeApp for ForecastViewer {
         }
     }
 
-    fn register_gpu(
-        renderer: &mut egui_wgpu::Renderer,
-        device: &egui_wgpu::wgpu::Device,
-        format: egui_wgpu::wgpu::TextureFormat,
-    ) {
+    fn register_gpu(renderer: &mut Renderer, device: &wgpu::Device, format: wgpu::TextureFormat) {
         let _prior = renderer
             .callback_resources
             .insert(MapGpu::new(device, format));

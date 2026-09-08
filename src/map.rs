@@ -3,7 +3,7 @@ use crate::{
     spec::Scale,
 };
 use bytemuck::{Pod, Zeroable};
-use egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
+use eternalist_apps::egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
 use std::{
     sync::Arc,
     time::{Duration, Instant},

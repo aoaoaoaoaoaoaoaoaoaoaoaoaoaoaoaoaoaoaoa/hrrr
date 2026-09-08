@@ -23,7 +23,7 @@ include = ["assets/**", "build/**", "build.rs", "src/**", "README.md", "LICENSE"
 
 [features]
 desktop-launcher = []
-egui-test = ["dep:egui-tester-witness", "eternalist-apps/egui-test"]
+egui-test = ["eternalist-apps/egui-test"]
 
 [[bin]]
 name = "HRRR"
@@ -36,11 +36,8 @@ atomic-write-file = "0.3.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
-directories = "6.0.0"
 brass_poolrooms = "0.14.8"
 egui = "=0.36.1"
-egui-wgpu = { version = "=0.36.1", default-features = false }
-egui-tester-witness = { version = "0.9.9", optional = true, features = ["egui"] }
 eternalist-apps = { version = "0.9.6", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
@@ -183,3 +180,8 @@ compression = "lzma"
 installer-mode = "currentUser"
 installer-icon = "assets/hrrr.ico"
 languages = ["English"]
+
+[patch.crates-io]
+brass_poolrooms = { path = "../../../brass_poolrooms/.worktrees/cell-walls" }
+eternalist-apps = { path = "../../../eternalist_apps/.worktrees/cell-walls" }
+egui-tester-witness = { git = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/egui-tester", rev = "2411accb64b9c4012190d1bd0915d68113b8dcf1" }

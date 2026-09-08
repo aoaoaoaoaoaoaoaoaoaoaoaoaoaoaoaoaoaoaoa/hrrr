@@ -776,7 +776,7 @@ impl WeatherApp {
         let mut font_scale_changed = false;
         let response = self.settings.show(ctx, &mut self.water, file, |settings| {
             settings.group("APPEARANCE");
-            font_scale_changed |= settings.font_scale(&mut font_scale);
+            font_scale_changed |= settings.font_size(&mut font_scale);
             settings.group("WINDOW");
             close_changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
         });
@@ -1164,7 +1164,7 @@ impl WeatherApp {
         }
         let bounds = map::world_bounds(self.viewport, rect).map(|v| v as f32);
         if !self.presented_basemap.is_empty() {
-            let _basemap = painter.add(egui_wgpu::Callback::new_paint_callback(
+            let _basemap = painter.add(eternalist_apps::egui_wgpu::Callback::new_paint_callback(
                 rect,
                 VectorPaint {
                     tiles: self.presented_basemap.clone(),
@@ -1205,7 +1205,7 @@ impl WeatherApp {
             }
             let scale = self.scale_for(key).clone();
             legend_scale = Some(scale.clone());
-            let _field = painter.add(egui_wgpu::Callback::new_paint_callback(
+            let _field = painter.add(eternalist_apps::egui_wgpu::Callback::new_paint_callback(
                 rect,
                 FieldPaint {
                     key,

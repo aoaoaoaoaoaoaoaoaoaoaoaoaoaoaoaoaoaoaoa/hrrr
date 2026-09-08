@@ -1,10 +1,15 @@
 use crate::cache::{CacheClass, CacheManager, CacheStore};
 use anyhow::{Context as _, Result, bail};
-use directories::ProjectDirs;
+use eternalist_apps::ProductIdentity;
 use std::{
     fs::File,
     path::{Path, PathBuf},
 };
+
+pub const PRODUCT: ProductIdentity = ProductIdentity::declare(
+    hrrr_contract::PRODUCT_IDENTIFIER,
+    hrrr_contract::PRODUCT_NAME,
+);
 
 #[derive(Clone, Debug)]
 pub struct ApplicationPaths {
@@ -12,6 +17,7 @@ pub struct ApplicationPaths {
     pub state: PathBuf,
     pub data: PathBuf,
     local_data: PathBuf,
+    runtime: Option<PathBuf>,
     cache: CacheManager,
 }
 
@@ -22,19 +28,14 @@ pub struct InstanceGuard {
 
 impl ApplicationPaths {
     pub fn claim() -> Result<Self> {
-        let Some(dirs) = ProjectDirs::from("moe", "swarm", "hrrr") else {
-            bail!("could not resolve platform project directories");
-        };
-        let state = dirs
-            .state_dir()
-            .map_or_else(|| dirs.data_local_dir().join("state"), Path::to_path_buf);
-        let cache = CacheManager::standard(dirs.cache_dir().to_path_buf());
+        let platform = eternalist_apps::ApplicationPaths::claim(PRODUCT)?;
         Ok(Self {
-            config: dirs.config_dir().to_path_buf(),
-            state,
-            data: dirs.data_dir().to_path_buf(),
-            local_data: dirs.data_local_dir().to_path_buf(),
-            cache,
+            config: platform.config,
+            state: platform.state,
+            data: platform.data,
+            local_data: platform.local_data,
+            runtime: platform.runtime,
+            cache: CacheManager::standard(platform.cache),
         })
     }
 
@@ -85,11 +86,7 @@ impl ApplicationPaths {
     }
 
     pub fn lock_instance(&self) -> Result<InstanceGuard> {
-        let root = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map_or_else(|| self.state.clone(), |path| path.join("hrrr"));
-        InstanceGuard::claim(&root)
+        InstanceGuard::claim(self.runtime.as_deref().unwrap_or(&self.state))
     }
 }
 
