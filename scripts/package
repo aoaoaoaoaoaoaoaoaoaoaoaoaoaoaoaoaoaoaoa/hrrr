@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 cargo package --workspace --locked \
+    --exclude hrrr-choreography --exclude hrrr-android-playtest \
     --exclude hrrr-acceptance \
     --exclude hrrr-portability
