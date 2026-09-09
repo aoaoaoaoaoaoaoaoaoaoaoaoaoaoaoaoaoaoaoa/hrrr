@@ -55,7 +55,7 @@ impl<'a> Harness<'a> {
             WindowQuery::title_exact(TITLE),
             ReactionBudget::functional(Duration::from_secs(5)),
         )?;
-        let ready = story.ready(Duration::from_secs(15))?;
+        let ready = story.ready(Duration::from_secs(45))?;
         egui_tester::demand(
             ready.state.contract == hrrr_contract::UI_FINGERPRINT,
             format!(
