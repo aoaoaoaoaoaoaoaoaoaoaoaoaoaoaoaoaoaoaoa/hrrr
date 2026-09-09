@@ -1,11 +1,11 @@
 use crate::{application_paths::ApplicationPaths, persist::save_toml};
 use anyhow::{Context as _, Result, bail};
+use eternalist_apps::Capabilities;
 #[cfg(target_os = "linux")]
 use flate2::read::GzDecoder;
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::ffi::OsStr;
 use std::{
     error::Error as StdError,
@@ -279,6 +279,40 @@ pub fn install_attended(
 
 pub fn was_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Cancelled>().is_some()
+}
+
+/// The Protomaps build streamed where no archive can be installed.
+const ORIGIN_GENERATION: &str = "20260823";
+
+/// Where the basemap's tiles come from.
+#[derive(Clone, Debug)]
+pub enum Supply {
+    /// A verified local archive, with the remote detail source its receipt
+    /// names.
+    Artifact {
+        archive: PathBuf,
+        detail: Option<DetailSource>,
+    },
+    /// The remote origin alone: every tile is fetched as viewed.
+    Origin(DetailSource),
+}
+
+/// Choose the supply for the declared facts.
+///
+/// Where the user manages files, HRRR installs and verifies a local archive
+/// and streams only zoom-12 detail; elsewhere it streams every tile from the
+/// origin, because nobody can run `hrrr basemap install` there.
+pub fn supply(paths: &ApplicationPaths, capabilities: Capabilities) -> Result<Supply> {
+    if !capabilities.configuration {
+        return Ok(Supply::Origin(DetailSource {
+            url: format!("{MAP_ORIGIN}/{ORIGIN_GENERATION}.pmtiles"),
+            generation: ORIGIN_GENERATION.to_owned(),
+        }));
+    }
+    Ok(Supply::Artifact {
+        archive: paths.basemap_path()?,
+        detail: detail_source(paths)?,
+    })
 }
 
 pub fn detail_source(paths: &ApplicationPaths) -> Result<Option<DetailSource>> {

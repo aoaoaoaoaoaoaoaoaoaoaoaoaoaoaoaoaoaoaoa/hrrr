@@ -1,8 +1,8 @@
 use crate::{
     app::WeatherApp,
     application_paths::{ApplicationPaths, InstanceGuard, PRODUCT},
-    basemap_artifact::{self, InstallPhase, InstallProgress},
-    map::MapGpu,
+    basemap_artifact::{self, InstallPhase, InstallProgress, Supply},
+    map::{MapGpu, Tier},
     tray::{Signal as TraySignal, Tray},
     vector_map::VectorMapGpu,
     witness,
@@ -14,7 +14,8 @@ use brass_poolrooms::{
 };
 use crossbeam_channel::{Receiver, bounded};
 use eternalist_apps::{
-    CloseDisposition, LivingWait, NativeApp, NativeWake, ProductIdentity, WindowSpec,
+    Capabilities, CloseDisposition, Ingress, LivingWait, NativeApp, NativeWake, ProductIdentity,
+    WindowSpec,
     egui_wgpu::{Renderer, wgpu},
 };
 use std::{
@@ -27,8 +28,8 @@ use std::{
     time::Instant,
 };
 
-pub fn run(ctx: egui::Context) -> Result<()> {
-    eternalist_apps::run_with(ctx, ForecastViewer::open)
+pub fn run(ingress: Ingress, ctx: egui::Context) -> Result<()> {
+    eternalist_apps::run_with(ingress, ctx, ForecastViewer::open)
 }
 
 struct ForecastViewer {
@@ -42,9 +43,9 @@ struct ForecastViewer {
 }
 
 impl ForecastViewer {
-    fn open(ctx: &egui::Context) -> Result<Self> {
+    fn open(ctx: &egui::Context, ingress: &Ingress) -> Result<Self> {
         Ok(Self {
-            body: Body::open(ctx)?,
+            body: Body::open(ctx, ingress)?,
             tray: None,
             tray_armed: false,
             reveal: Arc::new(AtomicBool::new(false)),
@@ -153,13 +154,25 @@ impl NativeApp for ForecastViewer {
         }
     }
 
-    fn register_gpu(renderer: &mut Renderer, device: &wgpu::Device, format: wgpu::TextureFormat) {
+    fn register_gpu(
+        renderer: &mut Renderer,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        capabilities: Capabilities,
+    ) {
+        let tier = Tier::for_capabilities(capabilities);
         let _prior = renderer
             .callback_resources
-            .insert(MapGpu::new(device, format));
+            .insert(MapGpu::new(device, format, tier));
         let _prior = renderer
             .callback_resources
-            .insert(VectorMapGpu::new(device, format));
+            .insert(VectorMapGpu::new(device, format, tier));
+    }
+
+    fn suspended(&mut self) {
+        if let Body::Ready(weather) = &mut self.body {
+            weather.suspend();
+        }
     }
 
     #[cfg(feature = "egui-test")]
@@ -180,8 +193,8 @@ struct Seed {
 }
 
 impl Seed {
-    fn claim() -> Result<Self> {
-        let paths = ApplicationPaths::claim()?;
+    fn claim(ingress: &Ingress) -> Result<Self> {
+        let paths = ApplicationPaths::claim(ingress)?;
         let instance = paths.lock_instance()?;
         Ok(Self { paths, instance })
     }
@@ -204,9 +217,13 @@ enum Body {
 }
 
 impl Body {
-    fn open(ctx: &egui::Context) -> Result<Self> {
-        let seed = Seed::claim()?;
-        let archive = seed.archive()?;
+    fn open(ctx: &egui::Context, ingress: &Ingress) -> Result<Self> {
+        let seed = Seed::claim(ingress)?;
+        let Supply::Artifact { archive, .. } =
+            basemap_artifact::supply(&seed.paths, Capabilities::of(ctx))?
+        else {
+            return Ok(Self::Ready(Box::new(seed.open(ctx)?)));
+        };
         if archive.is_file() {
             return Ok(Self::Ready(Box::new(seed.open(ctx)?)));
         }

@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 csv = "1.4.0"
-egui-tester = "0.9.8"
+egui-tester = "0.9.13"
 hrrr-choreography = { path = "../hrrr-choreography" }
 serde = { version = "1.0.229", features = ["derive"] }
 

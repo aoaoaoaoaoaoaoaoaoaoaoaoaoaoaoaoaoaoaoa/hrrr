@@ -11,7 +11,7 @@ const SCHEMA: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MobilePanel {
+pub(crate) enum DrawerPanel {
     Application,
     Field,
     Forecast,
@@ -20,8 +20,17 @@ pub(crate) enum MobilePanel {
     Status,
 }
 
-impl MobilePanel {
-    #[cfg(target_os = "android")]
+impl DrawerPanel {
+    /// Every Panel in Drawer order.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Application,
+        Self::Field,
+        Self::Forecast,
+        Self::ActiveView,
+        Self::Views,
+        Self::Status,
+    ];
+
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Application => "application",
@@ -43,7 +52,7 @@ pub struct SessionState {
     pub active_view: Option<EntryName>,
     pub closed_folders: BTreeSet<String>,
     pub inspector_scroll: f32,
-    pub mobile_panel: Option<MobilePanel>,
+    pub drawer_panel: Option<DrawerPanel>,
 }
 
 impl Default for SessionState {
@@ -56,7 +65,7 @@ impl Default for SessionState {
             active_view: None,
             closed_folders: BTreeSet::new(),
             inspector_scroll: 0.0,
-            mobile_panel: None,
+            drawer_panel: None,
         }
     }
 }
@@ -94,7 +103,7 @@ struct VersionedSessionState {
     #[serde(default)]
     inspector_scroll: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    mobile_panel: Option<MobilePanel>,
+    drawer_panel: Option<DrawerPanel>,
 }
 
 #[derive(Deserialize)]
@@ -131,11 +140,6 @@ impl SessionState {
     pub fn load(path: &Path) -> Result<(Self, bool)> {
         let Some(wire) = load_toml(path, "session state")? else {
             let state = Self::default();
-            #[cfg(target_os = "android")]
-            let state = Self {
-                overlay: Overlay::default(),
-                ..state
-            };
             return Ok((state, false));
         };
         match wire {
@@ -164,7 +168,7 @@ impl SessionState {
                 active_view: self.active_view.clone(),
                 closed_folders: self.closed_folders.clone(),
                 inspector_scroll: self.inspector_scroll,
-                mobile_panel: self.mobile_panel,
+                drawer_panel: self.drawer_panel,
             },
             path,
             "serialize session state",
@@ -184,7 +188,7 @@ impl SessionState {
             active_view: wire.active_view,
             closed_folders: wire.closed_folders,
             inspector_scroll: lawful_scroll(wire.inspector_scroll),
-            mobile_panel: wire.mobile_panel,
+            drawer_panel: wire.drawer_panel,
         })
     }
 
@@ -204,7 +208,7 @@ impl SessionState {
             active_view: wire.active_view,
             closed_folders: wire.closed_folders,
             inspector_scroll: 0.0,
-            mobile_panel: None,
+            drawer_panel: None,
         })
     }
 }
@@ -244,10 +248,10 @@ mod tests {
         )?;
         assert_eq!(prior.base, LeadHour::ZERO);
         let current = SessionState::from_versioned(toml::from_str::<VersionedSessionState>(
-            "schema = 3\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\nmobile_panel = \"forecast\"\n",
+            "schema = 3\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\ndrawer_panel = \"forecast\"\n",
         )?)?;
         assert_eq!(current.base, LeadHour::forge(3)?);
-        assert_eq!(current.mobile_panel, Some(MobilePanel::Forecast));
+        assert_eq!(current.drawer_panel, Some(DrawerPanel::Forecast));
         Ok(())
     }
 

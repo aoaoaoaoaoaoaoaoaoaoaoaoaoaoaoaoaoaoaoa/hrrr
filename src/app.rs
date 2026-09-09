@@ -1,4 +1,3 @@
-#[cfg(not(target_os = "android"))]
 use crate::view::ViewSlot;
 use crate::{
     application_paths::{ApplicationPaths, InstanceGuard},
@@ -14,46 +13,26 @@ use crate::{
         RunSelection, Viewport,
     },
     spec::{RangeRegime, Scale, ScaleAtlas, TemperatureSeason},
-    state::SessionState,
+    state::{DrawerPanel, SessionState},
     vector_map::VectorPaint,
     view::{SavedView, ViewLibrary},
     wind_barb,
     worker::{Command, DemandId, Event, LoadDemand, LoadIntent, Worker},
 };
 use anyhow::Result;
-#[cfg(not(target_os = "android"))]
-use brass_poolrooms::water::Domain;
 use brass_poolrooms::{
     chrome,
-    water::{Frame as WaterFrame, Surface, Wetness},
+    water::{Domain, Frame as WaterFrame, Surface, Wetness},
 };
 use egui::Color32;
-#[cfg(target_os = "android")]
-use eternalist_apps::command_guide::{TouchGesture, TouchGuideGroup};
-#[cfg(target_os = "android")]
-use eternalist_apps::settings::MOBILE_WATER_EFFECTS;
 use eternalist_apps::{
-    ApplicationHeader, ScribeOutcome, SettledScribe,
+    ApplicationHeader, Capabilities, Drawer, ScribeOutcome, SettledScribe,
     command_guide::{CommandGuide, GuideGesture, GuideGroup},
     commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     configuration::ConfigurationLedger,
     panel_navigation::PanelNavigator,
-    settings::{SettingSpec, SettingsFile, SettingsSheet},
-};
-use eternalist_apps::{
-    ScribeOutcome, SettledScribe,
-    command_guide::{CommandGuide, GuideGesture, GuideGroup},
-    commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
     responsiveness::DrainBudget,
-    settings::SettingsSheet,
-};
-#[cfg(not(target_os = "android"))]
-use eternalist_apps::{
-    command_guide::{GuideGesture, GuideGroup},
-    commands::{CommandDispatch, CommandStatus, Shortcut, ShortcutKey, ShortcutModifiers},
-    configuration::ConfigurationLedger,
-    panel_navigation::PanelNavigator,
-    settings::{SettingSpec, SettingsFile},
+    settings::{SettingSpec, SettingsFile, SettingsSheet},
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -61,26 +40,31 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "android")]
-#[path = "app_mobile.rs"]
-mod mobile;
-
 const STATE_SETTLE: Duration = Duration::from_millis(450);
 const SCALE_SETTLE: Duration = Duration::from_millis(180);
 const FRONTIER_POLL: Duration = Duration::from_mins(1);
 const TILE_RETRY_DELAY: Duration = Duration::from_secs(15);
 const EVENT_DRAIN: DrainBudget = DrainBudget::new(64, Duration::from_millis(3));
 const FIELD_CAPACITY: usize = 12;
-const VECTOR_CEILING: usize = 512 * 1_048_576;
-#[cfg(target_os = "android")]
+/// A tap this close to the transient probe clears it instead of moving it.
 const TRANSIENT_PROBE_REAP_RADIUS: f32 = 18.0;
-#[cfg(not(target_os = "android"))]
+/// Field buttons and run steps grow to a fingertip under touch.
+const POINTER_BUTTON_HEIGHT: f32 = 26.0;
+const TOUCH_BUTTON_HEIGHT: f32 = 44.0;
+const DRAWER_ROSTER: [&str; 6] = [
+    DrawerPanel::Application.name(),
+    DrawerPanel::Field.name(),
+    DrawerPanel::Forecast.name(),
+    DrawerPanel::ActiveView.name(),
+    DrawerPanel::Views.name(),
+    DrawerPanel::Status.name(),
+];
+const VECTOR_CEILING: usize = 512 * 1_048_576;
 const CLOSE_TO_TRAY: SettingSpec = SettingSpec::new(
     "close_to_tray",
     "CLOSE TO TRAY",
     "Closing the window hides HRRR instead of ending the forecast session.",
 );
-#[cfg(not(target_os = "android"))]
 const VIEW_SLOT_KEYS: [Shortcut; 10] = [
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('0')),
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('1')),
@@ -93,7 +77,6 @@ const VIEW_SLOT_KEYS: [Shortcut; 10] = [
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('8')),
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Character('9')),
 ];
-#[cfg(not(target_os = "android"))]
 const ASSIGN_VIEW_SLOT_KEYS: [Shortcut; 10] = [
     Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('0')),
     Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('1')),
@@ -106,30 +89,24 @@ const ASSIGN_VIEW_SLOT_KEYS: [Shortcut; 10] = [
     Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('8')),
     Shortcut::new(ShortcutModifiers::SHIFT, ShortcutKey::Character('9')),
 ];
-#[cfg(not(target_os = "android"))]
 const TOGGLE_CONTROLS: [Shortcut; 1] = [Shortcut::new(
     ShortcutModifiers::NONE,
     ShortcutKey::Function(9),
 )];
-#[cfg(not(target_os = "android"))]
 const NEXT_CONTROL_SECTION: [Shortcut; 1] =
     [Shortcut::new(ShortcutModifiers::CONTROL, ShortcutKey::Tab)];
-#[cfg(not(target_os = "android"))]
 const PREVIOUS_CONTROL_SECTION: [Shortcut; 1] = [Shortcut::new(
     ShortcutModifiers::CONTROL.plus(ShortcutModifiers::SHIFT),
     ShortcutKey::Tab,
 )];
-#[cfg(not(target_os = "android"))]
 const ADJUST_FORECAST_TIME: [Shortcut; 2] = [
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::ArrowLeft),
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::ArrowRight),
 ];
-#[cfg(not(target_os = "android"))]
 const FORECAST_TIME_BOUNDS: [Shortcut; 2] = [
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Home),
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::End),
 ];
-#[cfg(not(target_os = "android"))]
 const FORECAST_CONTROL_GESTURES: [GuideGesture; 5] = [
     GuideGesture::new(
         "Toggle controls",
@@ -157,7 +134,6 @@ const FORECAST_CONTROL_GESTURES: [GuideGesture; 5] = [
         &FORECAST_TIME_BOUNDS,
     ),
 ];
-#[cfg(not(target_os = "android"))]
 const VIEW_GESTURES: [GuideGesture; 2] = [
     GuideGesture::new(
         "Select bound view",
@@ -170,13 +146,67 @@ const VIEW_GESTURES: [GuideGesture; 2] = [
         &ASSIGN_VIEW_SLOT_KEYS,
     ),
 ];
-#[cfg(not(target_os = "android"))]
 const FORECAST_CONTROL_GUIDE_GROUP: GuideGroup =
     GuideGroup::new("FORECAST CONTROLS", &FORECAST_CONTROL_GESTURES);
-#[cfg(not(target_os = "android"))]
 const VIEW_GUIDE_GROUP: GuideGroup = GuideGroup::new("VIEW SHORTCUTS", &VIEW_GESTURES);
-#[cfg(not(target_os = "android"))]
-const GUIDE_GROUPS: [GuideGroup; 2] = [FORECAST_CONTROL_GUIDE_GROUP, VIEW_GUIDE_GROUP];
+const INSPECTOR_TOUCH_GESTURES: [GuideGesture; 3] = [
+    GuideGesture::new(
+        "Switch panel",
+        "Moves to the adjacent Inspector panel.",
+        &[],
+    )
+    .cued("SWIPE ↔"),
+    GuideGesture::new(
+        "Scroll panel",
+        "Moves vertically through the current panel.",
+        &[],
+    )
+    .cued("SWIPE ↕"),
+    GuideGesture::new(
+        "Lower or raise Inspector",
+        "Leaves the map exposed or restores the current panel.",
+        &[],
+    )
+    .cued("TAP CENTER ARROW"),
+];
+const MAP_TOUCH_GESTURES: [GuideGesture; 5] = [
+    GuideGesture::new("Pan map", "Moves the map beneath one finger.", &[]).cued("DRAG"),
+    GuideGesture::new(
+        "Zoom map",
+        "Changes scale around the gesture's center.",
+        &[],
+    )
+    .cued("PINCH"),
+    GuideGesture::new(
+        "Probe forecast",
+        "Places or moves a temporary reading.",
+        &[],
+    )
+    .cued("TAP"),
+    GuideGesture::new("Clear probe", "Removes the temporary reading.", &[]).cued("TAP PROBE"),
+    GuideGesture::new(
+        "Keep or move pin",
+        "Touch and hold the map to keep a reading; drag its forged head to move it.",
+        &[],
+    )
+    .cued("HOLD / DRAG PIN"),
+];
+const VIEW_TOUCH_GESTURES: [GuideGesture; 1] = [GuideGesture::new(
+    "Rearrange views",
+    "Moves a view or folder to the indicated berth.",
+    &[],
+)
+.cued("DRAG HANDLE")];
+const INSPECTOR_TOUCH_GROUP: GuideGroup = GuideGroup::new("INSPECTOR", &INSPECTOR_TOUCH_GESTURES);
+const MAP_TOUCH_GROUP: GuideGroup = GuideGroup::new("MAP", &MAP_TOUCH_GESTURES);
+const VIEW_TOUCH_GROUP: GuideGroup = GuideGroup::new("VIEWS", &VIEW_TOUCH_GESTURES);
+const GUIDE_GROUPS: [GuideGroup; 5] = [
+    FORECAST_CONTROL_GUIDE_GROUP,
+    VIEW_GUIDE_GROUP,
+    INSPECTOR_TOUCH_GROUP,
+    MAP_TOUCH_GROUP,
+    VIEW_TOUCH_GROUP,
+];
 
 #[derive(Clone, Copy)]
 enum TileRejection {
@@ -476,31 +506,39 @@ impl RangeSurvey {
     }
 }
 
+/// How the Inspector is disposed: the Dock needs a hovering pointer for its
+/// actuator; without one the Drawer rises from the bottom edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Disposition {
+    Dock,
+    Drawer,
+}
+
+impl Disposition {
+    const fn for_capabilities(capabilities: Capabilities) -> Self {
+        if capabilities.pointer {
+            Self::Dock
+        } else {
+            Self::Drawer
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct DirtyState {
     session_state: bool,
     views: bool,
-    #[cfg(target_os = "android")]
-    configuration: bool,
 }
 
 impl DirtyState {
-    #[cfg(not(target_os = "android"))]
     const fn any(self) -> bool {
         self.session_state || self.views
-    }
-
-    #[cfg(target_os = "android")]
-    const fn any(self) -> bool {
-        self.session_state || self.views || self.configuration
     }
 }
 
 struct DurableState {
     session_state: Option<SessionState>,
     views: Option<ViewLibrary>,
-    #[cfg(target_os = "android")]
-    configuration: Option<Configuration>,
 }
 
 impl DurableState {
@@ -516,12 +554,6 @@ impl DurableState {
         {
             faults.push(format!("saved views: {error:#}"));
         }
-        #[cfg(target_os = "android")]
-        if let Some(configuration) = self.configuration
-            && let Err(error) = configuration.save(&paths.config_path())
-        {
-            faults.push(format!("configuration: {error:#}"));
-        }
         if faults.is_empty() {
             Ok(())
         } else {
@@ -532,10 +564,10 @@ impl DurableState {
 
 pub struct WeatherApp {
     _instance: InstanceGuard,
-    #[cfg(not(target_os = "android"))]
+    capabilities: Capabilities,
+    disposition: Disposition,
+    map_multitouch: bool,
     configuration: ConfigurationLedger<Configuration>,
-    #[cfg(target_os = "android")]
-    configuration: Configuration,
     settings: SettingsSheet,
     views: ViewLibrary,
     session_state: SessionState,
@@ -560,15 +592,10 @@ pub struct WeatherApp {
     presented_basemap: Arc<[Arc<VectorTile>]>,
     tile_inflight: HashSet<TileKey>,
     tile_rejections: HashMap<TileKey, TileRejection>,
-    #[cfg(not(target_os = "android"))]
     panels: PanelNavigator,
-    #[cfg(target_os = "android")]
-    mobile_inspector: mobile::MobileInspector,
     guide: CommandGuide,
     transient_probe: Option<MercatorPoint>,
     pin_tug: Option<PinTug>,
-    #[cfg(target_os = "android")]
-    map_multitouch: bool,
     map_undo: MapUndo,
     view_name_entry: String,
     name_edit: NameEdit,
@@ -591,26 +618,17 @@ impl WeatherApp {
         paths: ApplicationPaths,
         instance: InstanceGuard,
     ) -> Result<Self> {
-        #[cfg(not(target_os = "android"))]
+        let capabilities = Capabilities::of(ctx);
         let legacy_views = Configuration::migrate_legacy_views(&paths.config_path())?;
-        #[cfg(target_os = "android")]
-        let legacy_views = None;
-        #[cfg(not(target_os = "android"))]
         let configuration: ConfigurationLedger<Configuration> = ConfigurationLedger::raise(
             "hrrr-configuration-scribe",
             ctx,
             paths.config_path(),
             STATE_SETTLE,
         )?;
-        #[cfg(target_os = "android")]
-        let configuration = Configuration::load(&paths.config_path())?;
-        #[cfg(not(target_os = "android"))]
 
         chrome::set_font_scale(ctx, configuration.live().font_scale);
         let mut settings = SettingsSheet::default();
-        #[cfg(target_os = "android")]
-        let settings = SettingsSheet::default();
-        #[cfg(not(target_os = "android"))]
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
         }
@@ -641,10 +659,7 @@ impl WeatherApp {
         let run_extents = witnessed_frontier(run).into_iter().collect();
         #[cfg(not(feature = "egui-test"))]
         let run_extents = HashMap::new();
-        #[cfg(not(target_os = "android"))]
-        let wetness = Wetness::Wet;
-        #[cfg(target_os = "android")]
-        let wetness = if configuration.water_effects {
+        let wetness = if capabilities.power_unconstrained {
             Wetness::Wet
         } else {
             Wetness::Dry
@@ -673,19 +688,15 @@ impl WeatherApp {
         let dirty = DirtyState {
             session_state: migrated_slate,
             views: migrated_views,
-            #[cfg(target_os = "android")]
-            configuration: false,
         };
         if dirty.any() {
             scribe.mark();
         }
-        #[cfg(target_os = "android")]
-        let mobile_inspector = mobile::MobileInspector::restore(&session_state);
         let app = Self {
             _instance: instance,
-            #[cfg(not(target_os = "android"))]
-            configuration,
-            #[cfg(target_os = "android")]
+            capabilities,
+            disposition: Disposition::for_capabilities(capabilities),
+            map_multitouch: false,
             configuration,
             settings,
             views,
@@ -711,15 +722,10 @@ impl WeatherApp {
             presented_basemap: Arc::from([]),
             tile_inflight: HashSet::new(),
             tile_rejections: HashMap::new(),
-            #[cfg(not(target_os = "android"))]
             panels: PanelNavigator::default(),
-            #[cfg(target_os = "android")]
-            mobile_inspector,
             guide: CommandGuide::default(),
             transient_probe: None,
             pin_tug: None,
-            #[cfg(target_os = "android")]
-            map_multitouch: false,
             map_undo: MapUndo::default(),
             view_name_entry: String::new(),
             name_edit: NameEdit::Idle,
@@ -739,7 +745,6 @@ impl WeatherApp {
         Ok(app)
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         chrome::set_font_scale(ui.ctx(), self.configuration.live().font_scale);
         self.absorb_events(ui.ctx());
@@ -761,17 +766,10 @@ impl WeatherApp {
             self.apply_edict(dispatch);
         }
         self.take_keys(ui.ctx());
-        let mut panels = std::mem::take(&mut self.panels);
-        let inspector = eternalist_apps::Inspector::new("forecast-inspector")
-            .scroll_id("forecast-inspector-scroll")
-            .scroll_offset(self.session_state.inspector_scroll)
-            .show(ui, |ui| self.inspector(ui, &mut panels));
-        self.panels = panels;
-        if inspector.scroll_offset != self.session_state.inspector_scroll {
-            self.session_state.inspector_scroll = inspector.scroll_offset;
-            self.mark_dirty();
+        match self.disposition {
+            Disposition::Dock => self.dock(ui),
+            Disposition::Drawer => self.drawer(ui),
         }
-        inspector.agitate(&mut self.water);
         let _center = egui::CentralPanel::default().show(ui, |ui| self.map(ui));
         let mut guide = std::mem::take(&mut self.guide);
         guide.show(
@@ -786,11 +784,124 @@ impl WeatherApp {
         self.show_settings(ui.ctx());
     }
 
+    fn dock(&mut self, ui: &mut egui::Ui) {
+        let mut panels = std::mem::take(&mut self.panels);
+        let inspector = eternalist_apps::Inspector::new("forecast-inspector")
+            .scroll_id("forecast-inspector-scroll")
+            .scroll_offset(self.session_state.inspector_scroll)
+            .show(ui, |ui| self.inspector(ui, &mut panels));
+        self.panels = panels;
+        if inspector.scroll_offset != self.session_state.inspector_scroll {
+            self.session_state.inspector_scroll = inspector.scroll_offset;
+            self.mark_dirty();
+        }
+        inspector.agitate(&mut self.water);
+    }
+
+    fn drawer(&mut self, ui: &mut egui::Ui) {
+        let initial = if self.session_state.overlay.active().is_some() {
+            DrawerPanel::Forecast
+        } else {
+            self.session_state
+                .drawer_panel
+                .unwrap_or(DrawerPanel::Field)
+        };
+        let response = Drawer::new("forecast-inspector-drawer", &DRAWER_ROSTER)
+            .initial_panel(initial as usize)
+            .show(ui, |ui, panel| {
+                self.drawer_panel(ui, DrawerPanel::ALL[panel]);
+            });
+        self.water.begin(Domain::basin(response.domain));
+        for control in &response.controls {
+            self.water.monoglyph(control);
+        }
+        let shown = DrawerPanel::ALL[response.panel];
+        if self.session_state.drawer_panel != Some(shown) {
+            self.session_state.drawer_panel = Some(shown);
+            self.mark_dirty();
+        }
+    }
+
+    fn drawer_panel(&mut self, ui: &mut egui::Ui, panel: DrawerPanel) {
+        match panel {
+            DrawerPanel::Application => {
+                let _header = ApplicationHeader::new("HRRR")
+                    .settings_attention(self.configuration.fault().is_some())
+                    .show(ui, &mut self.guide, &mut self.settings, &mut self.water);
+                ui.add_space(8.0);
+                let _identity = ui.label(chrome::muted(
+                    "HIGH-RESOLUTION RAPID REFRESH\nNOAA FORECAST FIELD VIEWER",
+                ));
+                ui.add_space(8.0);
+                let undo = ui
+                    .add_enabled_ui(self.map_undo.has_reversal_for(&self.active_view), |ui| {
+                        chrome::Monoglyph::symbol(chrome::Symbol::Undo).show(ui)
+                    })
+                    .inner
+                    .on_hover_text("Undo the last pin or probe change");
+                self.water.monoglyph(&undo);
+                if undo.clicked() {
+                    self.undo_map_object();
+                }
+            }
+            DrawerPanel::Field => self.field_buttons(ui),
+            DrawerPanel::Forecast => self.forecast_controls(ui),
+            DrawerPanel::ActiveView => self.active_view_panel(ui),
+            DrawerPanel::Views => self.view_library_panel(ui),
+            DrawerPanel::Status => self.status_panel(ui),
+        }
+    }
+
+    /// The forecast-field buttons, sized for a pointer or a fingertip.
+    fn field_buttons(&mut self, ui: &mut egui::Ui) {
+        let height = if self.capabilities.touch {
+            TOUCH_BUTTON_HEIGHT
+        } else {
+            POINTER_BUTTON_HEIGHT
+        };
+        let mut chosen_product = None;
+        for &row in Product::ROWS {
+            let _row = ui.horizontal(|ui| {
+                let widths = apportion_product_widths(ui, row);
+                for (index, &product) in row.iter().enumerate() {
+                    let response = ui.add_sized(
+                        [widths[index], height],
+                        egui::Button::new(product.label())
+                            .truncate()
+                            .selected(self.session_state.overlay.active() == Some(product)),
+                    );
+                    crate::witness::anchor(
+                        ui,
+                        hrrr_contract::Target::Field(product.cache_name()),
+                        response.rect,
+                    );
+                    chrome::tension(ui, &response);
+                    if response.hovered() {
+                        self.water.hover(("product", product), response.rect);
+                    }
+                    if response.clicked() {
+                        chosen_product = Some((product, response.rect));
+                    }
+                }
+            });
+        }
+        if let Some((product, rect)) = chosen_product {
+            self.water.select(rect);
+            self.strike_overlay(product);
+        }
+    }
+
+    fn status_panel(&self, ui: &mut egui::Ui) {
+        let _status = ui.label(chrome::muted(&self.status));
+        ui.add_space(3.0);
+        let _source = ui.label(chrome::muted(format!(
+            "FORECAST · NOAA\nMAP · {}",
+            self.basemap_status
+        )));
+    }
+
     pub fn service_deadline(&self, _now: Instant) -> Option<Instant> {
-        #[cfg(not(target_os = "android"))]
         let configuration = self.configuration.deadline();
-        #[cfg(target_os = "android")]
-        let configuration = None;
         self.scribe
             .deadline()
             .into_iter()
@@ -807,10 +918,7 @@ impl WeatherApp {
     }
 
     pub fn service_deadline_reached(&mut self, now: Instant) -> bool {
-        #[cfg(not(target_os = "android"))]
         let mut changed = self.configuration.service_deadline_reached(now);
-        #[cfg(target_os = "android")]
-        let mut changed = false;
         self.tile_rejections.retain(|_key, rejection| {
             let expired = matches!(rejection, TileRejection::RetryAt(deadline) if *deadline <= now);
             changed |= expired;
@@ -851,6 +959,11 @@ impl WeatherApp {
         self.water.frame(ctx, pixels_per_point, tooltip_rects, None)
     }
 
+    /// Checkpoint before the platform takes the surface away.
+    pub fn suspend(&mut self) {
+        self.retire();
+    }
+
     fn retire(&mut self) {
         if let Err(error) = self.scribe.flush(self.durable_state_all()) {
             eprintln!("could not persist HRRR state during retirement: {error:#}");
@@ -858,17 +971,10 @@ impl WeatherApp {
         self.dirty = DirtyState::default();
     }
 
-    #[cfg(target_os = "android")]
-    pub fn suspend(&mut self) {
-        self.retire();
-    }
-
-    #[cfg(not(target_os = "android"))]
     pub fn close_to_tray_enabled(&self) -> bool {
         self.configuration.live().close_minimizes
     }
 
-    #[cfg(not(target_os = "android"))]
     fn reload_configuration(&mut self) {
         if (self.configuration.fault().is_some() || self.configuration.settled())
             && let Err(error) = self.configuration.request_reload()
@@ -877,7 +983,6 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn show_settings(&mut self, ctx: &egui::Context) {
         let path = self.configuration.path().to_owned();
         let fault = self.configuration.fault().map(ToString::to_string);
@@ -890,13 +995,17 @@ impl WeatherApp {
         let file = file
             .reloading(self.configuration.reload_pending())
             .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
+        let file = self.capabilities.configuration.then_some(file);
+        let tray = !self.capabilities.retirement;
         let mut close_changed = false;
         let mut font_scale_changed = false;
         let response = self.settings.show(ctx, &mut self.water, file, |settings| {
             settings.group("APPEARANCE");
             font_scale_changed |= settings.font_size(&mut font_scale);
-            settings.group("WINDOW");
-            close_changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
+            if tray {
+                settings.group("WINDOW");
+                close_changed |= settings.boolean(CLOSE_TO_TRAY, &mut close_minimizes);
+            }
         });
         if close_changed || font_scale_changed {
             match self.configuration.revise(|config| {
@@ -924,47 +1033,17 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn inspector(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
         let _header = ApplicationHeader::new("HRRR")
             .settings_attention(self.configuration.fault().is_some())
             .show(ui, &mut self.guide, &mut self.settings, &mut self.water);
         ui.add_space(5.0);
         let mut panels = navigator.frame(ui.ctx());
-        let mut chosen_product = None;
         let field = panels.panel(ui, "product", "field", true, |ui| {
-            for &row in Product::ROWS {
-                let _row = ui.horizontal(|ui| {
-                    let widths = apportion_product_widths(ui, row);
-                    for (index, &product) in row.iter().enumerate() {
-                        let response = ui.add_sized(
-                            [widths[index], 26.0],
-                            egui::Button::new(product.label())
-                                .truncate()
-                                .selected(self.session_state.overlay.active() == Some(product)),
-                        );
-                        crate::witness::anchor(
-                            ui,
-                            hrrr_contract::Target::Field(product.cache_name()),
-                            response.rect,
-                        );
-                        chrome::tension(ui, &response);
-                        if response.hovered() {
-                            self.water.hover(("product", product), response.rect);
-                        }
-                        if response.clicked() {
-                            chosen_product = Some((product, response.rect));
-                        }
-                    }
-                });
-            }
+            self.field_buttons(ui);
         });
         crate::witness::response(ui, hrrr_contract::Target::Panel("field"), &field.header);
         self.water.fold(field.wake);
-        if let Some((product, rect)) = chosen_product {
-            self.water.select(rect);
-            self.strike_overlay(product);
-        }
 
         let forecast = panels.panel(ui, "forecast", "forecast", true, |ui| {
             self.forecast_controls(ui);
@@ -993,12 +1072,7 @@ impl WeatherApp {
         self.water.fold(views.wake);
 
         let status = panels.panel(ui, "status", "status", true, |ui| {
-            let _status = ui.label(chrome::muted(&self.status));
-            ui.add_space(3.0);
-            let _source = ui.label(chrome::muted(format!(
-                "FORECAST · NOAA\nMAP · {}",
-                self.basemap_status
-            )));
+            self.status_panel(ui);
         });
         crate::witness::response(ui, hrrr_contract::Target::Panel("status"), &status.header);
         self.water.fold(status.wake);
@@ -1046,24 +1120,12 @@ impl WeatherApp {
         let _run = ui.label(chrome::eyebrow(format!("RUN · {run_label}")));
         ui.add_space(3.0);
 
-        #[cfg(target_os = "android")]
-        let Some(product) = self.session_state.overlay.active() else {
-            let _empty = ui.label(chrome::muted("select a forecast field…"));
-            return;
-        };
-        #[cfg(not(target_os = "android"))]
         let product = self.session_state.overlay.active();
-        #[cfg(target_os = "android")]
-        let axis = product.lead_axis(run).ok();
-        #[cfg(not(target_os = "android"))]
         let axis = product.and_then(|product| product.lead_axis(run).ok());
         let valid_label = axis
             .and_then(|axis| axis.local_label(self.session_state.lead).ok())
             .or_else(|| run.valid_local_label(self.session_state.lead).ok())
             .unwrap_or_else(|| "invalid valid time".to_owned());
-        #[cfg(target_os = "android")]
-        let horizon = product.horizon(run).unwrap_or(LeadHour::ZERO);
-        #[cfg(not(target_os = "android"))]
         let horizon = product
             .and_then(|product| product.horizon(run).ok())
             .unwrap_or(LeadHour::ZERO);
@@ -1072,9 +1134,6 @@ impl WeatherApp {
             .get(&run)
             .copied()
             .map(|published| published.min(horizon));
-        #[cfg(target_os = "android")]
-        let cumulative = product.has_baseline();
-        #[cfg(not(target_os = "android"))]
         let cumulative = product.is_some_and(Product::has_baseline);
         let lead_floor = if cumulative {
             self.session_state.base.next()
@@ -1092,29 +1151,19 @@ impl WeatherApp {
         let current = axis.map_or(0, |axis| axis.index_at_or_before(self.session_state.lead));
         let mut step = None;
         let _row = ui.horizontal(|ui| {
-            #[cfg(target_os = "android")]
             let previous = ui
                 .add_enabled_ui(lead_ready && current > allowed_floor, |ui| {
                     chrome::Monoglyph::symbol(chrome::Symbol::ArrowLeft).show(ui)
                 })
                 .inner
                 .on_hover_text("Previous valid time");
-            #[cfg(not(target_os = "android"))]
-            let previous = ui.add_enabled(
-                lead_ready && current > allowed_floor,
-                egui::Button::new("◀"),
-            );
-            #[cfg(target_os = "android")]
             self.water.monoglyph(&previous);
-            #[cfg(not(target_os = "android"))]
-            chrome::tension(ui, &previous);
             if previous.clicked()
                 && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_sub(1)))
             {
                 step = Some((lead, previous.rect));
             }
             let _lead = ui.label(chrome::section_title(&valid_label));
-            #[cfg(target_os = "android")]
             let next = ui
                 .add_enabled_ui(
                     ready_ceiling.is_some_and(|ceiling| lead_ready && current < ceiling),
@@ -1122,15 +1171,7 @@ impl WeatherApp {
                 )
                 .inner
                 .on_hover_text("Next valid time");
-            #[cfg(not(target_os = "android"))]
-            let next = ui.add_enabled(
-                ready_ceiling.is_some_and(|ceiling| lead_ready && current < ceiling),
-                egui::Button::new("▶"),
-            );
-            #[cfg(target_os = "android")]
             self.water.monoglyph(&next);
-            #[cfg(not(target_os = "android"))]
-            chrome::tension(ui, &next);
             if next.clicked()
                 && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_add(1)))
             {
@@ -1214,7 +1255,6 @@ impl WeatherApp {
                             self.session_state.cycle == RunSelection::Latest
                                 && latest_run == Some(run.id),
                         );
-                #[cfg(not(target_os = "android"))]
                 let button = button.shortcut_text(
                     commands::canon().shortcuts(Edict::FollowLatest)[0].label(ui.ctx()),
                 );
@@ -1235,7 +1275,6 @@ impl WeatherApp {
                     self.session_state.cycle == RunSelection::LatestLong
                         && latest_extended == Some(run.id),
                 );
-                #[cfg(not(target_os = "android"))]
                 let button = button.shortcut_text(
                     commands::canon().shortcuts(Edict::FollowLatestLong)[0].label(ui.ctx()),
                 );
@@ -1245,27 +1284,23 @@ impl WeatherApp {
         if chrome::exact_activation(ui, &latest_long) {
             run_step = Some((RunSelection::LatestLong, latest_long.rect));
         }
+        let step_height = if self.capabilities.touch {
+            TOUCH_BUTTON_HEIGHT
+        } else {
+            22.0
+        };
         let _step = ui.horizontal(|ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-            #[cfg(target_os = "android")]
-            let older = ui.add_sized([width, 44.0], egui::Button::new("OLDER"));
-            #[cfg(not(target_os = "android"))]
-            let older = ui.add_sized([width, 22.0], egui::Button::new("OLDER"));
+            let older = ui.add_sized([width, step_height], egui::Button::new("OLDER"));
             if older.clicked() {
                 run_step = run
                     .previous()
                     .ok()
                     .map(|candidate| (RunSelection::Fixed(candidate.id), older.rect));
             }
-            #[cfg(target_os = "android")]
-            let newer = ui.add_enabled(
-                latest_run.is_some_and(|latest| run.id < latest),
-                egui::Button::new("NEWER").min_size(egui::vec2(width, 44.0)),
-            );
-            #[cfg(not(target_os = "android"))]
             let newer = ui
                 .add_enabled_ui(latest_run.is_some_and(|latest| run.id < latest), |ui| {
-                    ui.add_sized([width, 22.0], egui::Button::new("NEWER"))
+                    ui.add_sized([width, step_height], egui::Button::new("NEWER"))
                 })
                 .inner;
             if newer.clicked() {
@@ -1285,8 +1320,9 @@ impl WeatherApp {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         crate::witness::anchor(ui, hrrr_contract::Target::Map, response.rect);
-        #[cfg(not(target_os = "android"))]
-        self.water.begin(Domain::shelf(rect));
+        if self.disposition == Disposition::Dock {
+            self.water.begin(Domain::shelf(rect));
+        }
         let touch = self.map_touch(ui, rect);
         let pins = if touch.quarantined {
             self.cancel_pin_tug();
@@ -1328,16 +1364,15 @@ impl WeatherApp {
                 .filter_map(|key| self.tiles.get(key).cloned())
                 .collect();
         }
-        #[cfg(target_os = "android")]
-        let warm_basemap = cover
-            .strata
-            .iter()
-            .filter(|stratum| stratum.intent == basemap::Intent::Prefetch)
-            .flat_map(|stratum| &stratum.keys)
-            .filter_map(|key| self.tiles.get(*key).cloned())
-            .collect::<Arc<[_]>>();
         let bounds = map::world_bounds(self.viewport, rect).map(|v| v as f32);
         if !self.presented_basemap.is_empty() {
+            let warm_basemap = cover
+                .strata
+                .iter()
+                .filter(|stratum| stratum.intent == basemap::Intent::Prefetch)
+                .flat_map(|stratum| &stratum.keys)
+                .filter_map(|key| self.tiles.get(*key).cloned())
+                .collect::<Arc<[_]>>();
             let _basemap = painter.add(eternalist_apps::egui_wgpu::Callback::new_paint_callback(
                 rect,
                 VectorPaint {
@@ -1347,11 +1382,8 @@ impl WeatherApp {
                     viewport_points: [rect.width(), rect.height()],
                     view_zoom: self.viewport.zoom as f32,
                     apparition_span: basemap::APPARITION_SPAN,
-                    #[cfg(target_os = "android")]
                     settled: !navigating,
-                    #[cfg(target_os = "android")]
                     warm_tiles: warm_basemap,
-                    #[cfg(target_os = "android")]
                     repaint: ui.ctx().clone(),
                 },
             ));
@@ -1409,7 +1441,6 @@ impl WeatherApp {
             egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG),
             egui::StrokeKind::Inside,
         );
-        #[cfg(not(target_os = "android"))]
         {
             if self.loading.is_some_and(|demand| {
                 demand.intent == LoadIntent::Foreground(self.demand_id)
@@ -1420,8 +1451,6 @@ impl WeatherApp {
                 self.water.hide_loading();
             }
         }
-        #[cfg(target_os = "android")]
-        self.water.hide_loading();
         self.show_marks(ui.ctx(), &painter, rect, pins.hot);
     }
 
@@ -1445,7 +1474,6 @@ impl WeatherApp {
                 gesture.zoom_delta,
                 minimum_zoom,
             );
-            #[cfg(not(target_os = "android"))]
             self.water.drag(rect, gesture.translation_delta.y);
         }
         let dragging = !touch.quarantined
@@ -1456,7 +1484,6 @@ impl WeatherApp {
             let scale = map::world_pixels(self.viewport);
             self.viewport.center_mercator[0] -= f64::from(delta.x) / scale;
             self.viewport.center_mercator[1] -= f64::from(delta.y) / scale;
-            #[cfg(not(target_os = "android"))]
             self.water.drag(rect, delta.y);
         }
         let scroll = (!touch.quarantined).then(|| {
@@ -1486,17 +1513,13 @@ impl WeatherApp {
         if self.viewport != before {
             self.sync_active_view();
         }
-        #[cfg(target_os = "android")]
         let persistent_touch = response.long_touched();
-        #[cfg(not(target_os = "android"))]
-        let persistent_touch = false;
         if !touch.quarantined
             && !pin_captured
             && persistent_touch
             && let Some(pointer) = response.interact_pointer_pos()
         {
             self.strike_point(rect, pointer, true);
-            #[cfg(not(target_os = "android"))]
             self.water.click(egui::Rect::from_center_size(
                 pointer,
                 egui::Vec2::splat(18.0),
@@ -1514,7 +1537,6 @@ impl WeatherApp {
         {
             let persistent = ui.input(|input| input.modifiers.shift);
             self.strike_point(rect, pointer, persistent);
-            #[cfg(not(target_os = "android"))]
             self.water.click(egui::Rect::from_center_size(
                 pointer,
                 egui::Vec2::splat(18.0),
@@ -1523,35 +1545,21 @@ impl WeatherApp {
         touch.gesture.is_some() || dragging || scrolling
     }
 
-    #[cfg_attr(
-        not(target_os = "android"),
-        expect(
-            clippy::unused_self,
-            reason = "the desktop projection shares Android's call site but owns no retained touch quarantine"
-        )
-    )]
+    /// A multi-touch gesture over the map, quarantining single-pointer
+    /// handling until every finger lifts.
     fn map_touch(&mut self, ui: &egui::Ui, rect: egui::Rect) -> MapTouch {
-        #[cfg(target_os = "android")]
-        {
-            let (gesture, any_touches) =
-                ui.input(|input| (input.multi_touch(), input.any_touches()));
-            let gesture = gesture.filter(|gesture| rect.contains(gesture.start_pos));
-            if gesture.is_some() {
-                self.map_multitouch = true;
-            }
-            let quarantined = self.map_multitouch;
-            if self.map_multitouch && !any_touches {
-                self.map_multitouch = false;
-            }
-            MapTouch {
-                gesture,
-                quarantined,
-            }
+        let (gesture, any_touches) = ui.input(|input| (input.multi_touch(), input.any_touches()));
+        let gesture = gesture.filter(|gesture| rect.contains(gesture.start_pos));
+        if gesture.is_some() {
+            self.map_multitouch = true;
         }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = (ui, rect);
-            MapTouch::default()
+        let quarantined = self.map_multitouch;
+        if self.map_multitouch && !any_touches {
+            self.map_multitouch = false;
+        }
+        MapTouch {
+            gesture,
+            quarantined,
         }
     }
 
@@ -1625,8 +1633,8 @@ impl WeatherApp {
     }
 
     fn strike_point(&mut self, rect: egui::Rect, pointer: egui::Pos2, persistent: bool) {
-        #[cfg(target_os = "android")]
         if !persistent
+            && self.capabilities.touch
             && self.transient_probe.is_some_and(|probe| {
                 map::screen_at(self.viewport, rect, probe.world()).distance(pointer)
                     <= TRANSIENT_PROBE_REAP_RADIUS
@@ -1737,7 +1745,7 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(all(feature = "egui-test", not(target_os = "android")))]
+    #[cfg(feature = "egui-test")]
     pub fn witness_state(&self) -> crate::witness::State {
         crate::witness::State {
             contract: hrrr_contract::UI_FINGERPRINT,
@@ -2118,7 +2126,6 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn edict_status(&self, edict: Edict) -> CommandStatus<'static> {
         let system = self.session_state.overlay.active().map(Product::system);
         let latest = system.and_then(|system| self.latest_runs.get(&system).copied());
@@ -2143,7 +2150,6 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn apply_edict(&mut self, dispatch: CommandDispatch<'_, Edict>) {
         let edict = match dispatch {
             CommandDispatch::Invoke(edict) => edict,
@@ -2159,7 +2165,6 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn take_keys(&mut self, ctx: &egui::Context) {
         if self.guide.is_open() || ctx.memory(|memory| memory.top_modal_layer().is_some()) {
             return;
@@ -2320,7 +2325,6 @@ impl WeatherApp {
         self.mark_dirty();
     }
 
-    #[cfg(not(target_os = "android"))]
     fn load_view_slot(&mut self, slot: ViewSlot) {
         let view = self
             .views
@@ -2334,7 +2338,6 @@ impl WeatherApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn assign_view_slot(&mut self, slot: ViewSlot) {
         self.sync_active_view();
         let mut displaced = None;
@@ -2844,18 +2847,10 @@ impl WeatherApp {
         self.scribe.mark();
     }
 
-    #[cfg(target_os = "android")]
-    fn mark_configuration_dirty(&mut self) {
-        self.dirty.configuration = true;
-        self.scribe.mark();
-    }
-
     fn durable_state(&self) -> DurableState {
         DurableState {
             session_state: self.dirty.session_state.then(|| self.session_state.clone()),
             views: self.dirty.views.then(|| self.views.clone()),
-            #[cfg(target_os = "android")]
-            configuration: self.dirty.configuration.then(|| self.configuration.clone()),
         }
     }
 
@@ -2863,8 +2858,6 @@ impl WeatherApp {
         DurableState {
             session_state: Some(self.session_state.clone()),
             views: Some(self.views.clone()),
-            #[cfg(target_os = "android")]
-            configuration: Some(self.configuration.clone()),
         }
     }
 
@@ -2873,8 +2866,6 @@ impl WeatherApp {
             self.dirty = DirtyState {
                 session_state: true,
                 views: true,
-                #[cfg(target_os = "android")]
-                configuration: true,
             };
             self.status = format!("state save failed: {message}");
         }
@@ -2887,7 +2878,6 @@ impl Drop for WeatherApp {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn consume_view_slot(ctx: &egui::Context) -> Option<(ViewSlot, bool)> {
     ctx.input_mut(|input| {
         let (index, command) =
@@ -2929,7 +2919,6 @@ fn witnessed_frontier(run: Option<ForecastRun>) -> Option<(ForecastRun, LeadHour
     Some((run, published))
 }
 
-#[cfg(not(target_os = "android"))]
 fn view_slot_command(event: &egui::Event) -> Option<(ViewSlot, bool)> {
     let egui::Event::Key {
         key,

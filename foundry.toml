@@ -15,6 +15,7 @@ release-tested = [
   "macos-x86_64-metal",
   "windows-x86_64-dx12",
 ]
+supported = ["android-aarch64"]
 
 [delivery]
 linux = "cargo"
@@ -57,6 +58,13 @@ coordinates = [
   "windows-x86_64-dx12",
 ]
 timeout-minutes = 90
+
+[[proofs]]
+name = "host-android"
+laws = ["host"]
+run = ["bash", "scripts/prove-android"]
+coordinates = ["android-aarch64"]
+timeout-minutes = 60
 
 [[proofs]]
 name = "native-acceptance"

@@ -66,7 +66,6 @@ impl CacheManager {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -91,7 +90,6 @@ pub struct CacheStore {
 }
 
 impl CacheStore {
-    #[cfg(not(target_os = "android"))]
     pub fn clear(&self) -> Result<()> {
         let _guard = write_gate(&self.gate);
         match std::fs::remove_dir_all(&self.root) {

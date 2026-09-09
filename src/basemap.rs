@@ -1,10 +1,8 @@
 use crate::{
     application_paths::ApplicationPaths,
-    basemap_artifact::{
-        BOUNDS, DetailSource, LOCAL_MAX_ZOOM, MAX_ZOOM as MAX_SOURCE_ZOOM, detail_source,
-    },
+    basemap_artifact::{BOUNDS, DetailSource, LOCAL_MAX_ZOOM, MAX_ZOOM as MAX_SOURCE_ZOOM, Supply},
     cache::CacheStore,
-    map,
+    map::{self, Tier},
     model::Viewport,
 };
 use anyhow::{Context as _, Result};
@@ -12,23 +10,15 @@ use bytemuck::{Pod, Zeroable};
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use egui::Context;
-use eternalist_apps::NativeWake;
+use eternalist_apps::{Capabilities, NativeWake};
 use fast_mvt::{MvtFeatureRef, MvtGeometry, MvtReaderRef, MvtValueRef};
 use geo_types::{Coord, LineString, Point, Polygon};
 use lyon_tessellation::{
     BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, VertexBuffers, math::point,
     path::Path,
 };
-#[cfg(not(target_os = "android"))]
-use pmtiles::HttpBackend;
-#[cfg(not(target_os = "android"))]
-use pmtiles::MmapBackend;
-#[cfg(target_os = "android")]
-use pmtiles::{AsyncBackend, BackendResponse, PmtError};
 use pmtiles::{AsyncPmTilesReader, HashMapCache, TileCoord};
-#[cfg(target_os = "android")]
-use std::future::Future;
-#[cfg(not(target_os = "android"))]
+use pmtiles::{HttpBackend, MmapBackend};
 use std::{path::Path as FsPath, time::SystemTime};
 use std::{
     path::PathBuf,
@@ -39,11 +29,9 @@ use std::{
 
 pub const PAPER_SRGB: [u8; 3] = [229; 3];
 pub const APPARITION_SPAN: f32 = 1.35;
-#[cfg(target_os = "android")]
 const MATERIAL_COUNT: u32 = 10;
-#[cfg(target_os = "android")]
 const MATERIAL_STACK: usize = 4;
-#[cfg(target_os = "android")]
+/// Texels per edge of the baked tier's per-tile material mask.
 pub const MATERIAL_MASK_EDGE: u32 = 512;
 const RETAINED_DEPTH: u8 = 4;
 const DETAIL_CONNECT_LIMIT: Duration = Duration::from_secs(8);
@@ -154,7 +142,7 @@ impl<V> Default for Mesh<V> {
 pub struct VectorTile {
     pub key: TileKey,
     pub fills: Mesh<FillPoint>,
-    #[cfg(target_os = "android")]
+    /// The baked tier's material stack per mask texel; empty on the direct tier.
     pub material_mask: Arc<[u16]>,
     pub strokes: Mesh<StrokePoint>,
     pub labels: Arc<[Label]>,
@@ -182,14 +170,7 @@ impl VectorTile {
                     .map(|label| label.text.len())
                     .sum::<usize>(),
             );
-        #[cfg(target_os = "android")]
-        {
-            geometry.saturating_add(self.material_mask.len().saturating_mul(size_of::<u16>()))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            geometry
-        }
+        geometry.saturating_add(self.material_mask.len().saturating_mul(size_of::<u16>()))
     }
 }
 
@@ -211,60 +192,46 @@ pub struct Basemap {
 }
 
 impl Basemap {
-    #[cfg(not(target_os = "android"))]
     pub fn spawn(ctx: Context, paths: &ApplicationPaths) -> Result<Self> {
-        let archive = paths.basemap_path()?;
-        if !archive.is_file() {
-            anyhow::bail!(
-                "no basemap archive at {}; run `hrrr basemap install`",
-                archive.display()
-            );
-        }
+        let capabilities = Capabilities::of(&ctx);
+        let tier = Tier::for_capabilities(capabilities);
+        let source = match crate::basemap_artifact::supply(paths, capabilities)? {
+            Supply::Artifact { archive, detail } => {
+                if !archive.is_file() {
+                    anyhow::bail!(
+                        "no basemap archive at {}; run `hrrr basemap install`",
+                        archive.display()
+                    );
+                }
+                if let Some(directory) = archive.parent() {
+                    purge_partials(directory)?;
+                }
+                Source::Archive {
+                    archive,
+                    detail: detail
+                        .map(|source| Detail::new(source, paths.basemap_cache(), Reach::Detail)),
+                }
+            }
+            Supply::Origin(source) => Source::Origin(Detail::new(
+                source,
+                paths.basemap_cache(),
+                Reach::Everything,
+            )),
+        };
+        let ceiling = match tier {
+            Tier::Direct => 8,
+            Tier::Baked => 4,
+        };
         let workers = thread::available_parallelism()
             .map_or(4, std::num::NonZeroUsize::get)
-            .clamp(2, 8);
-        let detail = detail_source(paths)?.map(|source| Detail::new(source, paths.basemap_cache()));
-        Self::spawn_with_workers(ctx, archive, detail, workers)
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn spawn_with_workers(
-        ctx: Context,
-        archive: PathBuf,
-        detail: Option<Detail>,
-        workers: usize,
-    ) -> Result<Self> {
-        if let Some(directory) = archive.parent() {
-            purge_partials(directory)?;
-        }
+            .clamp(2, ceiling);
         let (commands, command_rx) = bounded(256);
         let (event_tx, events) = bounded(256);
         let wake = NativeWake::from_context(&ctx);
         let thread = thread::Builder::new()
             .name("vector-armory".to_owned())
-            .spawn(move || armory(wake, archive, detail, command_rx, event_tx, workers))
+            .spawn(move || armory(wake, source, tier, command_rx, event_tx, workers))
             .context("spawn vector basemap armory")?;
-        Ok(Self {
-            commands,
-            events,
-            _thread: thread,
-        })
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn spawn(ctx: Context, paths: &ApplicationPaths) -> Result<Self> {
-        let source = detail_source(paths)?.context("Android basemap source is unavailable")?;
-        let remote = Detail::new(source, paths.basemap_cache());
-        let workers = thread::available_parallelism()
-            .map_or(2, std::num::NonZeroUsize::get)
-            .clamp(2, 4);
-        let (commands, command_rx) = bounded(256);
-        let (event_tx, events) = bounded(256);
-        let wake = NativeWake::from_context(&ctx);
-        let thread = thread::Builder::new()
-            .name("vector-armory".to_owned())
-            .spawn(move || armory(wake, remote, command_rx, event_tx, workers))
-            .context("spawn streamed vector basemap armory")?;
         Ok(Self {
             commands,
             events,
@@ -332,113 +299,53 @@ fn tile_distance(key: TileKey, center: [f64; 2]) -> f64 {
     (x - center[0]).mul_add(x - center[0], (y - center[1]).powi(2))
 }
 
-#[cfg(not(target_os = "android"))]
 type Archive = AsyncPmTilesReader<MmapBackend, HashMapCache>;
-#[cfg(not(target_os = "android"))]
 type DetailArchive = AsyncPmTilesReader<HttpBackend, HashMapCache>;
-#[cfg(target_os = "android")]
-type DetailArchive = AsyncPmTilesReader<AndroidHttpBackend, HashMapCache>;
 
-#[cfg(target_os = "android")]
-struct AndroidHttpBackend {
-    agent: ureq::Agent,
-    url: String,
+/// Where tiles come from once the armory is raised.
+enum Source {
+    /// A verified local archive through zoom 11, with remote zoom-12 detail
+    /// when its receipt names a source.
+    Archive {
+        archive: PathBuf,
+        detail: Option<Detail>,
+    },
+    /// The remote origin for every tile.
+    Origin(Detail),
 }
 
-#[cfg(target_os = "android")]
-impl AndroidHttpBackend {
-    fn new(url: String) -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_connect(Some(DETAIL_CONNECT_LIMIT))
-            .timeout_global(Some(DETAIL_TRANSFER_LIMIT))
-            .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
-            .build();
-        Self {
-            agent: config.into(),
-            url,
-        }
-    }
-
-    fn read_range(&self, offset: usize, length: usize) -> pmtiles::PmtResult<BackendResponse> {
-        let end = offset
-            .checked_add(length)
-            .and_then(|exclusive| exclusive.checked_sub(1))
-            .ok_or_else(|| pmt_io("PMTiles byte range overflow"))?;
-        let mut response = self
-            .agent
-            .get(&self.url)
-            .header("Range", format!("bytes={offset}-{end}"))
-            .call()
-            .map_err(pmt_io)?;
-        if response.status().as_u16() != 206 {
-            return Err(pmt_io(format!(
-                "PMTiles server ignored byte range with status {}",
-                response.status()
-            )));
-        }
-        let version = response
-            .headers()
-            .get("etag")
-            .or_else(|| response.headers().get("last-modified"))
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let bytes = response
-            .body_mut()
-            .with_config()
-            .limit(u64::try_from(length).unwrap_or(u64::MAX).saturating_add(1))
-            .read_to_vec()
-            .map_err(pmt_io)?;
-        if bytes.len() > length {
-            return Err(pmt_io(format!(
-                "PMTiles response exceeded requested {length} bytes"
-            )));
-        }
-        let bytes = Bytes::from(bytes);
-        Ok(match version {
-            Some(version) => BackendResponse::new_with_version(bytes, version),
-            None => BackendResponse::new(bytes),
-        })
-    }
-}
-
-#[cfg(target_os = "android")]
-impl AsyncBackend for AndroidHttpBackend {
-    fn read(
-        &self,
-        offset: usize,
-        length: usize,
-    ) -> impl Future<Output = pmtiles::PmtResult<BackendResponse>> + Send {
-        std::future::ready(self.read_range(offset, length))
-    }
-}
-
-#[cfg(target_os = "android")]
-fn pmt_io(error: impl std::fmt::Display) -> PmtError {
-    PmtError::Reading(std::io::Error::other(error.to_string()))
+/// Which tiles a remote source is asked for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reach {
+    /// Zoom-12 detail beyond the local archive alone.
+    Detail,
+    /// Every tile within the continental bounds.
+    Everything,
 }
 
 struct Detail {
     source: DetailSource,
     cache: CacheStore,
+    reach: Reach,
     archive: Mutex<Option<Arc<DetailArchive>>>,
 }
 
 impl Detail {
-    const fn new(source: DetailSource, cache: CacheStore) -> Self {
+    const fn new(source: DetailSource, cache: CacheStore, reach: Reach) -> Self {
         Self {
             source,
             cache,
+            reach,
             archive: Mutex::new(None),
         }
     }
 
     fn fetch(&self, runtime: &tokio::runtime::Runtime, key: TileKey) -> Result<Option<Bytes>> {
-        #[cfg(not(target_os = "android"))]
-        if key.zoom <= LOCAL_MAX_ZOOM || !within_detail_bounds(key) {
-            return Ok(None);
-        }
-        #[cfg(target_os = "android")]
-        if !within_detail_bounds(key) {
+        let beyond_reach = match self.reach {
+            Reach::Detail => key.zoom <= LOCAL_MAX_ZOOM,
+            Reach::Everything => false,
+        };
+        if beyond_reach || !within_detail_bounds(key) {
             return Ok(None);
         }
         let blade = PathBuf::from(&self.source.generation)
@@ -471,26 +378,18 @@ impl Detail {
         if let Some(archive) = slot.as_ref() {
             return Ok(Arc::clone(archive));
         }
-        #[cfg(not(target_os = "android"))]
-        let archive = {
-            let client = pmtiles::reqwest::Client::builder()
-                .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(DETAIL_CONNECT_LIMIT)
-                .timeout(DETAIL_TRANSFER_LIMIT)
-                .build()
-                .context("build basemap detail client")?;
-            runtime.block_on(DetailArchive::new_with_cached_url(
+        let client = pmtiles::reqwest::Client::builder()
+            .user_agent(concat!("hrrr/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(DETAIL_CONNECT_LIMIT)
+            .timeout(DETAIL_TRANSFER_LIMIT)
+            .build()
+            .context("build basemap detail client")?;
+        let archive = runtime
+            .block_on(DetailArchive::new_with_cached_url(
                 HashMapCache::default(),
                 client,
                 &self.source.url,
             ))
-        };
-        #[cfg(target_os = "android")]
-        let archive = runtime.block_on(DetailArchive::try_from_cached_source(
-            AndroidHttpBackend::new(self.source.url.clone()),
-            HashMapCache::default(),
-        ));
-        let archive = archive
             .map_err(anyhow::Error::new)
             .context("open remote basemap detail")?;
         let archive = Arc::new(archive);
@@ -512,11 +411,10 @@ fn within_detail_bounds(key: TileKey) -> bool {
     east >= BOUNDS[0] && west <= BOUNDS[2] && north >= BOUNDS[1] && south <= BOUNDS[3]
 }
 
-#[cfg(not(target_os = "android"))]
 fn armory(
     wake: NativeWake,
-    archive: PathBuf,
-    detail: Option<Detail>,
+    source: Source,
+    tier: Tier,
     commands: Receiver<TileKey>,
     events: Sender<Event>,
     worker_count: usize,
@@ -528,18 +426,10 @@ fn armory(
             return;
         }
     };
-    let reader = match runtime.block_on(Archive::new_with_cached_path(
-        HashMapCache::default(),
-        &archive,
-    )) {
-        Ok(reader) => Arc::new(reader),
+    let loader = match Loader::raise(&runtime, source) {
+        Ok(loader) => Arc::new(loader),
         Err(err) => {
-            send_fault(
-                &wake,
-                &events,
-                None,
-                &anyhow::Error::new(err).context(format!("open {}", archive.display())),
-            );
+            send_fault(&wake, &events, None, &err);
             return;
         }
     };
@@ -547,17 +437,15 @@ fn armory(
         return;
     }
     let _woken = wake.request_foreground_repaint();
-    let detail = detail.map(Arc::new);
     let mut workers = Vec::with_capacity(worker_count);
     for slot in 0..worker_count {
         let worker_wake = wake.clone();
-        let reader = reader.clone();
-        let detail = detail.clone();
+        let loader = Arc::clone(&loader);
         let commands = commands.clone();
         let worker_events = events.clone();
         let worker = thread::Builder::new()
             .name(format!("vector-quarry-{slot}"))
-            .spawn(move || quarry(worker_wake, reader, detail, commands, worker_events));
+            .spawn(move || quarry(worker_wake, loader, tier, commands, worker_events));
         match worker {
             Ok(worker) => workers.push(worker),
             Err(err) => {
@@ -578,56 +466,53 @@ fn armory(
     }
 }
 
-#[cfg(target_os = "android")]
-fn armory(
-    wake: NativeWake,
-    remote: Detail,
-    commands: Receiver<TileKey>,
-    events: Sender<Event>,
-    worker_count: usize,
-) {
-    let runtime = match runtime() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            send_fault(&wake, &events, None, &error);
-            return;
-        }
-    };
-    if let Err(error) = remote.open(&runtime) {
-        send_fault(&wake, &events, None, &error);
-        return;
-    }
-    if events.send(Event::Ready).is_err() {
-        return;
-    }
-    let _woken = wake.request_foreground_repaint();
-    let remote = Arc::new(remote);
-    let mut workers = Vec::with_capacity(worker_count);
-    for slot in 0..worker_count {
-        let worker_wake = wake.clone();
-        let remote = Arc::clone(&remote);
-        let commands = commands.clone();
-        let worker_events = events.clone();
-        let worker = thread::Builder::new()
-            .name(format!("vector-quarry-{slot}"))
-            .spawn(move || quarry(worker_wake, remote, commands, worker_events));
-        match worker {
-            Ok(worker) => workers.push(worker),
-            Err(error) => {
-                send_fault(
-                    &wake,
-                    &events,
-                    None,
-                    &anyhow::Error::new(error).context("spawn streamed vector quarry"),
-                );
-                break;
+/// A raised source: the archive opened, or the origin reached.
+enum Loader {
+    Archive {
+        reader: Box<Archive>,
+        detail: Option<Detail>,
+    },
+    Origin(Detail),
+}
+
+impl Loader {
+    fn raise(runtime: &tokio::runtime::Runtime, source: Source) -> Result<Self> {
+        match source {
+            Source::Archive { archive, detail } => {
+                let reader = runtime
+                    .block_on(Archive::new_with_cached_path(
+                        HashMapCache::default(),
+                        &archive,
+                    ))
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| format!("open {}", archive.display()))?;
+                Ok(Self::Archive {
+                    reader: Box::new(reader),
+                    detail,
+                })
+            }
+            Source::Origin(detail) => {
+                let _reached = detail.open(runtime)?;
+                Ok(Self::Origin(detail))
             }
         }
     }
-    drop(commands);
-    drop(events);
-    for worker in workers {
-        let _joined = worker.join();
+
+    fn load(&self, runtime: &tokio::runtime::Runtime, key: TileKey) -> Result<Option<Bytes>> {
+        match self {
+            Self::Archive { reader, detail } => {
+                let local = runtime
+                    .block_on(reader.get_tile_decompressed(key.coordinate()?))
+                    .map_err(anyhow::Error::new)?;
+                match local {
+                    Some(bytes) => Ok(Some(bytes)),
+                    None => detail
+                        .as_ref()
+                        .map_or(Ok(None), |detail| detail.fetch(runtime, key)),
+                }
+            }
+            Self::Origin(detail) => detail.fetch(runtime, key),
+        }
     }
 }
 
@@ -638,11 +523,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .context("build basemap runtime")
 }
 
-#[cfg(not(target_os = "android"))]
 fn quarry(
     wake: NativeWake,
-    archive: Arc<Archive>,
-    detail: Option<Arc<Detail>>,
+    loader: Arc<Loader>,
+    tier: Tier,
     commands: Receiver<TileKey>,
     events: Sender<Event>,
 ) {
@@ -654,7 +538,7 @@ fn quarry(
         }
     };
     while let Ok(key) = commands.recv() {
-        let bytes = match load_tile(&runtime, &archive, detail.as_deref(), key) {
+        let bytes = match loader.load(&runtime, key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 if events.send(Event::Missing(key)).is_err() {
@@ -668,7 +552,7 @@ fn quarry(
                 continue;
             }
         };
-        let event = match decode_tile(key, &bytes) {
+        let event = match decode_tile(key, &bytes, tier) {
             Ok(tile) => Event::Loaded(Arc::new(tile)),
             Err(err) => Event::Fault {
                 key: Some(key),
@@ -679,65 +563,6 @@ fn quarry(
             break;
         }
         let _woken = wake.request_foreground_repaint();
-    }
-}
-
-#[cfg(target_os = "android")]
-fn quarry(
-    wake: NativeWake,
-    remote: Arc<Detail>,
-    commands: Receiver<TileKey>,
-    events: Sender<Event>,
-) {
-    let runtime = match runtime() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            send_fault(&wake, &events, None, &error);
-            return;
-        }
-    };
-    while let Ok(key) = commands.recv() {
-        let bytes = match remote.fetch(&runtime, key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                if events.send(Event::Missing(key)).is_err() {
-                    break;
-                }
-                let _woken = wake.request_foreground_repaint();
-                continue;
-            }
-            Err(error) => {
-                send_fault(&wake, &events, Some(key), &error);
-                continue;
-            }
-        };
-        let event = match decode_tile(key, &bytes) {
-            Ok(tile) => Event::Loaded(Arc::new(tile)),
-            Err(error) => Event::Fault {
-                key: Some(key),
-                message: format!("decode vector tile {key:?}: {error:#}"),
-            },
-        };
-        if events.send(event).is_err() {
-            break;
-        }
-        let _woken = wake.request_foreground_repaint();
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn load_tile(
-    runtime: &tokio::runtime::Runtime,
-    archive: &Archive,
-    detail: Option<&Detail>,
-    key: TileKey,
-) -> Result<Option<Bytes>> {
-    let local = runtime
-        .block_on(archive.get_tile_decompressed(key.coordinate()?))
-        .map_err(anyhow::Error::new)?;
-    match local {
-        Some(bytes) => Ok(Some(bytes)),
-        None => detail.map_or(Ok(None), |detail| detail.fetch(runtime, key)),
     }
 }
 
@@ -758,7 +583,7 @@ fn send_fault(
     }
 }
 
-fn decode_tile(key: TileKey, bytes: &[u8]) -> Result<VectorTile> {
+fn decode_tile(key: TileKey, bytes: &[u8], tier: Tier) -> Result<VectorTile> {
     let reader = MvtReaderRef::new(bytes).context("parse MVT")?;
     let mut forge = Forge::new(key);
     for layer in reader.layers() {
@@ -773,7 +598,7 @@ fn decode_tile(key: TileKey, bytes: &[u8]) -> Result<VectorTile> {
             _ => {}
         }
     }
-    Ok(forge.finish())
+    Ok(forge.finish(tier))
 }
 
 #[derive(Clone, Copy)]
@@ -1069,28 +894,34 @@ impl Forge {
         }
     }
 
-    fn finish(mut self) -> VectorTile {
+    /// Seal the tile for its tier: the direct tier keeps every fill mesh; the
+    /// baked tier rasterizes fills into a material mask and keeps meshes only
+    /// for detail tiles, which it draws exactly when magnified.
+    fn finish(mut self, tier: Tier) -> VectorTile {
         self.labels.sort_unstable_by_key(|label| label.rank);
-        #[cfg(target_os = "android")]
-        let material_mask = raster_materials(&self.fills.vertices, &self.fills.indices).into();
-        #[cfg(target_os = "android")]
-        let fills = if self.key.is_detail() {
-            Mesh {
-                vertices: self.fills.vertices.into(),
-                indices: self.fills.indices.into(),
-            }
-        } else {
-            Mesh::default()
-        };
-        #[cfg(not(target_os = "android"))]
-        let fills = Mesh {
-            vertices: self.fills.vertices.into(),
-            indices: self.fills.indices.into(),
+        let (material_mask, fills): (Arc<[u16]>, Mesh<FillPoint>) = match tier {
+            Tier::Direct => (
+                Arc::from([]),
+                Mesh {
+                    vertices: self.fills.vertices.into(),
+                    indices: self.fills.indices.into(),
+                },
+            ),
+            Tier::Baked => (
+                raster_materials(&self.fills.vertices, &self.fills.indices).into(),
+                if self.key.is_detail() {
+                    Mesh {
+                        vertices: self.fills.vertices.into(),
+                        indices: self.fills.indices.into(),
+                    }
+                } else {
+                    Mesh::default()
+                },
+            ),
         };
         VectorTile {
             key: self.key,
             fills,
-            #[cfg(target_os = "android")]
             material_mask,
             strokes: Mesh {
                 vertices: self.strokes.vertices.into(),
@@ -1101,12 +932,10 @@ impl Forge {
     }
 }
 
-#[cfg(target_os = "android")]
 fn raster_materials(vertices: &[FillPoint], indices: &[u32]) -> Vec<u16> {
     let pixels = MATERIAL_MASK_EDGE as usize * MATERIAL_MASK_EDGE as usize;
     let mut mask = vec![0; pixels * MATERIAL_STACK];
-    for triangle in indices.chunks_exact(3) {
-        let [a, b, c] = triangle else { continue };
+    for [a, b, c] in indices.as_chunks::<3>().0 {
         let [Some(a), Some(b), Some(c)] = [a, b, c].map(|index| {
             usize::try_from(*index)
                 .ok()
@@ -1119,7 +948,6 @@ fn raster_materials(vertices: &[FillPoint], indices: &[u32]) -> Vec<u16> {
     mask
 }
 
-#[cfg(target_os = "android")]
 fn raster_material_triangle(mask: &mut [u16], triangle: [&FillPoint; 3]) {
     let edge = MATERIAL_MASK_EDGE as f32;
     let points = triangle.map(|vertex| [vertex.local[0] * edge, vertex.local[1] * edge]);
@@ -1160,7 +988,6 @@ fn raster_material_triangle(mask: &mut [u16], triangle: [&FillPoint; 3]) {
     }
 }
 
-#[cfg(target_os = "android")]
 fn push_material(stack: &mut [u16], material: u16) {
     let depth = stack.iter().position(|&resident| resident == 0);
     let top = depth
@@ -1177,12 +1004,10 @@ fn push_material(stack: &mut [u16], material: u16) {
     }
 }
 
-#[cfg(target_os = "android")]
 fn raster_edge(a: [f32; 2], b: [f32; 2], point: [f32; 2]) -> f32 {
     (point[0] - a[0]).mul_add(b[1] - a[1], -(point[1] - a[1]) * (b[0] - a[0]))
 }
 
-#[cfg(target_os = "android")]
 fn encode_material_onset(onset: f32) -> u8 {
     let maximum = f32::from(MAX_SOURCE_ZOOM);
     ((onset.clamp(0.0, maximum) * 16.0).round() as u8).saturating_add(1)
@@ -1433,7 +1258,6 @@ fn direction(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn purge_partials(directory: &FsPath) -> Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
@@ -1459,7 +1283,7 @@ fn purge_partials(directory: &FsPath) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cache::{CacheClass, CacheManager};
@@ -1581,18 +1405,23 @@ mod tests {
                 generation: "20260809".to_owned(),
             },
             store.clone(),
+            Reach::Detail,
         );
         let runtime = runtime()?;
-        let local = runtime.block_on(Archive::new_with_cached_path(
+        let reader = runtime.block_on(Archive::new_with_cached_path(
             HashMapCache::default(),
             &local_path,
         ))?;
+        let loader = Loader::Archive {
+            reader: Box::new(reader),
+            detail: Some(detail),
+        };
 
-        let fetched = load_tile(&runtime, &local, Some(&detail), key)?.context("remote tile")?;
+        let fetched = loader.load(&runtime, key)?.context("remote tile")?;
         assert_eq!(fetched.as_ref(), tile);
         let requests = server.requests();
         assert!(requests > 0);
-        let cached = load_tile(&runtime, &local, Some(&detail), key)?.context("cached tile")?;
+        let cached = loader.load(&runtime, key)?.context("cached tile")?;
         assert_eq!(cached.as_ref(), tile);
         assert_eq!(server.requests(), requests);
 

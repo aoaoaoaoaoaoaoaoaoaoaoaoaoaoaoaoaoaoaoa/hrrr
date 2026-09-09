@@ -16,7 +16,7 @@ jobs:
     name: Foundry
     permissions:
       contents: read
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@31a3e4e6b317446544294df3607d333c8a9296a3
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@a3a1e6e0543916d07295bf1827dc59e292a88682
 
   registry:
     name: Registry
@@ -36,4 +36,4 @@ jobs:
     needs: [foundry, registry]
     permissions:
       contents: write
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/publish.yml@31a3e4e6b317446544294df3607d333c8a9296a3
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/publish.yml@a3a1e6e0543916d07295bf1827dc59e292a88682

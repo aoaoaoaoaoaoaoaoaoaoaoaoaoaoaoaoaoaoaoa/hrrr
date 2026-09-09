@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Build HRRR's library for aarch64 Android: the host law for the cross-built
+# android-aarch64 coordinate. The NDK's clang assembles the C shims winit and
+# ring carry; rustup supplies the target's standard library.
+set -euo pipefail
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT:-}}}
+if [[ -z $ndk ]]; then
+    printf 'prove-android: ANDROID_NDK_HOME is required\n' >&2
+    exit 2
+fi
+bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
+clang=$bin/aarch64-linux-android29-clang
+[[ -x $clang ]] || {
+    printf 'prove-android: NDK clang is absent at %s\n' "$clang" >&2
+    exit 2
+}
+
+cargo=cargo
+if ! command -v rustup >/dev/null 2>&1 && [[ -x $HOME/.cargo/bin/rustup ]]; then
+    # A workstation whose cargo is not rustup's still builds with rustup's
+    # toolchain, in a target directory beside the house one.
+    cargo=$HOME/.cargo/bin/cargo
+    if [[ -z ${CARGO_TARGET_DIR:-} ]]; then
+        house=$(command cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+        export CARGO_TARGET_DIR="${house%/}-android"
+    fi
+fi
+
+export CC_aarch64_linux_android=$clang
+export CXX_aarch64_linux_android=$clang++
+export AR_aarch64_linux_android=$bin/llvm-ar
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$clang
+"$cargo" clippy --locked --lib --all-features --target aarch64-linux-android -- -D warnings
+"$cargo" build --locked --lib --release --target aarch64-linux-android
+printf 'HRRR builds for aarch64 Android\n'

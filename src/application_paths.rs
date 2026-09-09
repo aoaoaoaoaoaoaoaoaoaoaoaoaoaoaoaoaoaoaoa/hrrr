@@ -1,6 +1,6 @@
 use crate::cache::{CacheClass, CacheManager, CacheStore};
 use anyhow::{Context as _, Result, bail};
-use eternalist_apps::ProductIdentity;
+use eternalist_apps::{Ingress, ProductIdentity};
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -16,7 +16,6 @@ pub struct ApplicationPaths {
     pub config: PathBuf,
     pub state: PathBuf,
     pub data: PathBuf,
-    #[cfg(not(target_os = "android"))]
     local_data: PathBuf,
     runtime: Option<PathBuf>,
     cache: CacheManager,
@@ -28,9 +27,9 @@ pub struct InstanceGuard {
 }
 
 impl ApplicationPaths {
-    #[cfg(not(target_os = "android"))]
-    pub fn claim() -> Result<Self> {
-        let platform = eternalist_apps::ApplicationPaths::claim(PRODUCT)?;
+    /// Resolve HRRR's directories for the platform the process entered through.
+    pub fn claim(ingress: &Ingress) -> Result<Self> {
+        let platform = eternalist_apps::ApplicationPaths::claim_from(PRODUCT, ingress)?;
         Ok(Self {
             config: platform.config,
             state: platform.state,
@@ -38,23 +37,6 @@ impl ApplicationPaths {
             local_data: platform.local_data,
             runtime: platform.runtime,
             cache: CacheManager::standard(platform.cache),
-        })
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn claim_android(android: &eternalist_apps::AndroidApp) -> Result<Self> {
-        let root = android
-            .internal_data_path()
-            .context("Android did not provide HRRR's private data directory")?;
-        let config = root.join("config");
-        let state = root.join("state");
-        let data = root.join("data");
-        let cache = CacheManager::standard(root.join("cache"));
-        Ok(Self {
-            config,
-            state,
-            data,
-            cache,
         })
     }
 
@@ -80,12 +62,10 @@ impl ApplicationPaths {
         self.cache.store(CacheClass::Basemap)
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn cache_root(&self) -> PathBuf {
         self.cache.root().to_path_buf()
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn basemap_path(&self) -> Result<PathBuf> {
         let path = std::env::var_os("HRRR_BASEMAP_ARCHIVE").map_or_else(
             || managed_basemap(&self.data, &self.local_data),
@@ -98,7 +78,6 @@ impl ApplicationPaths {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn basemap_is_external() -> bool {
         std::env::var_os("HRRR_BASEMAP_ARCHIVE").is_some()
     }
@@ -112,7 +91,6 @@ impl ApplicationPaths {
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn managed_basemap(roaming: &Path, local: &Path) -> PathBuf {
     let local = local
         .join("basemap")
@@ -144,7 +122,7 @@ impl InstanceGuard {
     }
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};

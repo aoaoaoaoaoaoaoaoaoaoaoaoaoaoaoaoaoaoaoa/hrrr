@@ -5,8 +5,7 @@ use egui_tester::{
     Silent, StoryEvent, StoryFact, StoryObserver, StorySurface,
 };
 use hrrr_choreography::{
-    Act, Direction, Field, HrrrProjection, ManagedSurface, Panel, RunTether, Score, ViewAct, Zoom,
-    perform,
+    Act, Direction, Field, HrrrProjection, Modal, Panel, RunTether, Score, ViewAct, Zoom, perform,
 };
 
 mod report;
@@ -265,7 +264,7 @@ impl<O: StoryObserver> AndroidHrrr<'_, O> {
         Ok(())
     }
 
-    fn close_managed_surface(&mut self, surface: ManagedSurface) -> Result<()> {
+    fn close_modal(&mut self, surface: Modal) -> Result<()> {
         let _receipt = self.story.tap(
             surface_close_action(surface),
             self.screen
@@ -273,14 +272,6 @@ impl<O: StoryObserver> AndroidHrrr<'_, O> {
         )?;
         self.settle(Duration::from_millis(300));
         self.device.require_resumed(PACKAGE)
-    }
-
-    fn toggle_water_effects(&mut self) -> Result<()> {
-        let _receipt = self
-            .story
-            .tap("toggle water effects", self.screen.at(0.875, 0.54))?;
-        self.settle(Duration::from_millis(350));
-        Ok(())
     }
 
     fn pan_map(&mut self) -> Result<()> {
@@ -629,10 +620,9 @@ impl<O: StoryObserver> HrrrProjection for AndroidHrrr<'_, O> {
             Act::RaiseInspector => self.raise_inspector(),
             Act::NextPanel(panel) => self.next_panel(panel),
             Act::PreviousPanel(panel) => self.previous_panel(panel),
-            Act::OpenManagedSurface(ManagedSurface::Settings) => self.open_settings(),
-            Act::OpenManagedSurface(ManagedSurface::CommandGuide) => self.open_command_guide(),
-            Act::CloseManagedSurface(surface) => self.close_managed_surface(surface),
-            Act::ToggleWaterEffects => self.toggle_water_effects(),
+            Act::OpenModal(Modal::Settings) => self.open_settings(),
+            Act::OpenModal(Modal::CommandGuide) => self.open_command_guide(),
+            Act::CloseModal(surface) => self.close_modal(surface),
             Act::PanMap => self.pan_map(),
             Act::ZoomMap(direction) => self.zoom_map(direction),
             Act::PlaceProbe => self.place_probe(),
@@ -721,24 +711,24 @@ const fn run_step_action(direction: Direction) -> &'static str {
     }
 }
 
-const fn surface_close_action(surface: ManagedSurface) -> &'static str {
+const fn surface_close_action(surface: Modal) -> &'static str {
     match surface {
-        ManagedSurface::Settings => "close Settings",
-        ManagedSurface::CommandGuide => "close command guide",
+        Modal::Settings => "close Settings",
+        Modal::CommandGuide => "close command guide",
     }
 }
 
-const fn surface_close_x(surface: ManagedSurface) -> f32 {
+const fn surface_close_x(surface: Modal) -> f32 {
     match surface {
-        ManagedSurface::Settings => 0.938,
-        ManagedSurface::CommandGuide => 0.910,
+        Modal::Settings => 0.938,
+        Modal::CommandGuide => 0.910,
     }
 }
 
-const fn surface_close_y(surface: ManagedSurface) -> f32 {
+const fn surface_close_y(surface: Modal) -> f32 {
     match surface {
-        ManagedSurface::Settings => 0.430,
-        ManagedSurface::CommandGuide => 0.172,
+        Modal::Settings => 0.430,
+        Modal::CommandGuide => 0.172,
     }
 }
 

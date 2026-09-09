@@ -4,19 +4,11 @@ mod air_quality;
 mod app;
 mod application_paths;
 mod basemap;
-#[cfg(not(target_os = "android"))]
-mod basemap_artifact;
-#[cfg(target_os = "android")]
-#[path = "basemap_artifact_android.rs"]
 mod basemap_artifact;
 mod cache;
 mod commands;
 mod configuration;
 mod decode;
-#[cfg(not(target_os = "android"))]
-mod host;
-#[cfg(target_os = "android")]
-#[path = "host_android.rs"]
 mod host;
 mod library;
 mod library_ui;
@@ -26,7 +18,6 @@ mod persist;
 mod source;
 mod spec;
 mod state;
-#[cfg(not(target_os = "android"))]
 mod tray;
 mod vector_map;
 mod view;
@@ -39,7 +30,6 @@ mod worker;
 /// # Errors
 ///
 /// Returns startup, command, storage, or native-host failures.
-#[cfg(not(target_os = "android"))]
 pub fn run() -> Result<()> {
     cleanse_relative_xdg()?;
     let mut arguments = std::env::args_os().skip(1);
@@ -66,23 +56,21 @@ pub fn run() -> Result<()> {
 /// # Errors
 ///
 /// Returns native-host, storage, or application startup failures.
-#[cfg(not(target_os = "android"))]
 pub fn run_gui() -> Result<()> {
     let ctx = egui::Context::default();
     brass_poolrooms::chrome::install(&ctx);
     let trace = eternalist_apps::TraceGuard::arm()?;
-    let result = host::run(ctx);
+    let result = host::run(eternalist_apps::Ingress::Desktop, ctx);
     trace.flush();
     result
 }
 
-#[cfg(not(target_os = "android"))]
 fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
     let operation = arguments
         .next()
         .and_then(|argument| argument.into_string().ok())
         .unwrap_or_else(|| "status".to_owned());
-    let paths = application_paths::ApplicationPaths::claim()?;
+    let paths = application_paths::ApplicationPaths::claim(&eternalist_apps::Ingress::Desktop)?;
     match operation.as_str() {
         "install" => {
             let _instance = paths.lock_instance()?;
@@ -111,7 +99,6 @@ fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Resul
     }
 }
 
-#[cfg(not(target_os = "android"))]
 fn print_help() {
     println!(
         "\
@@ -132,7 +119,6 @@ in the bounded disposable cache."
     );
 }
 
-#[cfg(not(target_os = "android"))]
 fn cleanse_relative_xdg() -> Result<()> {
     const ROOTS: [&str; 5] = [
         "XDG_CACHE_HOME",
@@ -153,7 +139,7 @@ fn cleanse_relative_xdg() -> Result<()> {
     reexec_without(&invalid)
 }
 
-#[cfg(all(unix, not(target_os = "android")))]
+#[cfg(unix)]
 fn reexec_without(names: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
@@ -166,7 +152,7 @@ fn reexec_without(names: &[&str]) -> Result<()> {
     Err(command.exec().into())
 }
 
-#[cfg(all(not(unix), not(target_os = "android")))]
+#[cfg(not(unix))]
 fn reexec_without(_names: &[&str]) -> Result<()> {
     Ok(())
 }
@@ -176,7 +162,7 @@ fn reexec_without(_names: &[&str]) -> Result<()> {
 pub fn run_android(android: eternalist_apps::AndroidApp) -> Result<()> {
     let ctx = egui::Context::default();
     brass_poolrooms::chrome::install(&ctx);
-    host::run(android, ctx)
+    host::run(eternalist_apps::Ingress::Android(android), ctx)
 }
 
 /// `NativeActivity` entry point discovered by Android's loader.

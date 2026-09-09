@@ -43,7 +43,7 @@ bytes = "1.12.1"
 crossbeam-channel = "0.5.16"
 brass_poolrooms = "0.15.0"
 egui = "=0.36.1"
-eternalist-apps = { version = "0.10.0", features = ["serde"] }
+eternalist-apps = { version = "0.11.0", features = ["serde"] }
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader"] }
 geo-types = "0.7.20"
 grib = { version = "0.18.2", default-features = false }
@@ -57,12 +57,6 @@ sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["net", "rt", "time"] }
 toml = "1.1.5"
 ureq = "3.4.0"
-
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-directories = "6.0.0"
-egui-tester-witness = { version = "0.9.8", optional = true, features = ["egui"] }
-pmtiles = { version = "0.24.0", default-features = false, features = ["http-async", "mmap-async-tokio", "reqwest-rustls"] }
-sha2 = "0.11.0"
 
 [dev-dependencies]
 fast-mvt = { version = "0.6.2", default-features = false, features = ["reader", "writer"] }

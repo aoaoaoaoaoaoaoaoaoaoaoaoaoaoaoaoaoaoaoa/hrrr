@@ -9,7 +9,7 @@ rust-version = "1.98"
 publish = false
 
 [dependencies]
-egui-tester = "0.9.8"
+egui-tester = "0.9.13"
 
 [lints]
 workspace = true

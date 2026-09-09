@@ -3,7 +3,10 @@ use crate::{
     spec::Scale,
 };
 use bytemuck::{Pod, Zeroable};
-use eternalist_apps::egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
+use eternalist_apps::{
+    Capabilities,
+    egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor, wgpu},
+};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -15,12 +18,30 @@ const VISIBLE_SAMPLE_PITCH: f32 = 16.0;
 /// A North American overview: about 59°N to 9°N at the default center.
 const MAX_VERTICAL_WORLD_SPAN: f64 = 0.18;
 const SCALE_CAPACITY: usize = 128;
-#[cfg(target_os = "android")]
 const FIELD_MESH_CELLS: u32 = 64 * 64;
-#[cfg(target_os = "android")]
-const FIELD_UNIFORM_VISIBILITY: wgpu::ShaderStages = wgpu::ShaderStages::VERTEX_FRAGMENT;
-#[cfg(not(target_os = "android"))]
-const FIELD_UNIFORM_VISIBILITY: wgpu::ShaderStages = wgpu::ShaderStages::FRAGMENT;
+
+/// How the map spends the GPU.
+///
+/// Under a free GPU budget the field is sampled per fragment across the whole
+/// viewport and vector fills are drawn every frame. A constrained GPU meshes
+/// the field so projection work moves to the vertex stage, and bakes vector
+/// fills into material tiles that are then composited.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Tier {
+    Direct,
+    Baked,
+}
+
+impl Tier {
+    #[must_use]
+    pub const fn for_capabilities(capabilities: Capabilities) -> Self {
+        if capabilities.power_unconstrained {
+            Self::Direct
+        } else {
+            Self::Baked
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ScaleBar {
@@ -100,15 +121,16 @@ impl CallbackTrait for FieldPaint {
         if let Some(gpu) = resources.get::<MapGpu>() {
             pass.set_pipeline(&gpu.pipeline);
             pass.set_bind_group(0, &gpu.bind, &[]);
-            #[cfg(not(target_os = "android"))]
-            pass.draw(0..3, 0..1);
-            #[cfg(target_os = "android")]
-            pass.draw(0..6, 0..FIELD_MESH_CELLS);
+            match gpu.tier {
+                Tier::Direct => pass.draw(0..3, 0..1),
+                Tier::Baked => pass.draw(0..6, 0..FIELD_MESH_CELLS),
+            }
         }
     }
 }
 
 pub struct MapGpu {
+    tier: Tier,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
@@ -120,7 +142,7 @@ pub struct MapGpu {
 }
 
 impl MapGpu {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, tier: Tier) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("hrrr-field"),
             entries: &[
@@ -136,7 +158,7 @@ impl MapGpu {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: FIELD_UNIFORM_VISIBILITY,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -155,10 +177,10 @@ impl MapGpu {
             label: Some("hrrr-field"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
         });
-        #[cfg(not(target_os = "android"))]
-        let (vertex_entry, fragment_entry) = ("vertex", "fragment");
-        #[cfg(target_os = "android")]
-        let (vertex_entry, fragment_entry) = ("mesh_vertex", "mesh_fragment");
+        let (vertex_entry, fragment_entry) = match tier {
+            Tier::Direct => ("vertex", "fragment"),
+            Tier::Baked => ("mesh_vertex", "mesh_fragment"),
+        };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("hrrr-field"),
             layout: Some(&pipeline_layout),
@@ -193,6 +215,7 @@ impl MapGpu {
         let texture = field_texture(device, [1, 1]);
         let bind = field_bind(device, &layout, &texture, &uniform);
         Self {
+            tier,
             pipeline,
             layout,
             uniform,

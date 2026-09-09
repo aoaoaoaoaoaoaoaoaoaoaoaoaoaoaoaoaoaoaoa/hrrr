@@ -2,6 +2,10 @@
 //! discards activation events; macOS and Windows use Tauri's native tray core.
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code, reason = "no tray emits signals on this platform")
+)]
 pub enum Signal {
     Reveal,
     Quit,
@@ -789,6 +793,7 @@ mod platform {
             bail!("system tray is unsupported on this platform")
         }
 
+        #[expect(clippy::unused_self, reason = "no tray exists to consult")]
         pub const fn available(&self) -> bool {
             false
         }

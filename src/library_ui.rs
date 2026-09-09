@@ -5,10 +5,14 @@ use brass_poolrooms::{
 };
 use eternalist_apps::CabinetAction;
 
-#[cfg(target_os = "android")]
-const CARD_MECHANISM_SIZE: MechanismSize = MechanismSize::Medium;
-#[cfg(not(target_os = "android"))]
-const CARD_MECHANISM_SIZE: MechanismSize = MechanismSize::Small;
+/// Card mechanisms are small under a pointer and medium under a fingertip.
+fn card_mechanism_size(ctx: &egui::Context) -> MechanismSize {
+    if eternalist_apps::Capabilities::of(ctx).touch {
+        MechanismSize::Medium
+    } else {
+        MechanismSize::Small
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Action<T> {
@@ -51,7 +55,7 @@ pub fn active_card<T>(
     let _title = ui.horizontal(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         let rename = Monoglyph::symbol(Symbol::Rename)
-            .size(CARD_MECHANISM_SIZE)
+            .size(card_mechanism_size(ui.ctx()))
             .show(ui)
             .on_hover_text("Rename");
         water.monoglyph(&rename);
@@ -83,7 +87,7 @@ pub fn active_card<T>(
     });
     let _controls = ui.horizontal_wrapped(|ui| {
         let create = Monoglyph::symbol(Symbol::Add)
-            .size(CARD_MECHANISM_SIZE)
+            .size(card_mechanism_size(ui.ctx()))
             .show(ui)
             .on_hover_text(format!("New {noun}"));
         water.monoglyph(&create);

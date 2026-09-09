@@ -155,6 +155,15 @@ selection and restart restoration; transient and persistent probes; pin drag
 and undo; and tray hide, reveal, menu, and quit behavior. Failure evidence is
 retained under `/tmp/hrrr-acceptance-artifacts` by default.
 
+HRRR is one program on every platform: the host declares Capabilities and
+HRRR consults a fact, never an operating system. Without a hovering pointer
+the Inspector rises as a Drawer from the bottom edge; without a free GPU
+budget the vector map bakes its fills into material tiles and the field
+meshes its projection; without a human-managed filesystem the basemap streams
+from its origin instead of a verified archive. A desktop testbed proves the
+handheld projection by exporting `ETERNALIST_CAPABILITIES=handheld`, and CI
+builds the library for `android-aarch64` as a supported coordinate.
+
 The Android projection builds a native Vulkan APK with `cargo-apk`. Install the
 APK and the egui-tester driver on a physical device, then run the maintained
 platform-neutral score through its Android projection:

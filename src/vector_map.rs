@@ -1,6 +1,7 @@
-#[cfg(target_os = "android")]
-use crate::basemap::MATERIAL_MASK_EDGE;
-use crate::basemap::{FillPoint, StrokePoint, TileKey, VectorTile};
+use crate::{
+    basemap::{FillPoint, MATERIAL_MASK_EDGE, StrokePoint, TileKey, VectorTile},
+    map::Tier,
+};
 use bytemuck::{Pod, Zeroable};
 use eternalist_apps::egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
 use std::{
@@ -16,13 +17,11 @@ const MAX_WRAP_RADIUS: u32 = 2;
 const MAX_WRAP_INSTANCES: usize = (MAX_WRAP_RADIUS * 2 + 1) as usize;
 const PLATE_TILE_EDGE: f64 = 256.0;
 const PLATE_PERIOD: f64 = 192.0;
-#[cfg(target_os = "android")]
 const MATERIAL_COLOR_EDGE: u32 = 512;
-#[cfg(target_os = "android")]
 const MATERIAL_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-#[cfg(target_os = "android")]
+/// Prefetched tiles the baked tier uploads per frame while settled.
 const WARM_UPLOADS_PER_FRAME: usize = 1;
-#[cfg(target_os = "android")]
+/// Magnification past a tile's zoom at which the baked tier draws exact fills.
 const EXACT_FILL_MAGNIFICATION: f32 = 0.75;
 
 #[derive(Clone)]
@@ -33,11 +32,11 @@ pub struct VectorPaint {
     pub viewport_points: [f32; 2],
     pub view_zoom: f32,
     pub apparition_span: f32,
-    #[cfg(target_os = "android")]
+    /// The view is at rest, so the baked tier may spend a frame on baking.
     pub settled: bool,
-    #[cfg(target_os = "android")]
+    /// Prefetched tiles the baked tier warms while settled.
     pub warm_tiles: Arc<[Arc<VectorTile>]>,
-    #[cfg(target_os = "android")]
+    /// Requests another frame when warm work remains.
     pub repaint: egui::Context,
 }
 
@@ -66,30 +65,25 @@ impl CallbackTrait for VectorPaint {
             return;
         };
         pass.set_bind_group(0, &gpu.bind, &[]);
-        pass.set_pipeline(&gpu.fill_pipeline);
-        #[cfg(not(target_os = "android"))]
-        for key in &gpu.active {
-            if let Some(tile) = gpu.tiles.get(key)
-                && let Some(draw) = &tile.fills
-            {
-                draw.paint(pass, &tile.buffer, &tile.transform, gpu.instances);
-            }
-        }
-        #[cfg(target_os = "android")]
-        if gpu.exact_fills {
-            pass.set_pipeline(&gpu.exact_fill_pipeline);
-            for key in &gpu.active {
-                if let Some(tile) = gpu.tiles.get(key)
-                    && let Some(draw) = &tile.fills
-                {
-                    draw.paint(pass, &tile.buffer, &tile.transform, gpu.instances);
+        match &gpu.baking {
+            Some(baking) if !gpu.exact_fills => {
+                pass.set_pipeline(&baking.material_pipeline);
+                for key in &gpu.active {
+                    if let Some(tile) = gpu.tiles.get(key)
+                        && let Some(material) = &tile.material
+                    {
+                        material.paint(pass, &tile.buffer, &tile.transform, gpu.instances);
+                    }
                 }
             }
-        } else {
-            for key in &gpu.active {
-                if let Some(tile) = gpu.tiles.get(key) {
-                    tile.material
-                        .paint(pass, &tile.buffer, &tile.transform, gpu.instances);
+            _ => {
+                pass.set_pipeline(&gpu.fill_pipeline);
+                for key in &gpu.active {
+                    if let Some(tile) = gpu.tiles.get(key)
+                        && let Some(draw) = &tile.fills
+                    {
+                        draw.paint(pass, &tile.buffer, &tile.transform, gpu.instances);
+                    }
                 }
             }
         }
@@ -107,14 +101,8 @@ impl CallbackTrait for VectorPaint {
 pub struct VectorMapGpu {
     fill_pipeline: wgpu::RenderPipeline,
     stroke_pipeline: wgpu::RenderPipeline,
-    #[cfg(target_os = "android")]
-    material_layout: wgpu::BindGroupLayout,
-    #[cfg(target_os = "android")]
-    mask_layout: wgpu::BindGroupLayout,
-    #[cfg(target_os = "android")]
-    bake_pipeline: wgpu::RenderPipeline,
-    #[cfg(target_os = "android")]
-    exact_fill_pipeline: wgpu::RenderPipeline,
+    /// The baked tier's material pipelines; absent on the direct tier.
+    baking: Option<Baking>,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     uniform_value: Option<Uniform>,
@@ -124,15 +112,93 @@ pub struct VectorMapGpu {
     epoch: u64,
     bytes: usize,
     instances: u32,
-    #[cfg(target_os = "android")]
     exact_fills: bool,
-    #[cfg(target_os = "android")]
     last_viewport_points: Option<[f32; 2]>,
     profile: bool,
 }
 
+/// The baked tier's material machinery: masks uploaded per tile, colors baked
+/// into a texture at rest, and the pipelines that bake and composite them.
+struct Baking {
+    material_layout: wgpu::BindGroupLayout,
+    mask_layout: wgpu::BindGroupLayout,
+    material_pipeline: wgpu::RenderPipeline,
+    bake_pipeline: wgpu::RenderPipeline,
+}
+
+impl Baking {
+    fn raise(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        layout: &wgpu::BindGroupLayout,
+        shader: &wgpu::ShaderModule,
+    ) -> Self {
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vector-material-color"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vector-material-mask"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vector-material-empty"),
+            entries: &[],
+        });
+        let material_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vector-material-color"),
+                bind_group_layouts: &[Some(layout), Some(&material_layout)],
+                immediate_size: 0,
+            });
+        let bake_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vector-material-bake"),
+            bind_group_layouts: &[Some(layout), Some(&empty_layout), Some(&mask_layout)],
+            immediate_size: 0,
+        });
+        Self {
+            material_pipeline: material_pipeline(
+                device,
+                format,
+                &material_pipeline_layout,
+                shader,
+                "vector-material-color",
+            ),
+            bake_pipeline: material_bake_pipeline(device, format, &bake_pipeline_layout, shader),
+            material_layout,
+            mask_layout,
+        }
+    }
+}
+
 impl VectorMapGpu {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, tier: Tier) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vector-map-uniform"),
             size: size_of::<Uniform>() as u64,
@@ -160,69 +226,15 @@ impl VectorMapGpu {
                 resource: uniform.as_entire_binding(),
             }],
         });
-        #[cfg(target_os = "android")]
-        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vector-material-color"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        #[cfg(target_os = "android")]
-        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vector-material-mask"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Uint,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        });
-        #[cfg(target_os = "android")]
-        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vector-material-empty"),
-            entries: &[],
-        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vector-map"),
             bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        #[cfg(target_os = "android")]
-        let fill_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vector-material-color"),
-            bind_group_layouts: &[Some(&layout), Some(&material_layout)],
-            immediate_size: 0,
-        });
-        #[cfg(target_os = "android")]
-        let bake_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vector-material-bake"),
-            bind_group_layouts: &[Some(&layout), Some(&empty_layout), Some(&mask_layout)],
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vector-map"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
         });
-        #[cfg(not(target_os = "android"))]
         let fill_pipeline = pipeline(
             device,
             format,
@@ -232,14 +244,6 @@ impl VectorMapGpu {
             "fill_vertex",
             fragment_entry(format),
             fill_layout(),
-        );
-        #[cfg(target_os = "android")]
-        let fill_pipeline = material_pipeline(
-            device,
-            format,
-            &fill_pipeline_layout,
-            &shader,
-            "vector-material-color",
         );
         let stroke_pipeline = pipeline(
             device,
@@ -251,30 +255,14 @@ impl VectorMapGpu {
             fragment_entry(format),
             stroke_layout(),
         );
-        #[cfg(target_os = "android")]
-        let bake_pipeline = material_bake_pipeline(device, format, &bake_pipeline_layout, &shader);
-        #[cfg(target_os = "android")]
-        let exact_fill_pipeline = pipeline(
-            device,
-            format,
-            &pipeline_layout,
-            &shader,
-            "vector-fill-exact",
-            "fill_vertex",
-            fragment_entry(format),
-            fill_layout(),
-        );
+        let baking = match tier {
+            Tier::Direct => None,
+            Tier::Baked => Some(Baking::raise(device, format, &layout, &shader)),
+        };
         Self {
             fill_pipeline,
             stroke_pipeline,
-            #[cfg(target_os = "android")]
-            material_layout,
-            #[cfg(target_os = "android")]
-            mask_layout,
-            #[cfg(target_os = "android")]
-            bake_pipeline,
-            #[cfg(target_os = "android")]
-            exact_fill_pipeline,
+            baking,
             uniform,
             bind,
             uniform_value: None,
@@ -284,9 +272,7 @@ impl VectorMapGpu {
             epoch: 0,
             bytes: 0,
             instances: 1,
-            #[cfg(target_os = "android")]
             exact_fills: false,
-            #[cfg(target_os = "android")]
             last_viewport_points: None,
             profile: std::env::var_os("HRRR_PROFILE_BASEMAP").is_some(),
         }
@@ -301,8 +287,6 @@ impl VectorMapGpu {
         paint: &VectorPaint,
     ) {
         let begun = Instant::now();
-        #[cfg(not(target_os = "android"))]
-        let _ = encoder;
         let incoming = paint.tiles.iter().map(|tile| tile.key).collect::<Vec<_>>();
         let changed = incoming != self.active;
         if changed {
@@ -318,39 +302,23 @@ impl VectorMapGpu {
         }
         let mut uploaded = 0_usize;
         {
-            #[cfg(target_os = "android")]
-            let _upload = eternalist_apps::android_trace::Span::begin("HRRR vector.upload");
-            #[cfg(target_os = "android")]
             let mut warm_budget = WARM_UPLOADS_PER_FRAME;
-            #[cfg(target_os = "android")]
-            let candidates = paint.tiles.iter().chain(paint.warm_tiles.iter());
-            #[cfg(not(target_os = "android"))]
-            let candidates = paint.tiles.iter();
-            for tile in candidates {
+            let warm = self
+                .baking
+                .as_ref()
+                .map_or(&[][..], |_| &paint.warm_tiles[..]);
+            for tile in paint.tiles.iter().chain(warm) {
                 if self.tiles.contains_key(&tile.key) {
                     continue;
                 }
-                #[cfg(target_os = "android")]
                 if !self.active_set.contains(&tile.key) {
                     if warm_budget == 0 {
                         continue;
                     }
                     warm_budget -= 1;
                 }
-                #[cfg(target_os = "android")]
-                let _tile_upload =
-                    eternalist_apps::android_trace::Span::begin("HRRR vector.tile_upload");
-                #[cfg(target_os = "android")]
-                let resident = GpuTile::raise(
-                    device,
-                    queue,
-                    &self.material_layout,
-                    &self.mask_layout,
-                    tile,
-                    self.epoch,
-                );
-                #[cfg(not(target_os = "android"))]
-                let resident = GpuTile::raise(device, tile, self.epoch);
+                let resident =
+                    GpuTile::raise(device, queue, self.baking.as_ref(), tile, self.epoch);
                 uploaded = uploaded.saturating_add(resident.bytes);
                 self.bytes = self.bytes.saturating_add(resident.bytes);
                 let _prior = self.tiles.insert(tile.key, resident);
@@ -365,8 +333,7 @@ impl VectorMapGpu {
             self.uniform_value = Some(uniform);
         }
         self.instances = uniform.wrap_radius.saturating_mul(2).saturating_add(1);
-        #[cfg(target_os = "android")]
-        {
+        if let Some(baking) = &self.baking {
             let resizing = self.last_viewport_points != Some(paint.viewport_points);
             self.last_viewport_points = Some(paint.viewport_points);
             if !paint.settled || resizing {
@@ -381,13 +348,14 @@ impl VectorMapGpu {
                                 .is_some_and(|resident| resident.fills.is_some())
                     });
             }
-            let _bake = eternalist_apps::android_trace::Span::begin("HRRR vector.bake");
             if !self.exact_fills {
                 for key in &self.active {
-                    if let Some(tile) = self.tiles.get_mut(key) {
-                        tile.material.bake(
+                    if let Some(tile) = self.tiles.get_mut(key)
+                        && let Some(material) = &mut tile.material
+                    {
+                        material.bake(
                             encoder,
-                            &self.bake_pipeline,
+                            &baking.bake_pipeline,
                             &self.bind,
                             &tile.buffer,
                             &tile.transform,
@@ -405,12 +373,15 @@ impl VectorMapGpu {
                         let Some(tile) = self.tiles.get_mut(&warm.key) else {
                             continue;
                         };
-                        if tile.material.view_zoom == Some(paint.view_zoom) {
+                        let Some(material) = tile.material.as_mut() else {
+                            continue;
+                        };
+                        if material.view_zoom == Some(paint.view_zoom) {
                             continue;
                         }
-                        tile.material.bake(
+                        material.bake(
                             encoder,
-                            &self.bake_pipeline,
+                            &baking.bake_pipeline,
                             &self.bind,
                             &tile.buffer,
                             &tile.transform,
@@ -425,7 +396,11 @@ impl VectorMapGpu {
             if paint.warm_tiles.iter().any(|warm| {
                 !self.active_set.contains(&warm.key)
                     && self.tiles.get(&warm.key).is_none_or(|tile| {
-                        !self.exact_fills && tile.material.view_zoom != Some(paint.view_zoom)
+                        !self.exact_fills
+                            && tile
+                                .material
+                                .as_ref()
+                                .is_none_or(|material| material.view_zoom != Some(paint.view_zoom))
                     })
             }) {
                 paint.repaint.request_repaint();
@@ -499,7 +474,6 @@ fn pipeline(
     })
 }
 
-#[cfg(target_os = "android")]
 fn material_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -538,7 +512,6 @@ fn material_pipeline(
     })
 }
 
-#[cfg(target_os = "android")]
 fn material_bake_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
@@ -627,8 +600,8 @@ fn tile_layout() -> wgpu::VertexBufferLayout<'static> {
 
 struct GpuTile {
     fills: Option<Draw>,
-    #[cfg(target_os = "android")]
-    material: MaterialTile,
+    /// Present on the baked tier alone.
+    material: Option<MaterialTile>,
     strokes: Option<Draw>,
     buffer: wgpu::Buffer,
     transform: Range<u64>,
@@ -637,8 +610,13 @@ struct GpuTile {
 }
 
 impl GpuTile {
-    #[cfg(not(target_os = "android"))]
-    fn raise(device: &wgpu::Device, tile: &VectorTile, touched: u64) -> Self {
+    fn raise(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        baking: Option<&Baking>,
+        tile: &VectorTile,
+        touched: u64,
+    ) -> Self {
         let mut blade = Vec::with_capacity(
             tile.resident_bytes()
                 .saturating_add(size_of::<TileInstance>() * MAX_WRAP_INSTANCES),
@@ -649,56 +627,18 @@ impl GpuTile {
             &mut blade,
             &[TileInstance::forge(tile.key); MAX_WRAP_INSTANCES],
         );
-        let bytes = blade.len();
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vector-tile"),
-            contents: &blade,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
+        let material = baking.map(|baking| {
+            MaterialTile::raise(
+                device,
+                queue,
+                &baking.material_layout,
+                &baking.mask_layout,
+                tile,
+            )
         });
-        Self {
-            fills,
-            strokes,
-            buffer,
-            transform,
-            bytes,
-            touched,
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    fn raise(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        material_layout: &wgpu::BindGroupLayout,
-        mask_layout: &wgpu::BindGroupLayout,
-        tile: &VectorTile,
-        touched: u64,
-    ) -> Self {
-        let mut blade = Vec::with_capacity(
-            tile.fills
-                .vertices
-                .len()
-                .saturating_mul(size_of::<FillPoint>())
-                .saturating_add(tile.fills.indices.len().saturating_mul(size_of::<u32>()))
-                .saturating_add(
-                    tile.strokes
-                        .vertices
-                        .len()
-                        .saturating_mul(size_of::<StrokePoint>())
-                        .saturating_add(
-                            tile.strokes.indices.len().saturating_mul(size_of::<u32>()),
-                        ),
-                )
-                .saturating_add(size_of::<TileInstance>() * MAX_WRAP_INSTANCES),
-        );
-        let fills = Draw::pack(&mut blade, &tile.fills.vertices, &tile.fills.indices);
-        let strokes = Draw::pack(&mut blade, &tile.strokes.vertices, &tile.strokes.indices);
-        let transform = append(
-            &mut blade,
-            &[TileInstance::forge(tile.key); MAX_WRAP_INSTANCES],
-        );
-        let material = MaterialTile::raise(device, queue, material_layout, mask_layout, tile);
-        let bytes = blade.len().saturating_add(material.bytes);
+        let bytes = blade
+            .len()
+            .saturating_add(material.as_ref().map_or(0, |material| material.bytes));
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vector-tile"),
             contents: &blade,
@@ -716,7 +656,6 @@ impl GpuTile {
     }
 }
 
-#[cfg(target_os = "android")]
 struct MaterialTile {
     bind: wgpu::BindGroup,
     mask_bind: wgpu::BindGroup,
@@ -726,7 +665,6 @@ struct MaterialTile {
     view_zoom: Option<f32>,
 }
 
-#[cfg(target_os = "android")]
 impl MaterialTile {
     fn raise(
         device: &wgpu::Device,

@@ -17,9 +17,8 @@ pub enum Act {
     RaiseInspector,
     NextPanel(Panel),
     PreviousPanel(Panel),
-    OpenManagedSurface(ManagedSurface),
-    CloseManagedSurface(ManagedSurface),
-    ToggleWaterEffects,
+    OpenModal(Modal),
+    CloseModal(Modal),
     PanMap,
     ZoomMap(Zoom),
     PlaceProbe,
@@ -44,11 +43,12 @@ impl Act {
             Self::SelectPanel(_) => Feature::PanelSelection,
             Self::LowerInspector | Self::RaiseInspector => Feature::InspectorMotion,
             Self::NextPanel(_) | Self::PreviousPanel(_) => Feature::PanelCarousel,
-            Self::OpenManagedSurface(ManagedSurface::Settings)
-            | Self::CloseManagedSurface(ManagedSurface::Settings) => Feature::Settings,
-            Self::OpenManagedSurface(ManagedSurface::CommandGuide)
-            | Self::CloseManagedSurface(ManagedSurface::CommandGuide) => Feature::CommandGuide,
-            Self::ToggleWaterEffects => Feature::WaterSetting,
+            Self::OpenModal(Modal::Settings) | Self::CloseModal(Modal::Settings) => {
+                Feature::Settings
+            }
+            Self::OpenModal(Modal::CommandGuide) | Self::CloseModal(Modal::CommandGuide) => {
+                Feature::CommandGuide
+            }
             Self::PanMap => Feature::MapPan,
             Self::ZoomMap(_) => Feature::MapZoom,
             Self::PlaceProbe | Self::MoveProbe | Self::ClearProbe => Feature::MapProbe,
@@ -206,7 +206,7 @@ impl Field {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManagedSurface {
+pub enum Modal {
     Settings,
     CommandGuide,
 }
@@ -254,7 +254,6 @@ enum Feature {
     PanelCarousel,
     Settings,
     CommandGuide,
-    WaterSetting,
     MapPan,
     MapZoom,
     MapProbe,
@@ -272,7 +271,7 @@ enum Feature {
 }
 
 impl Feature {
-    const ALL_MASK: u32 = (1 << 20) - 1;
+    const ALL_MASK: u32 = (1 << 19) - 1;
 
     const fn mask(self) -> u32 {
         1 << self as u8
@@ -328,9 +327,8 @@ const PANELS: &[Beat] = &[
 const WATER: &[Beat] = &[
     Beat::Chapter("Wet panel carousel"),
     Beat::Act(Act::SelectPanel(Panel::Application)),
-    Beat::Act(Act::OpenManagedSurface(ManagedSurface::Settings)),
-    Beat::Act(Act::ToggleWaterEffects),
-    Beat::Act(Act::CloseManagedSurface(ManagedSurface::Settings)),
+    Beat::Act(Act::OpenModal(Modal::Settings)),
+    Beat::Act(Act::CloseModal(Modal::Settings)),
     Beat::Act(Act::NextPanel(Panel::Field)),
     Beat::Act(Act::NextPanel(Panel::Forecast)),
     Beat::Act(Act::NextPanel(Panel::ActiveView)),
@@ -341,9 +339,8 @@ const WATER: &[Beat] = &[
     Beat::Act(Act::PreviousPanel(Panel::Forecast)),
     Beat::Act(Act::PreviousPanel(Panel::Field)),
     Beat::Act(Act::PreviousPanel(Panel::Application)),
-    Beat::Act(Act::OpenManagedSurface(ManagedSurface::Settings)),
-    Beat::Act(Act::ToggleWaterEffects),
-    Beat::Act(Act::CloseManagedSurface(ManagedSurface::Settings)),
+    Beat::Act(Act::OpenModal(Modal::Settings)),
+    Beat::Act(Act::CloseModal(Modal::Settings)),
 ];
 
 const MAP: &[Beat] = &[
@@ -422,9 +419,8 @@ const COMPREHENSIVE: &[Beat] = &[
     Beat::Act(Act::SelectPanel(Panel::Application)),
     Beat::Act(Act::LowerInspector),
     Beat::Act(Act::RaiseInspector),
-    Beat::Act(Act::OpenManagedSurface(ManagedSurface::Settings)),
-    Beat::Act(Act::ToggleWaterEffects),
-    Beat::Act(Act::CloseManagedSurface(ManagedSurface::Settings)),
+    Beat::Act(Act::OpenModal(Modal::Settings)),
+    Beat::Act(Act::CloseModal(Modal::Settings)),
     Beat::Chapter("Wet panel carousel"),
     Beat::Act(Act::NextPanel(Panel::Field)),
     Beat::Act(Act::NextPanel(Panel::Forecast)),
@@ -436,11 +432,10 @@ const COMPREHENSIVE: &[Beat] = &[
     Beat::Act(Act::PreviousPanel(Panel::Forecast)),
     Beat::Act(Act::PreviousPanel(Panel::Field)),
     Beat::Act(Act::PreviousPanel(Panel::Application)),
-    Beat::Act(Act::OpenManagedSurface(ManagedSurface::CommandGuide)),
-    Beat::Act(Act::CloseManagedSurface(ManagedSurface::CommandGuide)),
-    Beat::Act(Act::OpenManagedSurface(ManagedSurface::Settings)),
-    Beat::Act(Act::ToggleWaterEffects),
-    Beat::Act(Act::CloseManagedSurface(ManagedSurface::Settings)),
+    Beat::Act(Act::OpenModal(Modal::CommandGuide)),
+    Beat::Act(Act::CloseModal(Modal::CommandGuide)),
+    Beat::Act(Act::OpenModal(Modal::Settings)),
+    Beat::Act(Act::CloseModal(Modal::Settings)),
     Beat::Chapter("Every forecast field"),
     Beat::Act(Act::SelectPanel(Panel::Field)),
     Beat::Act(Act::SelectField(Field::QpfTotal)),
