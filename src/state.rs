@@ -31,6 +31,18 @@ impl DrawerPanel {
         Self::Status,
     ];
 
+    /// The acceptance target the Drawer anchors while this Panel shows.
+    pub(crate) const fn target(self) -> hrrr_contract::Target {
+        hrrr_contract::Target::Panel(match self {
+            Self::Application => "application",
+            Self::Field => "field",
+            Self::Forecast => "forecast",
+            Self::ActiveView => "active-view",
+            Self::Views => "views",
+            Self::Status => "status",
+        })
+    }
+
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Application => "application",

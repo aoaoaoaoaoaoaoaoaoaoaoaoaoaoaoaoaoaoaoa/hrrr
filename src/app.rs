@@ -823,6 +823,7 @@ impl WeatherApp {
     }
 
     fn drawer_panel(&mut self, ui: &mut egui::Ui, panel: DrawerPanel) {
+        crate::witness::anchor(ui, panel.target(), ui.available_rect_before_wrap());
         match panel {
             DrawerPanel::Application => {
                 let _header = ApplicationHeader::new("HRRR")

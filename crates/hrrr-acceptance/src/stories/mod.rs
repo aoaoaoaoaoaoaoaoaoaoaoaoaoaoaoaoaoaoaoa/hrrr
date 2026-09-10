@@ -1,3 +1,4 @@
+mod drawer;
 mod fields;
 mod keyboard;
 mod map_objects;
@@ -78,6 +79,7 @@ fn visible(frame: &Frame) -> bool {
 
 pub fn run(harness: &Harness<'_>, selected: Option<&str>) -> Result<()> {
     match selected.unwrap_or("map-objects") {
+        "drawer" => drawer::run(harness)?,
         "fields" => fields::run(harness)?,
         "keyboard" => keyboard::run(harness)?,
         "map-objects" => map_objects::run(harness)?,

@@ -48,6 +48,15 @@ impl<'a> Harness<'a> {
         self.testbed.launch(self.command(witnessed))
     }
 
+    /// Launch HRRR as a handheld would: no pointer, touch, no keyboard, no
+    /// free GPU budget, no configuration file, retirement.
+    pub fn launch_handheld(&self) -> Result<Application<'a>> {
+        self.testbed.launch(
+            self.command(true)
+                .env("ETERNALIST_CAPABILITIES", "handheld"),
+        )
+    }
+
     pub fn story<'app>(&'a self, app: &'app Application<'a>) -> Result<HrrrStory<'app, 'a>> {
         let mut story: HrrrStory<'app, 'a> = Story::bind(
             self.testbed,
