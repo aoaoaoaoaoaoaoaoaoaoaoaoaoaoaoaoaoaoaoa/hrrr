@@ -1,15 +1,10 @@
-# AGENTS.md
+hrrr: native viewer for NOAA HRRR forecast fields
 
-Read `/home/main/programming/projects/rust_starter/docs/rust-style-doctrine.md`
-before meaningful Rust edits.
+## gate
+- `./check.py check` after edits; `./check.py verify` for non-mutating gate
 
-Run `./check.py check` after meaningful edits and `./check.py verify` for the
-non-mutating gate.
-
-This is a native forecast-field viewer. Network and GRIB work never runs on the
-UI thread. Forecast products, units, palettes, runs, and lead times are closed
-domain types. User-authored configuration belongs under XDG config, disposable
-forecast bytes under XDG cache, and ephemeral view state under XDG state.
-
-New UI mechanisms remain local until their design is polished enough to
-promote into `brass_poolrooms`.
+## invariants
+- Network and GRIB work never on UI thread
+- Forecast products, units, palettes, runs, lead times: closed domain types
+- User-authored config in XDG config; disposable forecast bytes in XDG cache; ephemeral view state in XDG state
+- New UI mechanisms stay local until polished enough to promote into `brass_poolrooms`
