@@ -2951,7 +2951,7 @@ fn view_slot_command(event: &egui::Event) -> Option<(ViewSlot, bool)> {
 }
 
 fn apportion_product_widths(ui: &egui::Ui, row: &[Product]) -> [f32; Product::ALL.len()] {
-    debug_assert!(!row.is_empty());
+    debug_assert!(!row.is_empty(), "a product row holds at least one product");
     let gap = ui.spacing().item_spacing.x * row.len().saturating_sub(1) as f32;
     let available = (ui.available_width() - gap).max(0.0);
     let style = ui.style().button_style(
