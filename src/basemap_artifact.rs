@@ -526,7 +526,8 @@ fn extract_tool(package: &Path, tool: &Path, asset: ToolAsset, cancel: &AtomicBo
     for slot in 0..zip.len() {
         heed(cancel)?;
         let mut entry = zip.by_index(slot)?;
-        if Path::new(entry.name()).file_name() == Some(OsStr::new(asset.executable)) {
+        let wanted = Path::new(&*entry.name()?).file_name() == Some(OsStr::new(asset.executable));
+        if wanted {
             let mut output = File::create(tool)?;
             let _bytes = std::io::copy(&mut entry, &mut output)?;
             output.sync_all()?;
