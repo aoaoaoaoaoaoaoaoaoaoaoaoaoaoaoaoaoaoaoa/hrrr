@@ -25,14 +25,6 @@ const DRAWER_PREVIOUS: &str = "eternalist.drawer.previous";
 const DRAWER_LOWER: &str = "eternalist.drawer.lower";
 const DRAWER_RAISE: &str = "eternalist.drawer.raise";
 const VIEWS: &str = "views";
-/// Panels the Dock's Control+Tab ring visits, in presentation order.
-const RING: [Panel; 5] = [
-    Panel::Field,
-    Panel::Forecast,
-    Panel::ActiveView,
-    Panel::Views,
-    Panel::Status,
-];
 const FOCUS: Duration = Duration::from_secs(5);
 /// Live forecast and basemap bytes may cross the network before a frame paints.
 const PAINT: Duration = Duration::from_mins(2);
@@ -112,7 +104,9 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
             .map(drop)
     }
 
-    fn painted(&mut self) -> Result<()> {
+    /// Await the active field, its latched scale, the required basemap, and
+    /// every plaque on the surface.
+    pub fn painted(&mut self) -> Result<()> {
         self.story
             .wait_within(
                 PAINT,
@@ -146,7 +140,8 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
         }
         let target = panel_target(panel);
         let mut step = lean;
-        for _ in 0..=RING.len() {
+        let span = ring().count();
+        for _ in 0..=span {
             let Some(focused) = focused_panel(&self.story.frame()?) else {
                 self.step_ring(step)?;
                 continue;
@@ -154,8 +149,8 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
             if focused == panel {
                 break;
             }
-            let ahead = (ring_slot(panel) + RING.len() - ring_slot(focused)) % RING.len();
-            step = if ahead <= RING.len() / 2 {
+            let ahead = (ring_slot(panel) + span - ring_slot(focused)) % span;
+            step = if ahead <= span / 2 {
                 Modifiers::CTRL
             } else {
                 Modifiers::CTRL | Modifiers::SHIFT
@@ -185,12 +180,12 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
 
     /// Page the handheld Drawer, one arrow at a time, to `panel`.
     fn page_drawer(&mut self, panel: Panel) -> Result<()> {
-        let wire = panel_wire(panel);
-        for _ in 0..=Panel::Status.index() {
+        let wire = panel.wire();
+        for _ in Panel::ALL {
             let shown = self.drawer_at_rest()?.panel;
             let at = Panel::ALL
                 .into_iter()
-                .find(|candidate| panel_wire(*candidate) == shown)
+                .find(|candidate| candidate.wire() == shown)
                 .ok_or_else(|| verdict(format!("Drawer shows unknown panel `{shown}`")))?;
             if at == panel {
                 return Ok(());
@@ -465,11 +460,10 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
     }
 
     fn select_field(&mut self, field: Field) -> Result<()> {
-        let wire = field_wire(field);
-        if self.state()?.active_field.as_deref() == Some(wire) {
+        if self.state()?.active_field.as_deref() == Some(field.wire()) {
             return Ok(());
         }
-        self.tap(Target::Field(wire), shows::field(wire))
+        self.tap(Target::Field(field), shows::field(field))
     }
 
     fn step_forecast_hour(&mut self, direction: Direction) -> Result<()> {
@@ -552,8 +546,8 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
         let before = self
             .state()?
             .run
-            .ok_or_else(|| verdict("no forecast run to step from"))?
-            .cycle;
+            .and_then(|run| run.cycle)
+            .ok_or_else(|| verdict("no forecast cycle to step from"))?;
         let target = match direction {
             Direction::Previous => Target::RunOlder,
             Direction::Next => Target::RunNewer,
@@ -563,10 +557,10 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
             Condition::new("fixed run stepped", move |state: &Observation| {
                 state.run.as_ref().is_some_and(|run| {
                     run.tether == "fixed"
-                        && match direction {
-                            Direction::Previous => run.cycle < before,
-                            Direction::Next => run.cycle > before,
-                        }
+                        && run.cycle.as_ref().is_some_and(|cycle| match direction {
+                            Direction::Previous => *cycle < before,
+                            Direction::Next => *cycle > before,
+                        })
                 })
             }),
         )
@@ -864,42 +858,24 @@ impl<O: StoryObserver> HrrrProjection for Desk<'_, '_, '_, O> {
     }
 }
 
-const fn panel_wire(panel: Panel) -> &'static str {
-    match panel {
-        Panel::Application => "application",
-        Panel::Field => "field",
-        Panel::Forecast => "forecast",
-        Panel::ActiveView => "active-view",
-        Panel::Views => "views",
-        Panel::Status => "status",
-    }
+fn panel_target(panel: Panel) -> String {
+    Target::Panel(panel).to_string()
 }
 
-fn panel_target(panel: Panel) -> String {
-    Target::Panel(panel_wire(panel)).to_string()
+/// The panels the Dock's Control+Tab ring visits, in presentation order;
+/// the application header stands above the ring.
+fn ring() -> impl Iterator<Item = Panel> {
+    Panel::ALL
+        .into_iter()
+        .filter(|panel| *panel != Panel::Application)
 }
 
 fn ring_slot(panel: Panel) -> usize {
-    panel.index() - 1
+    panel.index() - Panel::Field.index()
 }
 
 fn focused_panel(frame: &ProbeFrame<Observation>) -> Option<Panel> {
-    RING.into_iter()
-        .find(|panel| frame.focused_anchor(&panel_target(*panel)).is_some())
-}
-
-const fn field_wire(field: Field) -> &'static str {
-    match field {
-        Field::QpfTotal => "qpf",
-        Field::QpfHourly => "qpf-hour",
-        Field::SurfaceSmoke => "smoke",
-        Field::Temperature => "temperature",
-        Field::DewPoint => "dew-point",
-        Field::CloudCover => "cloud-cover",
-        Field::SeaLevelPressure => "pressure",
-        Field::Wind => "wind",
-        Field::AirQuality => "air-quality",
-    }
+    ring().find(|panel| frame.focused_anchor(&panel_target(*panel)).is_some())
 }
 
 /// A point at fractional coordinates of a witnessed rectangle.

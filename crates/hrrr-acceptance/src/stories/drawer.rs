@@ -12,8 +12,8 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     let mut story = harness.story(&app)?;
     // A cold boot selects the smoke field, so the Drawer opens on the
     // forecast panel; page back to the field panel to choose another.
-    let _initial = story.wait(shows::field("smoke"))?;
-    let _forecast_panel = story.anchor(hrrr_contract::Target::Panel("forecast"))?;
+    let _initial = story.wait(shows::field(Field::SurfaceSmoke))?;
+    let _forecast_panel = story.anchor(hrrr_contract::Target::Panel(Panel::Forecast))?;
     for act in [
         Act::PreviousPanel(Panel::Field),
         Act::SelectField(Field::CloudCover),

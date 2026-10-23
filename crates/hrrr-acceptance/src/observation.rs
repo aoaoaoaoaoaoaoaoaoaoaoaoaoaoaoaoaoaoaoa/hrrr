@@ -74,7 +74,7 @@ pub struct Drawer {
 
 #[derive(Debug, Deserialize)]
 pub struct Run {
-    pub cycle: String,
+    pub cycle: Option<String>,
     pub tether: String,
 }
 
@@ -98,12 +98,14 @@ pub struct Viewport {
 }
 
 pub mod shows {
+    use hrrr_contract::Field;
+
     use super::*;
 
-    pub fn field(name: &'static str) -> Condition<Observation> {
+    pub fn field(field: Field) -> Condition<Observation> {
         Condition::new(
-            format!("{name} field selected"),
-            move |state: &Observation| state.active_field.as_deref() == Some(name),
+            format!("{} field selected", field.wire()),
+            move |state: &Observation| state.active_field.as_deref() == Some(field.wire()),
         )
     }
 

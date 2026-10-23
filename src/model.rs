@@ -1,4 +1,5 @@
 use anyhow::{Context as _, Result, bail};
+use hrrr_contract::Field;
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, sync::Arc};
@@ -294,7 +295,7 @@ impl InventoryLaw {
 #[derive(Clone, Copy)]
 struct ProductLaw {
     label: &'static str,
-    cache_name: &'static str,
+    field: Field,
     recipe: FieldRecipe,
 }
 
@@ -306,7 +307,7 @@ macro_rules! field_arsenal {
                     $(#[$attribute:meta])*
                     $variant:ident {
                         label: $label:literal,
-                        cache: $cache:literal,
+                        field: $field:ident,
                         recipe: $recipe:expr $(,)?
                     }
                 ),+ $(,)?
@@ -341,7 +342,7 @@ macro_rules! field_arsenal {
                         $(
                             Self::$variant => ProductLaw {
                                 label: $label,
-                                cache_name: $cache,
+                                field: Field::$field,
                                 recipe: $recipe,
                             },
                         )+
@@ -353,8 +354,13 @@ macro_rules! field_arsenal {
                 self.law().label
             }
 
+            /// The contract's field, whose wire name is also the cache name.
+            pub const fn field(self) -> Field {
+                self.law().field
+            }
+
             pub const fn cache_name(self) -> &'static str {
-                self.law().cache_name
+                self.law().field.wire()
             }
 
             pub(crate) const fn ingredients(self) -> &'static [Ingredient] {
@@ -396,7 +402,7 @@ field_arsenal! {
         #[serde(alias = "qpf")]
         QpfRun {
             label: "QPF · TOTAL",
-            cache: "qpf",
+            field: QpfTotal,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::AccumulationFromRun,
                 GribLaw::accumulation(GribTimeLaw::AccumulationFromRun),
@@ -404,7 +410,7 @@ field_arsenal! {
         },
         QpfHour {
             label: "QPF · 1 HOUR",
-            cache: "qpf-hour",
+            field: QpfHourly,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::HourlyAccumulation,
                 GribLaw::accumulation(GribTimeLaw::HourlyAccumulation),
@@ -415,7 +421,7 @@ field_arsenal! {
         #[default]
         Smoke {
             label: "SURFACE SMOKE · 8 M AGL",
-            cache: "smoke",
+            field: SurfaceSmoke,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":MASSDEN:8 m above ground:"),
                 GribLaw::instant(20, 0, FixedSurfaceLaw::metres_above_ground(8)),
@@ -425,7 +431,7 @@ field_arsenal! {
     [
         Temperature {
             label: "TEMPERATURE",
-            cache: "temperature",
+            field: Temperature,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":TMP:2 m above ground:"),
                 GribLaw::instant(0, 0, FixedSurfaceLaw::metres_above_ground(2)),
@@ -433,7 +439,7 @@ field_arsenal! {
         },
         DewPoint {
             label: "DEW POINT",
-            cache: "dew-point",
+            field: DewPoint,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":DPT:2 m above ground:"),
                 GribLaw::instant(0, 6, FixedSurfaceLaw::metres_above_ground(2)),
@@ -443,7 +449,7 @@ field_arsenal! {
     [
         CloudCover {
             label: "CLOUD COVER",
-            cache: "cloud-cover",
+            field: CloudCover,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":TCDC:entire atmosphere:"),
                 GribLaw::instant(6, 1, FixedSurfaceLaw::ENTIRE_ATMOSPHERE),
@@ -451,7 +457,7 @@ field_arsenal! {
         },
         Pressure {
             label: "SEA-LEVEL PRESSURE",
-            cache: "pressure",
+            field: SeaLevelPressure,
             recipe: FieldRecipe::scalar(
                 InventoryLaw::Contains(":MSLMA:mean sea level:"),
                 GribLaw::instant(3, 198, FixedSurfaceLaw::MEAN_SEA_LEVEL),
@@ -461,7 +467,7 @@ field_arsenal! {
     [
         Wind {
             label: "WIND · 10 M AGL",
-            cache: "wind",
+            field: Wind,
             recipe: FieldRecipe::Vector {
                 eastward: IngredientLaw::hrrr(
                     "eastward",
@@ -479,7 +485,7 @@ field_arsenal! {
     [
         AirQuality {
             label: "AIR QUALITY · AQI",
-            cache: "air-quality",
+            field: AirQuality,
             recipe: FieldRecipe::AirQuality {
                 fine_particulate: IngredientLaw::aqm(
                     "pm25",

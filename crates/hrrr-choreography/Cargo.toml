@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 egui-tester = "0.9.13"
+hrrr-contract = { path = "../hrrr-contract", version = "0.6.0" }
 
 [lints]
 workspace = true

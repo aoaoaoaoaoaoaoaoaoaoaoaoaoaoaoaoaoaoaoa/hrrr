@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use egui_tester::{Choreography, Result};
+pub use hrrr_contract::{Field, Panel};
 
 /// One platform projection of the HRRR semantic act vocabulary.
 pub trait HrrrProjection: Choreography {
@@ -175,74 +176,6 @@ pub fn perform(projection: &mut impl HrrrProjection, score: Score) -> Result<()>
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Panel {
-    Application,
-    Field,
-    Forecast,
-    ActiveView,
-    Views,
-    Status,
-}
-
-impl Panel {
-    /// Every Panel in carousel order.
-    pub const ALL: [Self; 6] = [
-        Self::Application,
-        Self::Field,
-        Self::Forecast,
-        Self::ActiveView,
-        Self::Views,
-        Self::Status,
-    ];
-
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Application => "Application",
-            Self::Field => "Field",
-            Self::Forecast => "Forecast",
-            Self::ActiveView => "Active View",
-            Self::Views => "Views",
-            Self::Status => "Status",
-        }
-    }
-
-    #[must_use]
-    pub const fn index(self) -> usize {
-        match self {
-            Self::Application => 0,
-            Self::Field => 1,
-            Self::Forecast => 2,
-            Self::ActiveView => 3,
-            Self::Views => 4,
-            Self::Status => 5,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Field {
-    QpfTotal,
-    QpfHourly,
-    SurfaceSmoke,
-    Temperature,
-    DewPoint,
-    CloudCover,
-    SeaLevelPressure,
-    Wind,
-    AirQuality,
-}
-
-impl Field {
-    const ALL_MASK: u16 = (1 << 9) - 1;
-
-    const fn mask(self) -> u16 {
-        1 << self as u8
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Modal {
     Settings,
     CommandGuide,
@@ -332,7 +265,7 @@ const fn field_coverage(beats: &[Beat]) -> u16 {
     let mut index = 0;
     while index < beats.len() {
         if let Beat::Act(Act::SelectField(field)) = beats[index] {
-            mask |= field.mask();
+            mask |= 1 << field as u8;
         }
         index += 1;
     }
@@ -576,4 +509,4 @@ const SHOWCASE: &[Beat] = &[
 ];
 
 const _: () = assert!(coverage(COMPREHENSIVE) == Feature::ALL_MASK);
-const _: () = assert!(field_coverage(COMPREHENSIVE) == Field::ALL_MASK);
+const _: () = assert!(field_coverage(COMPREHENSIVE) == (1 << Field::ALL.len()) - 1);

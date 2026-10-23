@@ -9,8 +9,6 @@ use crate::{
     projection,
 };
 
-const CLOUD_COVER: &str = "cloud-cover";
-
 pub fn run(harness: &Harness<'_>) -> Result<()> {
     select_cloud_cover(harness)?;
     prove_restart(harness)?;
@@ -20,9 +18,9 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
 fn select_cloud_cover(harness: &Harness<'_>) -> Result<()> {
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
-    let initial = story.wait(shows::field("smoke"))?;
+    let initial = story.wait(shows::field(Field::SurfaceSmoke))?;
     demand(
-        initial.state.active_field.as_deref() == Some("smoke"),
+        initial.state.active_field.as_deref() == Some(Field::SurfaceSmoke.wire()),
         "cold boot did not select the default smoke field",
     )?;
     projection::enact(&mut story, &app, Act::SelectField(Field::CloudCover))?;
@@ -30,7 +28,9 @@ fn select_cloud_cover(harness: &Harness<'_>) -> Result<()> {
         Duration::from_secs(4),
         Duration::from_millis(700),
         "cloud-cover selection to survive the autosave interval",
-        |frame| (frame.state.active_field.as_deref() == Some(CLOUD_COVER)).then_some(()),
+        |frame| {
+            (frame.state.active_field.as_deref() == Some(Field::CloudCover.wire())).then_some(())
+        },
     )?;
     app.terminate()
 }
@@ -38,9 +38,9 @@ fn select_cloud_cover(harness: &Harness<'_>) -> Result<()> {
 fn prove_restart(harness: &Harness<'_>) -> Result<()> {
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
-    let restored = story.wait(shows::field(CLOUD_COVER))?;
+    let restored = story.wait(shows::field(Field::CloudCover))?;
     demand(
-        restored.state.active_field.as_deref() == Some(CLOUD_COVER),
+        restored.state.active_field.as_deref() == Some(Field::CloudCover.wire()),
         "restart did not restore cloud cover",
     )?;
     app.terminate()
@@ -63,7 +63,7 @@ closed_folders = []\n",
     let _initial = story.wait(Condition::new(
         "F03–F12 cumulative interval",
         |state: &Observation| {
-            state.active_field.as_deref() == Some("qpf")
+            state.active_field.as_deref() == Some(Field::QpfTotal.wire())
                 && state.lead_hour == 12
                 && state.base_hour == Some(3)
         },

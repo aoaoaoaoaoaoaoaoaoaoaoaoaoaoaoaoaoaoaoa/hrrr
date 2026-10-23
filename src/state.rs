@@ -4,61 +4,11 @@ use crate::{
     persist::{load_toml, save_toml},
 };
 use anyhow::{Result, bail};
+use hrrr_contract::Panel;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
 const SCHEMA: u16 = 3;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DrawerPanel {
-    Application,
-    Field,
-    Forecast,
-    ActiveView,
-    Views,
-    Status,
-}
-
-impl DrawerPanel {
-    /// Every Panel in Drawer order.
-    pub(crate) const ALL: [Self; 6] = [
-        Self::Application,
-        Self::Field,
-        Self::Forecast,
-        Self::ActiveView,
-        Self::Views,
-        Self::Status,
-    ];
-
-    /// The acceptance target the Drawer anchors while this Panel shows.
-    pub(crate) const fn target(self) -> hrrr_contract::Target {
-        hrrr_contract::Target::Panel(self.wire())
-    }
-
-    /// Kebab-case identity on the witness wire.
-    pub(crate) const fn wire(self) -> &'static str {
-        match self {
-            Self::Application => "application",
-            Self::Field => "field",
-            Self::Forecast => "forecast",
-            Self::ActiveView => "active-view",
-            Self::Views => "views",
-            Self::Status => "status",
-        }
-    }
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Application => "application",
-            Self::Field => "field",
-            Self::Forecast => "forecast",
-            Self::ActiveView => "active view",
-            Self::Views => "views",
-            Self::Status => "status",
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct SessionState {
@@ -69,7 +19,7 @@ pub struct SessionState {
     pub active_view: Option<EntryName>,
     pub closed_folders: BTreeSet<String>,
     pub inspector_scroll: f32,
-    pub drawer_panel: Option<DrawerPanel>,
+    pub drawer_panel: Option<Panel>,
 }
 
 impl Default for SessionState {
@@ -120,7 +70,7 @@ struct VersionedSessionState {
     #[serde(default)]
     inspector_scroll: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    drawer_panel: Option<DrawerPanel>,
+    drawer_panel: Option<Panel>,
 }
 
 #[derive(Deserialize)]
@@ -268,7 +218,7 @@ mod tests {
             "schema = 3\noverlay = \"qpf_run\"\ncycle = \"latest\"\nlead = 8\nbase = 3\nclosed_folders = []\ndrawer_panel = \"forecast\"\n",
         )?)?;
         assert_eq!(current.base, LeadHour::forge(3)?);
-        assert_eq!(current.drawer_panel, Some(DrawerPanel::Forecast));
+        assert_eq!(current.drawer_panel, Some(Panel::Forecast));
         Ok(())
     }
 

@@ -11,7 +11,7 @@ mod active {
     pub struct State {
         pub contract: &'static str,
         pub launch: &'static str,
-        pub active_field: Option<String>,
+        pub active_field: Option<&'static str>,
         pub lead_hour: u8,
         pub base_hour: Option<u8>,
         pub active_view: String,
@@ -56,8 +56,8 @@ mod active {
 
     #[derive(Serialize)]
     pub struct Run {
-        /// Cycle stamp, `YYYYMMDDHH` in UTC.
-        pub cycle: String,
+        /// Cycle stamp, `YYYYMMDDHH` in UTC, when the cycle has a calendar time.
+        pub cycle: Option<String>,
         pub tether: &'static str,
     }
 

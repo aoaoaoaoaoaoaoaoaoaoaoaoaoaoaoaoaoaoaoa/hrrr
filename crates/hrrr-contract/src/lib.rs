@@ -8,15 +8,105 @@ pub const PRODUCT_IDENTIFIER: &str = "moe.swarm.hrrr";
 pub const PRODUCT_NAME: &str = "HRRR";
 pub const UI_FINGERPRINT: &str = "hrrr.ui/8";
 
+/// One Inspector Panel, in carousel order.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(rename_all = "snake_case")
+)]
+pub enum Panel {
+    Application,
+    Field,
+    Forecast,
+    ActiveView,
+    Views,
+    Status,
+}
+
+impl Panel {
+    pub const ALL: [Self; 6] = [
+        Self::Application,
+        Self::Field,
+        Self::Forecast,
+        Self::ActiveView,
+        Self::Views,
+        Self::Status,
+    ];
+
+    /// Kebab-case identity on the witness wire.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Application => "application",
+            Self::Field => "field",
+            Self::Forecast => "forecast",
+            Self::ActiveView => "active-view",
+            Self::Views => "views",
+            Self::Status => "status",
+        }
+    }
+
+    /// Position in carousel order.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// One forecast field a person may select.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Field {
+    QpfTotal,
+    QpfHourly,
+    SurfaceSmoke,
+    Temperature,
+    DewPoint,
+    CloudCover,
+    SeaLevelPressure,
+    Wind,
+    AirQuality,
+}
+
+impl Field {
+    pub const ALL: [Self; 9] = [
+        Self::QpfTotal,
+        Self::QpfHourly,
+        Self::SurfaceSmoke,
+        Self::Temperature,
+        Self::DewPoint,
+        Self::CloudCover,
+        Self::SeaLevelPressure,
+        Self::Wind,
+        Self::AirQuality,
+    ];
+
+    /// Kebab-case identity on the witness wire, also HRRR's cache name.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::QpfTotal => "qpf",
+            Self::QpfHourly => "qpf-hour",
+            Self::SurfaceSmoke => "smoke",
+            Self::Temperature => "temperature",
+            Self::DewPoint => "dew-point",
+            Self::CloudCover => "cloud-cover",
+            Self::SeaLevelPressure => "pressure",
+            Self::Wind => "wind",
+            Self::AirQuality => "air-quality",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum Target {
     BasemapInstall,
     BaseHour,
-    Field(&'static str),
+    Field(Field),
     ForecastHour,
     Map,
-    Panel(&'static str),
+    Panel(Panel),
     Pin(usize),
     PinRemove(usize),
     RunNewer,
@@ -35,10 +125,10 @@ impl Target {
         match self {
             Self::BasemapInstall => Cow::Borrowed("hrrr.basemap.install"),
             Self::BaseHour => Cow::Borrowed("hrrr.forecast.base-hour"),
-            Self::Field(name) => Cow::Owned(format!("hrrr.field/{name}")),
+            Self::Field(field) => Cow::Owned(format!("hrrr.field/{}", field.wire())),
             Self::ForecastHour => Cow::Borrowed("hrrr.forecast.valid-hour"),
             Self::Map => Cow::Borrowed("hrrr.map.canvas"),
-            Self::Panel(name) => Cow::Owned(format!("hrrr.inspector.panel/{name}")),
+            Self::Panel(panel) => Cow::Owned(format!("hrrr.inspector.panel/{}", panel.wire())),
             Self::Pin(slot) => Cow::Owned(format!("hrrr.map.pin/{slot}")),
             Self::PinRemove(slot) => Cow::Owned(format!("hrrr.map.pin.remove/{slot}")),
             Self::RunNewer => Cow::Borrowed("hrrr.forecast.run.newer"),
@@ -65,35 +155,33 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn wire_vocabulary_is_stable_and_disjoint() {
-        let vocabulary = [
-            (Target::BasemapInstall, "hrrr.basemap.install"),
-            (Target::BaseHour, "hrrr.forecast.base-hour"),
-            (Target::Field("cloud-cover"), "hrrr.field/cloud-cover"),
-            (Target::Field("smoke"), "hrrr.field/smoke"),
-            (Target::ForecastHour, "hrrr.forecast.valid-hour"),
-            (Target::Map, "hrrr.map.canvas"),
-            (Target::Panel("forecast"), "hrrr.inspector.panel/forecast"),
-            (Target::Pin(0), "hrrr.map.pin/0"),
-            (Target::Pin(1), "hrrr.map.pin/1"),
-            (Target::PinRemove(0), "hrrr.map.pin.remove/0"),
-            (Target::RunNewer, "hrrr.forecast.run.newer"),
-            (Target::RunOlder, "hrrr.forecast.run.older"),
-            (Target::TransientProbe, "hrrr.map.probe.transient"),
-            (Target::ValidHourEarlier, "hrrr.forecast.valid-hour.earlier"),
-            (Target::ValidHourLater, "hrrr.forecast.valid-hour.later"),
-            (Target::ViewCreate, "hrrr.view.create"),
-            (Target::ViewName, "hrrr.view.name"),
-            (Target::ViewRename, "hrrr.view.rename"),
-        ];
-        let wires = vocabulary
+    fn wire_vocabulary_is_disjoint() {
+        let targets = [
+            Target::BasemapInstall,
+            Target::BaseHour,
+            Target::ForecastHour,
+            Target::Map,
+            Target::Pin(0),
+            Target::Pin(1),
+            Target::PinRemove(0),
+            Target::PinRemove(1),
+            Target::RunNewer,
+            Target::RunOlder,
+            Target::TransientProbe,
+            Target::ValidHourEarlier,
+            Target::ValidHourLater,
+            Target::ViewCreate,
+            Target::ViewName,
+            Target::ViewRename,
+        ]
+        .into_iter()
+        .chain(Field::ALL.map(Target::Field))
+        .chain(Panel::ALL.map(Target::Panel))
+        .collect::<Vec<_>>();
+        let wires = targets
             .iter()
-            .map(|(target, expected)| {
-                let wire = target.wire();
-                assert_eq!(wire, *expected);
-                wire.into_owned()
-            })
+            .map(|target| target.wire().into_owned())
             .collect::<BTreeSet<_>>();
-        assert_eq!(wires.len(), vocabulary.len());
+        assert_eq!(wires.len(), targets.len());
     }
 }

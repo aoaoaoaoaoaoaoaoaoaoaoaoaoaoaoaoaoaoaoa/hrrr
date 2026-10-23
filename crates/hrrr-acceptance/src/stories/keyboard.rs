@@ -21,7 +21,9 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
     let name = story.anchor("eternalist.application.name")?.rect;
     let help = story.anchor("eternalist.application.help")?.rect;
     let settings = story.anchor("eternalist.settings.open")?.rect;
-    let first_panel = story.anchor(hrrr_contract::Target::Panel("field"))?.rect;
+    let first_panel = story
+        .anchor(hrrr_contract::Target::Panel(Panel::Field))?
+        .rect;
     demand(
         name[0] < help[0]
             && help[0] < settings[0]

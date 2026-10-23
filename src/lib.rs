@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use anyhow::Result;
 
 mod air_quality;
@@ -89,12 +91,18 @@ fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Resul
             Ok(())
         }
         "status" if arguments.next().is_none() => basemap_artifact::status(&paths),
+        "path" if arguments.next().is_none() => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(paths.basemap_path()?.as_os_str().as_encoded_bytes())?;
+            stdout.write_all(b"\n")?;
+            Ok(())
+        }
         "remove" if arguments.next().is_none() => {
             let _instance = paths.lock_instance()?;
             basemap_artifact::remove(&paths)
         }
         _ => anyhow::bail!(
-            "unknown basemap operation `{operation}`; expected install, status, or remove"
+            "unknown basemap operation `{operation}`; expected install, status, path, or remove"
         ),
     }
 }
@@ -108,6 +116,7 @@ Usage:
   hrrr
   hrrr basemap install [YYYYMMDD]
   hrrr basemap status
+  hrrr basemap path
   hrrr basemap remove
   hrrr --help
   hrrr --version

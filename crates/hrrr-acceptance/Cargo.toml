@@ -15,7 +15,7 @@ egui-tester-witness = "0.9.14"
 fast-mvt = { version = "0.6.2", default-features = false, features = ["writer"] }
 geo-types = "0.7.20"
 hrrr-choreography = { path = "../hrrr-choreography" }
-hrrr-contract = { path = "../hrrr-contract", version = "0.5.4" }
+hrrr-contract = { path = "../hrrr-contract", version = "0.6.0" }
 pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.5"

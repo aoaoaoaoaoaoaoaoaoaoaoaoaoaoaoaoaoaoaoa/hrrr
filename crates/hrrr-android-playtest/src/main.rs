@@ -177,7 +177,7 @@ impl<'device, O: StoryObserver> AndroidHrrr<'device, O> {
             SwipeDirection::Right => (self.screen.at(0.22, 0.75), self.screen.at(0.78, 0.75)),
         };
         let _receipt = self.story.swipe(
-            &format!("{action} {} panel", destination.name()),
+            &format!("{action} {} panel", destination.wire()),
             origin,
             end,
             Duration::from_millis(220),
@@ -217,7 +217,7 @@ impl<O: StoryObserver> AndroidHrrr<'_, O> {
         }
         for _ in 0..panel.index() {
             let _receipt = self.story.tap(
-                &format!("seek {} panel", panel.name()),
+                &format!("seek {} panel", panel.wire()),
                 self.screen.at(0.945, 0.574),
             )?;
             self.settle(Duration::from_millis(70));

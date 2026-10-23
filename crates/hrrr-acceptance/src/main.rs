@@ -28,12 +28,13 @@ fn main() -> Result<()> {
         builder = builder.failure_artifacts(artifacts);
     }
     builder.run(|testbed| match &cli.rail {
-        Rail::Showcase(take) => {
+        Rail::Showcase { score, take } => {
             let world = World::Specimen {
-                basemap: showcase::specimen_basemap()?,
+                basemap: showcase::specimen_basemap(&binary)?,
             };
             showcase::perform_take(
                 &Harness::new(testbed, &binary, artifacts.as_deref(), world),
+                *score,
                 take,
             )
         }
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
 /// One execution's rail: hermetic acceptance or the presentation take.
 enum Rail {
     Acceptance(Proof),
-    Showcase(Take),
+    Showcase { score: Score, take: Take },
 }
 
 enum Proof {
@@ -72,7 +73,7 @@ impl Cli {
         let mut artifacts = None;
         let mut smoke = false;
         let mut score = None;
-        let mut darkroom: Option<(PathBuf, bool)> = None;
+        let mut take = None;
         let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -88,10 +89,15 @@ impl Cli {
                 }
                 Some("--smoke") => smoke = true,
                 Some(flag @ ("--stills" | "--film")) => {
-                    if darkroom.is_some() {
-                        return Err(verdict("--stills and --film are mutually exclusive"));
+                    if take.is_some() {
+                        return Err(verdict("a showcase is one take: --stills or --film"));
                     }
-                    darkroom = Some((PathBuf::from(required(&mut args, flag)?), flag == "--film"));
+                    let directory = PathBuf::from(required(&mut args, flag)?);
+                    take = Some(if flag == "--film" {
+                        Take::Film(directory)
+                    } else {
+                        Take::Stills(directory)
+                    });
                 }
                 Some("--score") => {
                     let value = required(&mut args, "--score")?;
@@ -118,14 +124,13 @@ impl Cli {
                 None => return Err(verdict("acceptance options must be valid Unicode")),
             }
         }
-        let rail = match (smoke, story, darkroom, score) {
+        let rail = match (smoke, story, take, score) {
             (false, story, None, None) => Rail::Acceptance(Proof::Story(story)),
             (true, None, None, None) => Rail::Acceptance(Proof::Smoke),
-            (false, None, Some((darkroom, film)), score) => Rail::Showcase(Take {
+            (false, None, Some(take), score) => Rail::Showcase {
                 score: score.unwrap_or(Score::Showcase),
-                darkroom,
-                film,
-            }),
+                take,
+            },
             (_, _, None, Some(_)) => {
                 return Err(verdict("--score performs only with --stills or --film"));
             }

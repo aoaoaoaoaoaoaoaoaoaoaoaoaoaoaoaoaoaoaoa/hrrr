@@ -1,10 +1,15 @@
 //! The presentation rail: a maintained score performed against the specimen
 //! world, developing stills and optionally a film. Never a verdict.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    os::unix::ffi::OsStringExt as _,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use egui_demo::Showcase;
-use egui_tester::{Result, demand};
+use egui_tester::{Error, Result, demand};
 use hrrr_choreography::{Score, perform};
 
 use crate::{
@@ -15,23 +20,43 @@ use crate::{
 /// The product window the portfolio frame assumes.
 const WINDOW: (u32, u32) = (1440, 920);
 
-/// What one presentation take develops.
-pub struct Take {
-    pub score: Score,
-    pub darkroom: PathBuf,
-    pub film: bool,
+/// A showcase take: its stills alone, or its stills and its film.
+pub enum Take {
+    Stills(PathBuf),
+    Film(PathBuf),
 }
 
-/// The operator's installed basemap, by the XDG data-home law HRRR follows.
-pub fn specimen_basemap() -> Result<PathBuf> {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share")))
-        .ok_or_else(|| egui_tester::Error::Verdict {
-            detail: "neither XDG_DATA_HOME nor HOME locates the specimen basemap".to_owned(),
+impl Take {
+    fn showcase(&self, score: Score) -> Result<Showcase> {
+        match self {
+            Self::Stills(directory) => Showcase::stills(directory),
+            Self::Film(directory) => Showcase::film(directory, &format!("hrrr-{}", score.name())),
+        }
+    }
+}
+
+/// The operator's basemap archive, as the product itself resolves it.
+pub fn specimen_basemap(binary: &Path) -> Result<PathBuf> {
+    let resolved = Command::new(binary)
+        .args(["basemap", "path"])
+        .output()
+        .map_err(|source| Error::Io {
+            operation: "ask HRRR for its basemap archive",
+            path: binary.to_owned(),
+            source,
         })?;
-    let basemap = data.join("hrrr/basemap/basemap.pmtiles");
+    demand(
+        resolved.status.success(),
+        format!(
+            "`hrrr basemap path` failed: {}",
+            String::from_utf8_lossy(&resolved.stderr).trim()
+        ),
+    )?;
+    let mut raw = resolved.stdout;
+    if raw.last() == Some(&b'\n') {
+        let _newline = raw.pop();
+    }
+    let basemap = PathBuf::from(OsString::from_vec(raw));
     demand(
         basemap.is_file(),
         format!("specimen basemap {} is not installed", basemap.display()),
@@ -39,14 +64,9 @@ pub fn specimen_basemap() -> Result<PathBuf> {
     Ok(basemap)
 }
 
-pub fn perform_take(harness: &Harness<'_>, take: &Take) -> Result<()> {
-    let showcase = if take.film {
-        Showcase::film(&take.darkroom, &format!("hrrr-{}", take.score.name()))?
-    } else {
-        Showcase::stills(&take.darkroom)?
-    };
+pub fn perform_take(harness: &Harness<'_>, score: Score, take: &Take) -> Result<()> {
     let app = harness.launch(true)?;
-    let mut story = harness.observed_story(&app, showcase)?;
+    let mut story = harness.observed_story(&app, take.showcase(score)?)?;
     let frame = story.capture()?;
     demand(
         (frame.width(), frame.height()) == WINDOW,
@@ -58,7 +78,9 @@ pub fn perform_take(harness: &Harness<'_>, take: &Take) -> Result<()> {
             WINDOW.1
         ),
     )?;
-    perform(&mut Desk::new(&mut story, &app, Fence::Paint), take.score)?;
+    let mut desk = Desk::new(&mut story, &app, Fence::Paint);
+    desk.painted()?;
+    perform(&mut desk, score)?;
     let showcase = story.finish()?;
     app.terminate()?;
     for artifact in showcase.publish()? {
