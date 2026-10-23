@@ -17,6 +17,9 @@ use crate::{
     projection::{Desk, Fence},
 };
 
+/// The film's stem.
+const FILM: ArtifactStem = ArtifactStem::literal("hrrr-showcase");
+
 /// A showcase take: its stills alone, or its stills and its film.
 pub enum Take {
     Stills(PathBuf),
@@ -27,9 +30,7 @@ impl Take {
     fn showcase(&self) -> Result<Showcase> {
         match self {
             Self::Stills(directory) => Showcase::stills(directory),
-            Self::Film(directory) => {
-                Showcase::film(directory, &ArtifactStem::new("hrrr-showcase")?)
-            }
+            Self::Film(directory) => Showcase::film(directory, &FILM),
         }
     }
 }
