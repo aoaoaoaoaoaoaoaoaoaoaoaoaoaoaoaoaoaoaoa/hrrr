@@ -1,11 +1,19 @@
 mod fixture;
 mod harness;
 mod observation;
+mod projection;
+mod showcase;
 mod stories;
 
 use std::{env, path::PathBuf};
 
 use egui_tester::{Backend, Error, Result, TestbedBuilder, WaylandConfig, X11Config};
+use hrrr_choreography::Score;
+
+use crate::{
+    harness::{Harness, World},
+    showcase::Take,
+};
 
 fn main() -> Result<()> {
     let cli = Cli::parse()?;
@@ -19,21 +27,41 @@ fn main() -> Result<()> {
     if let Some(artifacts) = &artifacts {
         builder = builder.failure_artifacts(artifacts);
     }
-    builder.run(|testbed| {
-        let _fixtures = fixture::FixtureWorld::raise(testbed)?;
-        let harness = harness::Harness::new(testbed, &binary, artifacts.as_deref());
-        if cli.smoke {
-            stories::smoke(&harness, cli.backend)
-        } else {
-            stories::run(&harness, cli.story.as_deref())
+    builder.run(|testbed| match &cli.rail {
+        Rail::Showcase(take) => {
+            let world = World::Specimen {
+                basemap: showcase::specimen_basemap()?,
+            };
+            showcase::perform_take(
+                &Harness::new(testbed, &binary, artifacts.as_deref(), world),
+                take,
+            )
+        }
+        Rail::Acceptance(proof) => {
+            let _fixtures = fixture::FixtureWorld::raise(testbed)?;
+            let harness = Harness::new(testbed, &binary, artifacts.as_deref(), World::Fixture);
+            match proof {
+                Proof::Smoke => stories::smoke(&harness, cli.backend),
+                Proof::Story(story) => stories::run(&harness, story.as_deref()),
+            }
         }
     })
 }
 
+/// One execution's rail: hermetic acceptance or the presentation take.
+enum Rail {
+    Acceptance(Proof),
+    Showcase(Take),
+}
+
+enum Proof {
+    Smoke,
+    Story(Option<String>),
+}
+
 struct Cli {
-    story: Option<String>,
+    rail: Rail,
     artifacts: Option<PathBuf>,
-    smoke: bool,
     backend: Backend,
 }
 
@@ -43,6 +71,8 @@ impl Cli {
         let mut story = None;
         let mut artifacts = None;
         let mut smoke = false;
+        let mut score = None;
+        let mut darkroom: Option<(PathBuf, bool)> = None;
         let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -57,6 +87,20 @@ impl Cli {
                     artifacts = Some(PathBuf::from(required(&mut args, "--artifacts")?));
                 }
                 Some("--smoke") => smoke = true,
+                Some(flag @ ("--stills" | "--film")) => {
+                    if darkroom.is_some() {
+                        return Err(verdict("--stills and --film are mutually exclusive"));
+                    }
+                    darkroom = Some((PathBuf::from(required(&mut args, flag)?), flag == "--film"));
+                }
+                Some("--score") => {
+                    let value = required(&mut args, "--score")?;
+                    score = Some(Score::parse(
+                        value
+                            .to_str()
+                            .ok_or_else(|| verdict("--score must be valid Unicode"))?,
+                    )?);
+                }
                 Some("--backend") => {
                     let value = required(&mut args, "--backend")?;
                     backend = match value.to_str() {
@@ -74,18 +118,32 @@ impl Cli {
                 None => return Err(verdict("acceptance options must be valid Unicode")),
             }
         }
-        if smoke && story.is_some() {
-            return Err(verdict("--smoke and --story are mutually exclusive"));
-        }
-        if matches!(backend, Backend::Wayland(_)) && !smoke {
+        let rail = match (smoke, story, darkroom, score) {
+            (false, story, None, None) => Rail::Acceptance(Proof::Story(story)),
+            (true, None, None, None) => Rail::Acceptance(Proof::Smoke),
+            (false, None, Some((darkroom, film)), score) => Rail::Showcase(Take {
+                score: score.unwrap_or(Score::Showcase),
+                darkroom,
+                film,
+            }),
+            (_, _, None, Some(_)) => {
+                return Err(verdict("--score performs only with --stills or --film"));
+            }
+            _ => {
+                return Err(verdict(
+                    "--smoke, --story, and --stills or --film select exclusive rails",
+                ));
+            }
+        };
+        if matches!(backend, Backend::Wayland(_)) && !matches!(rail, Rail::Acceptance(Proof::Smoke))
+        {
             return Err(verdict(
                 "Wayland admits launch-and-capture smoke only; native stories require X11",
             ));
         }
         Ok(Self {
-            story,
+            rail,
             artifacts,
-            smoke,
             backend,
         })
     }

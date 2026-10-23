@@ -4,7 +4,8 @@ use std::{
 };
 
 use egui_tester::{
-    AppCommand, Application, Graphics, Network, ReactionBudget, Result, Story, Testbed, WindowQuery,
+    AppCommand, Application, Graphics, Network, ReactionBudget, Result, Silent, Story,
+    StoryObserver, Testbed, WindowQuery,
 };
 
 use crate::observation::Observation;
@@ -13,30 +14,56 @@ pub const TITLE: &str = "HRRR";
 pub const SESSION_STATE: &str = "xdg/state/hrrr/slate.toml";
 pub const VIEWS: &str = "xdg/data/hrrr/views.toml";
 
-pub type HrrrStory<'app, 'bed> = Story<'app, 'bed, Observation>;
+pub type HrrrStory<'app, 'bed, O = Silent> = Story<'app, 'bed, Observation, O>;
+
+/// The data an HRRR launch sees.
+pub enum World {
+    /// Hermetic fixtures: a forged basemap, a pinned publication frontier,
+    /// denied network, and deterministic software graphics.
+    Fixture,
+    /// The operator's basemap borrowed read-only, live NOAA forecasts cached
+    /// privately, and host graphics. Presentation only; never a verdict.
+    Specimen { basemap: PathBuf },
+}
 
 pub struct Harness<'a> {
     pub testbed: &'a Testbed,
     pub binary: &'a Path,
     pub artifacts: Option<&'a Path>,
+    pub world: World,
 }
 
 impl<'a> Harness<'a> {
-    pub const fn new(testbed: &'a Testbed, binary: &'a Path, artifacts: Option<&'a Path>) -> Self {
+    pub const fn new(
+        testbed: &'a Testbed,
+        binary: &'a Path,
+        artifacts: Option<&'a Path>,
+        world: World,
+    ) -> Self {
         Self {
             testbed,
             binary,
             artifacts,
+            world,
         }
     }
 
     pub fn command(&self, witnessed: bool) -> AppCommand {
-        let command = AppCommand::new(self.binary)
-            .private_env("HRRR_BASEMAP_ARCHIVE", "fixtures/basemap.pmtiles")
-            .env("HRRR_ACCEPTANCE_PUBLISHED", "18")
-            .graphics(Graphics::Software)
-            .network(Network::Deny)
-            .runtime(Duration::from_secs(45));
+        let command = AppCommand::new(self.binary);
+        let command = match &self.world {
+            World::Fixture => command
+                .private_env("HRRR_BASEMAP_ARCHIVE", "fixtures/basemap.pmtiles")
+                .env("HRRR_ACCEPTANCE_PUBLISHED", "18")
+                .graphics(Graphics::Software)
+                .network(Network::Deny)
+                .runtime(Duration::from_secs(45)),
+            World::Specimen { basemap } => command
+                .env("HRRR_BASEMAP_ARCHIVE", basemap)
+                .borrow_read_only(basemap)
+                .graphics(Graphics::Host)
+                .network(Network::Host)
+                .runtime(Duration::from_mins(10)),
+        };
         if witnessed {
             command.witness("probes/hrrr.observations")
         } else {
@@ -58,12 +85,22 @@ impl<'a> Harness<'a> {
     }
 
     pub fn story<'app>(&'a self, app: &'app Application<'a>) -> Result<HrrrStory<'app, 'a>> {
-        let mut story: HrrrStory<'app, 'a> = Story::bind(
+        self.observed_story(app, Silent)
+    }
+
+    /// Bind a story whose causal stream reaches `observer` from the first frame.
+    pub fn observed_story<'app, O: StoryObserver>(
+        &'a self,
+        app: &'app Application<'a>,
+        observer: O,
+    ) -> Result<HrrrStory<'app, 'a, O>> {
+        let mut story = HrrrStory::bind(
             self.testbed,
             app,
             WindowQuery::title_exact(TITLE),
             ReactionBudget::functional(Duration::from_secs(5)),
-        )?;
+        )?
+        .with_observer(observer)?;
         let ready = story.ready(Duration::from_secs(45))?;
         egui_tester::demand(
             ready.state.contract == hrrr_contract::UI_FINGERPRINT,

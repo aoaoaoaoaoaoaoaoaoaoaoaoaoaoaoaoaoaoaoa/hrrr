@@ -1,11 +1,13 @@
 use std::time::Duration;
 
-use egui_tester::{Button, Condition, Key, Modifiers, Motion, Result, Wheel, demand};
+use egui_tester::{Condition, Result, Wheel, demand};
+use hrrr_choreography::Act;
 use serde::Deserialize;
 
 use crate::{
     harness::{Harness, VIEWS},
     observation::{Observation, near, shows},
+    projection,
 };
 
 pub fn run(harness: &Harness<'_>) -> Result<()> {
@@ -22,34 +24,18 @@ fn place_and_persist(harness: &Harness<'_>) -> Result<[f64; 2]> {
         initial.state.active_view == "default",
         "cold boot did not select default",
     )?;
-    let map = story.anchor(hrrr_contract::Target::Map)?;
-    let transient_at = (map.center().0.saturating_sub(120), map.center().1);
-    let transient = story
-        .click_at(transient_at, Button::Primary)?
-        .until(Condition::new(
-            "transient probe placed",
-            |state: &Observation| state.transient_probe.is_some(),
-        ))?
-        .into_value();
+    projection::enact(&mut story, &app, Act::PlaceProbe)?;
     demand(
-        transient.state.pins.is_empty(),
+        story.frame()?.state.pins.is_empty(),
         "ordinary click forged a persistent pin",
     )?;
-    let _transient_undone =
-        story
-            .chord(Modifiers::CTRL, Key::Character('z'))?
-            .until(Condition::new(
-                "transient probe undone",
-                |state: &Observation| state.transient_probe.is_none(),
-            ))?;
-    let shift = story.session().key_down(Key::Shift)?;
-    let _shifted = story.reaction(shift).next_frame()?;
-    let (x, y) = map.center();
-    let click = story.session().click(x, y, Button::Primary)?;
-    let placed = story.reaction(click).until(shows::pins(1))?.into_value();
-    let release = story.session().key_up(Key::Shift)?;
-    let _released = story.reaction(release).next_frame()?;
-    let origin = placed.state.pins[0];
+    projection::enact(&mut story, &app, Act::UndoMapChange)?;
+    let _transient_undone = story.wait(Condition::new(
+        "transient probe undone",
+        |state: &Observation| state.transient_probe.is_none(),
+    ))?;
+    projection::enact(&mut story, &app, Act::PlacePin)?;
+    let origin = story.frame()?.state.pins[0];
     app.wait_until(Duration::from_secs(4), "pin to reach views.toml", || {
         Ok(persisted_view(harness)
             .is_some_and(|view| view.pins.first().is_some_and(|point| near(*point, origin))))
@@ -64,33 +50,9 @@ fn drag_undo_and_persist(harness: &Harness<'_>, origin: [f64; 2]) -> Result<f64>
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
     let _restored = story.wait(shows::pin(0, origin))?;
-    let pin = story.anchor(hrrr_contract::Target::Pin(0))?;
-    let from = pin.center();
-    let to = (from.0.saturating_add(96), from.1.saturating_sub(48));
-    let press = story
-        .session()
-        .button_down(from.0, from.1, Button::Primary)?;
-    let _pressed = story.reaction(press).next_frame()?;
-    let moved = story
-        .motion_to(to, Motion::default())?
-        .until(
-            shows::dragging(Some(0))
-                & Condition::new("pin 0 moved", move |state: &Observation| {
-                    state
-                        .pins
-                        .first()
-                        .is_some_and(|point| !near(*point, origin))
-                }),
-        )?
-        .into_value();
-    let displaced = moved.state.pins[0];
-    let release = story.session().button_up(Button::Primary)?;
-    let _released = story
-        .reaction(release)
-        .until(shows::dragging(None) & shows::pin(0, displaced))?;
-    let _undone = story
-        .chord(Modifiers::CTRL, Key::Character('z'))?
-        .until(shows::pin(0, origin))?;
+    projection::enact(&mut story, &app, Act::DragPin)?;
+    projection::enact(&mut story, &app, Act::UndoMapChange)?;
+    let _undone = story.wait(shows::pin(0, origin))?;
     if let Some(artifacts) = harness.artifacts {
         story
             .capture()?

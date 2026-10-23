@@ -1,10 +1,12 @@
 use std::time::Duration;
 
 use egui_tester::{Button, Condition, Result, demand};
+use hrrr_choreography::{Act, Field};
 
 use crate::{
     harness::{Harness, SESSION_STATE},
     observation::{Observation, shows},
+    projection,
 };
 
 const CLOUD_COVER: &str = "cloud-cover";
@@ -23,15 +25,7 @@ fn select_cloud_cover(harness: &Harness<'_>) -> Result<()> {
         initial.state.active_field.as_deref() == Some("smoke"),
         "cold boot did not select the default smoke field",
     )?;
-    let cloud_cover = story.anchor(hrrr_contract::Target::Field(CLOUD_COVER))?;
-    let selected = story
-        .click_at(cloud_cover.center(), Button::Primary)?
-        .until(shows::field(CLOUD_COVER))?
-        .into_value();
-    demand(
-        selected.state.active_field.as_deref() == Some(CLOUD_COVER),
-        "cloud-cover control did not select cloud cover",
-    )?;
+    projection::enact(&mut story, &app, Act::SelectField(Field::CloudCover))?;
     let _settled = story.wait_stable(
         Duration::from_secs(4),
         Duration::from_millis(700),

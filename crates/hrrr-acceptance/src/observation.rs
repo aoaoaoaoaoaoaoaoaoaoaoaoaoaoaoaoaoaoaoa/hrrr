@@ -16,12 +16,79 @@ pub struct Observation {
     pub close_to_tray: bool,
     pub settings: Settings,
     pub viewport: Viewport,
+    pub poise: Poise,
+    pub run: Option<Run>,
+    pub cabinet: Cabinet,
+}
+
+impl Observation {
+    /// Every saved view, rooted or shelved.
+    pub fn view_count(&self) -> usize {
+        self.cabinet.views.len()
+            + self
+                .cabinet
+                .folders
+                .iter()
+                .map(|folder| folder.views.len())
+                .sum::<usize>()
+    }
+
+    /// Whether any root or folder holds this saved view.
+    pub fn holds_view(&self, name: &str) -> bool {
+        self.cabinet.views.iter().any(|view| view == name)
+            || self
+                .cabinet
+                .folders
+                .iter()
+                .any(|folder| folder.views.iter().any(|view| view == name))
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     pub open: bool,
     pub fault: bool,
+}
+
+/// Presentation facts the product settles while laying out each frame.
+#[derive(Debug, Deserialize)]
+pub struct Poise {
+    pub dock: Option<Dock>,
+    pub drawer: Option<Drawer>,
+    pub navigating: bool,
+    pub painted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+pub struct Dock {
+    pub raised: bool,
+    pub resting: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Drawer {
+    pub raised: bool,
+    pub settled: bool,
+    pub panel: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Run {
+    pub cycle: String,
+    pub tether: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Cabinet {
+    pub views: Vec<String>,
+    pub folders: Vec<Folder>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Folder {
+    pub name: String,
+    pub open: bool,
+    pub views: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

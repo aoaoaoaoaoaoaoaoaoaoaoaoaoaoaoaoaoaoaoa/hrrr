@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use egui_tester::{Button, Condition, Key, Modifiers, Motion, PixelRegion, Probe, Result, demand};
 
-use crate::{harness::Harness, observation::Observation};
+use hrrr_choreography::{Act, Panel};
+
+use crate::{harness::Harness, observation::Observation, projection};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -104,20 +106,8 @@ pub fn run(harness: &Harness<'_>) -> Result<()> {
             |state: &Observation| !state.settings.open,
         ))?;
 
-    let _next_panel = story.chord(Modifiers::CTRL, Key::Tab)?.next_frame()?;
-    let _forecast = focus.wait_focus(
-        &app,
-        &hrrr_contract::Target::Panel("forecast").to_string(),
-        WAIT,
-    )?;
-    let _previous_panel = story
-        .chord(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab)?
-        .next_frame()?;
-    let _field = focus.wait_focus(
-        &app,
-        &hrrr_contract::Target::Panel("field").to_string(),
-        WAIT,
-    )?;
+    projection::enact(&mut story, &app, Act::NextPanel(Panel::Forecast))?;
+    projection::enact(&mut story, &app, Act::PreviousPanel(Panel::Field))?;
 
     let _persisted = story.wait_stable(
         Duration::from_secs(3),
