@@ -21,8 +21,9 @@ pub enum World {
     /// Hermetic fixtures: a forged basemap, a pinned publication frontier,
     /// denied network, and deterministic software graphics.
     Fixture,
-    /// The operator's basemap borrowed read-only, live NOAA forecasts cached
-    /// privately, and host graphics. Presentation only; never a verdict.
+    /// The operator's basemap borrowed read-only, live NOAA forecasts of the
+    /// newest finished run pinned for the whole take and cached privately,
+    /// and host graphics. Presentation only; never a verdict.
     Specimen { basemap: PathBuf },
 }
 
@@ -58,6 +59,7 @@ impl<'a> Harness<'a> {
                 .network(Network::Deny)
                 .runtime(Duration::from_secs(45)),
             World::Specimen { basemap } => command
+                .args(["--run", "finished"])
                 .env("HRRR_BASEMAP_ARCHIVE", basemap)
                 .borrow_read_only(basemap)
                 .graphics(Graphics::Host)

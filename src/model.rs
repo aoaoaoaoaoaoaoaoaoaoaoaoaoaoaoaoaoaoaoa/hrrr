@@ -932,6 +932,14 @@ impl RunId {
         Ok(self.timestamp()?.strftime("%Y%m%d%H").to_string())
     }
 
+    /// Parse a `YYYYMMDDHH` UTC stamp, the inverse of [`Self::stamp`].
+    pub fn from_stamp(stamp: &str) -> Result<Self> {
+        let civil = jiff::civil::DateTime::strptime("%Y%m%d%H", stamp).map_err(|error| {
+            anyhow::anyhow!("forecast run `{stamp}` is not YYYYMMDDHH: {error}")
+        })?;
+        Self::forge(civil.to_zoned(TimeZone::UTC)?.timestamp().as_second())
+    }
+
     pub fn date(self) -> Result<String> {
         Ok(self.timestamp()?.strftime("%Y%m%d").to_string())
     }

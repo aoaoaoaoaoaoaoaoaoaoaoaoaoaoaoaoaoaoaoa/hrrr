@@ -15,6 +15,15 @@ const AQM_ORIGIN: &str = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/aqm/pro
 const HRRR_DISCOVERY_DEPTH: u8 = 30;
 const AQM_DISCOVERY_DEPTH: u8 = 6;
 
+/// How much of a run NOAA must have published for a search to admit it.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Publication {
+    /// Its first forecast hour, every product included.
+    Begun,
+    /// Every forecast hour through its horizon.
+    Finished,
+}
+
 pub struct Source {
     agent: ureq::Agent,
     cache: CacheStore,
@@ -30,7 +39,16 @@ impl Source {
 
     pub fn discover(&self, system: ForecastSystem, now: Timestamp) -> Result<RunExtent> {
         match system {
-            ForecastSystem::Hrrr => self.discover_hrrr(now),
+            ForecastSystem::Hrrr => self.newest_hrrr(now, Publication::Begun),
+            ForecastSystem::Aqm => self.discover_aqm(now),
+        }
+    }
+
+    /// The newest run of `system` NOAA has published through its horizon.
+    pub fn finished(&self, system: ForecastSystem, now: Timestamp) -> Result<RunExtent> {
+        match system {
+            ForecastSystem::Hrrr => self.newest_hrrr(now, Publication::Finished),
+            // An air-quality run surveys only once every bundle is published.
             ForecastSystem::Aqm => self.discover_aqm(now),
         }
     }
@@ -42,13 +60,16 @@ impl Source {
         }
     }
 
-    fn discover_hrrr(&self, now: Timestamp) -> Result<RunExtent> {
+    fn newest_hrrr(&self, now: Timestamp, publication: Publication) -> Result<RunExtent> {
         let head = ForecastSystem::Hrrr.cycle_at_or_before(now)?;
         for age in 0..=HRRR_DISCOVERY_DEPTH {
             let run = ForecastRun::hrrr(head.hours_ago(age));
             let Ok(extent) = self.survey_hrrr(run) else {
                 continue;
             };
+            if publication == Publication::Finished && extent.published() != run.horizon()? {
+                continue;
+            }
             let Ok(index) = self.index(run.id, LeadHour::ZERO) else {
                 continue;
             };
@@ -66,7 +87,11 @@ impl Source {
                 return Ok(extent);
             }
         }
-        bail!("no complete HRRR run found in the last {HRRR_DISCOVERY_DEPTH} hours")
+        let state = match publication {
+            Publication::Begun => "complete",
+            Publication::Finished => "finished",
+        };
+        bail!("no {state} HRRR run found in the last {HRRR_DISCOVERY_DEPTH} hours")
     }
 
     fn discover_aqm(&self, now: Timestamp) -> Result<RunExtent> {

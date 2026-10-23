@@ -56,6 +56,13 @@ hrrr basemap status
 hrrr basemap remove
 ```
 
+Open HRRR pinned to one forecast run, kept until another run is chosen;
+`finished` names the newest run NOAA has published through its whole horizon:
+
+```sh
+hrrr --run finished|YYYYMMDDHH
+```
+
 Linux/X11 uses an XEmbed tray. Pure Wayland has no tray integration, so
 window-close behavior degrades to ordinary termination. macOS and Windows use
 their native tray facilities.
@@ -158,8 +165,9 @@ retained under `/tmp/hrrr-acceptance-artifacts` by default.
 The acceptance executable also performs HRRR's presentation take, which is
 never a verdict: `--stills DIR` performs the showcase score and develops its
 stills, the portfolio's `frontispiece` among them; `--film DIR` also records
-`DIR/hrrr-showcase.mp4`. A take borrows the installed basemap read-only,
-fetches live NOAA forecasts into a private cache, and renders on host graphics.
+`DIR/hrrr-showcase.mp4`. A take borrows the installed basemap read-only, pins
+the newest finished NOAA run, fetches its live forecasts into a private cache,
+and renders on host graphics.
 
 HRRR is one program on every platform: the host declares Capabilities and
 HRRR consults a fact, never an operating system. Without a hovering pointer

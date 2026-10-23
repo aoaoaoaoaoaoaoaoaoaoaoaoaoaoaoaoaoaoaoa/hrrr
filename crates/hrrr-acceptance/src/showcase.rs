@@ -13,7 +13,7 @@ use egui_tester::{ArtifactStem, Error, Result, demand};
 use hrrr_choreography::{Score, perform};
 
 use crate::{
-    harness::Harness,
+    harness::{Harness, HrrrStory},
     projection::{Desk, Fence},
 };
 
@@ -64,12 +64,30 @@ pub fn specimen_basemap(binary: &Path) -> Result<PathBuf> {
     Ok(basemap)
 }
 
+/// The forecast run `hrrr --run finished` pinned before the take began.
+fn pinned_run(story: &mut HrrrStory<'_, '_, Showcase>) -> Result<String> {
+    let run = story.frame()?.state.run;
+    run.as_ref()
+        .filter(|run| run.tether == "fixed")
+        .and_then(|run| run.cycle.clone())
+        .ok_or_else(|| Error::Verdict {
+            detail: format!("HRRR is not pinned to a forecast run: {run:?}"),
+        })
+}
+
 pub fn perform_take(harness: &Harness<'_>, take: &Take) -> Result<()> {
     let app = harness.launch(true)?;
     let mut story = harness.observed_story(&app, take.showcase()?)?;
+    let pinned = pinned_run(&mut story)?;
+    eprintln!("HRRR pinned to forecast run {pinned}");
     let mut desk = Desk::new(&mut story, &app, Fence::Paint);
     desk.painted()?;
     perform(&mut desk, Score::Showcase)?;
+    let held = pinned_run(&mut story)?;
+    demand(
+        held == pinned,
+        format!("the take left its pinned run {pinned} for {held}"),
+    )?;
     let showcase = story.finish()?;
     app.terminate()?;
     for artifact in showcase.publish()? {

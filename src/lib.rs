@@ -48,6 +48,10 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Some("basemap") => run_basemap(arguments),
+        Some("--run") => {
+            pin_run(arguments)?;
+            run_gui()
+        }
         Some(other) => anyhow::bail!("unknown command `{other}`; run `hrrr --help`"),
         None => anyhow::bail!("command is not valid UTF-8"),
     }
@@ -65,6 +69,34 @@ pub fn run_gui() -> Result<()> {
     let result = host::run(eternalist_apps::Ingress::Desktop, ctx);
     trace.flush();
     result
+}
+
+/// Persist `hrrr --run`'s forecast run as the session's fixed selection, so the
+/// GUI opens on it and adopts no newer run.
+fn pin_run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
+    let (Some(run), None) = (arguments.next(), arguments.next()) else {
+        anyhow::bail!("usage: hrrr --run finished|YYYYMMDDHH");
+    };
+    let paths = application_paths::ApplicationPaths::claim(&eternalist_apps::Ingress::Desktop)?;
+    let _instance = paths.lock_instance()?;
+    let path = paths.session_state_path();
+    let (mut session, _migrated) = state::SessionState::load(&path)?;
+    let run = match run.to_str() {
+        Some("finished") => {
+            let system = session
+                .overlay
+                .active()
+                .map_or(model::ForecastSystem::Hrrr, model::Product::system);
+            source::Source::new(&paths)
+                .finished(system, jiff::Timestamp::now())?
+                .run()
+                .id
+        }
+        Some(stamp) => model::RunId::from_stamp(stamp)?,
+        None => anyhow::bail!("forecast run is not valid UTF-8"),
+    };
+    session.cycle = model::RunSelection::Fixed(run);
+    session.save(&path)
 }
 
 fn run_basemap(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
@@ -114,6 +146,7 @@ HRRR native forecast-field viewer
 
 Usage:
   hrrr
+  hrrr --run finished|YYYYMMDDHH
   hrrr basemap install [YYYYMMDD]
   hrrr basemap status
   hrrr basemap path
@@ -124,7 +157,9 @@ Usage:
 The GUI reads NOAA forecast fields directly. `basemap install` explicitly
 downloads the North American Protomaps core through zoom 11. Zoom 12 detail is
 fetched only for visible tiles after the map enters that zoom and is retained
-in the bounded disposable cache."
+in the bounded disposable cache. `--run` opens the GUI pinned to one forecast
+run until another is chosen; `finished` names the newest run NOAA has
+published through its whole horizon."
     );
 }
 
