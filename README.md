@@ -158,9 +158,8 @@ retained under `/tmp/hrrr-acceptance-artifacts` by default.
 The acceptance executable also performs HRRR's presentation take, which is
 never a verdict: `--stills DIR` performs the showcase score and develops its
 stills, the portfolio's `frontispiece` among them; `--film DIR` also records
-`DIR/hrrr-showcase.mp4`; `--score NAME` with either performs any maintained
-score instead. A take borrows the installed basemap read-only, fetches live
-NOAA forecasts into a private cache, and renders on host graphics.
+`DIR/hrrr-showcase.mp4`. A take borrows the installed basemap read-only,
+fetches live NOAA forecasts into a private cache, and renders on host graphics.
 
 HRRR is one program on every platform: the host declares Capabilities and
 HRRR consults a fact, never an operating system. Without a hovering pointer

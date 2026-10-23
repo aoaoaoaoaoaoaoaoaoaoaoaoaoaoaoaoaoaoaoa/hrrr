@@ -1,5 +1,5 @@
-//! The presentation rail: a maintained score performed against the specimen
-//! world, developing stills and optionally a film. Never a verdict.
+//! The presentation rail: the showcase score performed against the specimen
+//! world, developing its stills and optionally a film. Never a verdict.
 
 use std::{
     ffi::OsString,
@@ -9,16 +9,13 @@ use std::{
 };
 
 use egui_demo::Showcase;
-use egui_tester::{Error, Result, demand};
+use egui_tester::{ArtifactStem, Error, Result, demand};
 use hrrr_choreography::{Score, perform};
 
 use crate::{
     harness::Harness,
     projection::{Desk, Fence},
 };
-
-/// The product window the portfolio frame assumes.
-const WINDOW: (u32, u32) = (1440, 920);
 
 /// A showcase take: its stills alone, or its stills and its film.
 pub enum Take {
@@ -27,10 +24,12 @@ pub enum Take {
 }
 
 impl Take {
-    fn showcase(&self, score: Score) -> Result<Showcase> {
+    fn showcase(&self) -> Result<Showcase> {
         match self {
             Self::Stills(directory) => Showcase::stills(directory),
-            Self::Film(directory) => Showcase::film(directory, &format!("hrrr-{}", score.name())),
+            Self::Film(directory) => {
+                Showcase::film(directory, &ArtifactStem::new("hrrr-showcase")?)
+            }
         }
     }
 }
@@ -64,23 +63,12 @@ pub fn specimen_basemap(binary: &Path) -> Result<PathBuf> {
     Ok(basemap)
 }
 
-pub fn perform_take(harness: &Harness<'_>, score: Score, take: &Take) -> Result<()> {
+pub fn perform_take(harness: &Harness<'_>, take: &Take) -> Result<()> {
     let app = harness.launch(true)?;
-    let mut story = harness.observed_story(&app, take.showcase(score)?)?;
-    let frame = story.capture()?;
-    demand(
-        (frame.width(), frame.height()) == WINDOW,
-        format!(
-            "HRRR window is {}×{}, not the portfolio's {}×{}",
-            frame.width(),
-            frame.height(),
-            WINDOW.0,
-            WINDOW.1
-        ),
-    )?;
+    let mut story = harness.observed_story(&app, take.showcase()?)?;
     let mut desk = Desk::new(&mut story, &app, Fence::Paint);
     desk.painted()?;
-    perform(&mut desk, score)?;
+    perform(&mut desk, Score::Showcase)?;
     let showcase = story.finish()?;
     app.terminate()?;
     for artifact in showcase.publish()? {

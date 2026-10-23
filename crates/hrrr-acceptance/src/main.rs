@@ -8,7 +8,6 @@ mod stories;
 use std::{env, path::PathBuf};
 
 use egui_tester::{Backend, Error, Result, TestbedBuilder, WaylandConfig, X11Config};
-use hrrr_choreography::Score;
 
 use crate::{
     harness::{Harness, World},
@@ -28,13 +27,12 @@ fn main() -> Result<()> {
         builder = builder.failure_artifacts(artifacts);
     }
     builder.run(|testbed| match &cli.rail {
-        Rail::Showcase { score, take } => {
+        Rail::Showcase(take) => {
             let world = World::Specimen {
                 basemap: showcase::specimen_basemap(&binary)?,
             };
             showcase::perform_take(
                 &Harness::new(testbed, &binary, artifacts.as_deref(), world),
-                *score,
                 take,
             )
         }
@@ -52,7 +50,7 @@ fn main() -> Result<()> {
 /// One execution's rail: hermetic acceptance or the presentation take.
 enum Rail {
     Acceptance(Proof),
-    Showcase { score: Score, take: Take },
+    Showcase(Take),
 }
 
 enum Proof {
@@ -72,7 +70,6 @@ impl Cli {
         let mut story = None;
         let mut artifacts = None;
         let mut smoke = false;
-        let mut score = None;
         let mut take = None;
         let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
@@ -99,14 +96,6 @@ impl Cli {
                         Take::Stills(directory)
                     });
                 }
-                Some("--score") => {
-                    let value = required(&mut args, "--score")?;
-                    score = Some(Score::parse(
-                        value
-                            .to_str()
-                            .ok_or_else(|| verdict("--score must be valid Unicode"))?,
-                    )?);
-                }
                 Some("--backend") => {
                     let value = required(&mut args, "--backend")?;
                     backend = match value.to_str() {
@@ -124,16 +113,10 @@ impl Cli {
                 None => return Err(verdict("acceptance options must be valid Unicode")),
             }
         }
-        let rail = match (smoke, story, take, score) {
-            (false, story, None, None) => Rail::Acceptance(Proof::Story(story)),
-            (true, None, None, None) => Rail::Acceptance(Proof::Smoke),
-            (false, None, Some(take), score) => Rail::Showcase {
-                score: score.unwrap_or(Score::Showcase),
-                take,
-            },
-            (_, _, None, Some(_)) => {
-                return Err(verdict("--score performs only with --stills or --film"));
-            }
+        let rail = match (smoke, story, take) {
+            (false, story, None) => Rail::Acceptance(Proof::Story(story)),
+            (true, None, None) => Rail::Acceptance(Proof::Smoke),
+            (false, None, Some(take)) => Rail::Showcase(take),
             _ => {
                 return Err(verdict(
                     "--smoke, --story, and --stills or --film select exclusive rails",

@@ -118,7 +118,7 @@ fn run<O: StoryObserver>(
     score: Score,
     observer: O,
 ) -> Result<O> {
-    let story = AndroidChoreography::bind(device)?.with_observer(observer);
+    let story = AndroidChoreography::bind(device)?.with_observer(observer)?;
     let mut android = AndroidHrrr::new(device, story, screen);
     perform(&mut android, score)?;
     android.finish()
@@ -202,7 +202,7 @@ impl<O: StoryObserver> Choreography for AndroidHrrr<'_, O> {
         self.story.tempo(tempo)
     }
 
-    fn still(&mut self, name: &str) -> Result<()> {
+    fn still(&mut self, name: &egui_tester::ArtifactStem) -> Result<()> {
         self.story.still(name)
     }
 }

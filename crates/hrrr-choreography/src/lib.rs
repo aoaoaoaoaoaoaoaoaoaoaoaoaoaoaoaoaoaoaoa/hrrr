@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use egui_tester::{Choreography, Result};
+use egui_tester::{ArtifactStem, Choreography, Result};
 pub use hrrr_contract::{Field, Panel};
 
 /// One platform projection of the HRRR semantic act vocabulary.
@@ -87,8 +87,8 @@ pub enum Beat {
     Chapter(&'static str),
     Act(Act),
     Hold(Duration),
-    /// Name the presented surface as a publishable still, by kebab-case stem.
-    Still(&'static str),
+    /// Name the presented surface as a publishable still.
+    Still(&'static ArtifactStem),
 }
 
 /// Maintained HRRR score selection.
@@ -504,8 +504,7 @@ const SHOWCASE: &[Beat] = &[
     Beat::Chapter("Frontispiece"),
     Beat::Act(Act::RaiseInspector),
     Beat::Act(Act::PlaceProbe),
-    Beat::Hold(Duration::from_millis(1_500)),
-    Beat::Still("frontispiece"),
+    Beat::Still(&ArtifactStem::FRONTISPIECE),
 ];
 
 const _: () = assert!(coverage(COMPREHENSIVE) == Feature::ALL_MASK);

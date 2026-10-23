@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use egui_tester::{
-    ActionReceipt, Anchor, Application, Button, Choreography, Condition, Drag, Error, Key,
-    Modifiers, Motion, ProbeFrame, Result, Story, StoryObserver, StoryTempo, Wheel,
+    ActionReceipt, Anchor, Application, ArtifactStem, Button, Choreography, Condition, Drag, Error,
+    Key, Modifiers, Motion, ProbeFrame, Result, Story, StoryObserver, StoryTempo, Wheel,
 };
 use egui_tester_witness::encode_identity;
 use hrrr_choreography::{
@@ -595,7 +595,7 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                 let view = rooted(&state, None)?;
                 let count = state.view_count();
                 self.tap(
-                    cabinet("clone", &view),
+                    cabinet("clone", &view)?,
                     Condition::new(format!("{view} cloned"), move |state: &Observation| {
                         state.view_count() == count + 1
                     }),
@@ -611,8 +611,8 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                     }
                 });
                 self.rename(
-                    &cabinet("rename", &view),
-                    &cabinet("entry-edit", &view),
+                    &cabinet("rename", &view)?,
+                    &cabinet("entry-edit", &view)?,
                     &renamed,
                     condition,
                 )
@@ -623,7 +623,7 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                     let view = view.clone();
                     move |state: &Observation| state.active_view == view
                 });
-                self.tap(cabinet("entry", &view), condition)
+                self.tap(cabinet("entry", &view)?, condition)
             }
             ViewAct::DragEntryToFolder => {
                 let view = rooted(&state, None)?;
@@ -639,8 +639,8 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                     }
                 });
                 self.carry_entry(
-                    &cabinet("entry-drag", &view),
-                    &cabinet("shelf", &folder),
+                    &cabinet("entry-drag", &view)?,
+                    &cabinet("shelf", &folder)?,
                     condition,
                 )
             }
@@ -656,7 +656,7 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                     move |state: &Observation| state.cabinet.views.contains(&view)
                 });
                 self.carry_entry(
-                    &cabinet("entry-drag", &view),
+                    &cabinet("entry-drag", &view)?,
                     &format!("cabinet.{VIEWS}.root-berth"),
                     condition,
                 )
@@ -673,10 +673,10 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                 };
                 // A folder lands after its berth when released below the
                 // berth's midline; aim above it.
-                let berth = self.story.anchor(cabinet("shelf-drag", first))?;
+                let berth = self.story.anchor(cabinet("shelf-drag", first)?)?;
                 self.story
                     .drag(
-                        cabinet("shelf-drag", last),
+                        cabinet("shelf-drag", last)?,
                         within(&berth, [0.5, 0.2]),
                         HAND,
                     )?
@@ -706,7 +706,7 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                     let view = view.clone();
                     move |state: &Observation| !state.holds_view(&view)
                 });
-                self.tap(cabinet("delete", &view), condition)
+                self.tap(cabinet("delete", &view)?, condition)
             }
             ViewAct::CreateFolder => {
                 let count = state.cabinet.folders.len();
@@ -731,8 +731,8 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                     }
                 });
                 self.rename(
-                    &cabinet("shelf-rename", &folder),
-                    &cabinet("shelf-edit", &folder),
+                    &cabinet("shelf-rename", &folder)?,
+                    &cabinet("shelf-edit", &folder)?,
                     &renamed,
                     condition,
                 )
@@ -741,7 +741,7 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                 let folder = folder(&state, 0)?;
                 let open = state.cabinet.folders[0].open;
                 self.tap(
-                    cabinet("shelf", &folder),
+                    cabinet("shelf", &folder)?,
                     Condition::new(format!("{folder} folded"), move |state: &Observation| {
                         state
                             .cabinet
@@ -755,7 +755,7 @@ impl<'story, 'app, 'bed, O: StoryObserver> Desk<'story, 'app, 'bed, O> {
                 let count = state.cabinet.folders.len();
                 let folder = folder(&state, count.saturating_sub(1))?;
                 self.tap(
-                    cabinet("shelf-delete", &folder),
+                    cabinet("shelf-delete", &folder)?,
                     Condition::new(format!("{folder} deleted"), move |state: &Observation| {
                         state.cabinet.folders.len() + 1 == count
                     }),
@@ -808,8 +808,8 @@ impl<O: StoryObserver> Choreography for Desk<'_, '_, '_, O> {
     }
 
     /// A still publishes only a painted surface the pointer has left.
-    fn still(&mut self, name: &str) -> Result<()> {
-        let _left = self.story.leave()?.next_frame()?;
+    fn still(&mut self, name: &ArtifactStem) -> Result<()> {
+        let _left = self.story.leave()?;
         self.painted()?;
         self.story.still(name)
     }
@@ -916,8 +916,10 @@ fn folder(state: &Observation, slot: usize) -> Result<String> {
 }
 
 /// One views-cabinet target, its identity encoded as the witness wire demands.
-fn cabinet(part: &str, identity: &str) -> String {
-    format!("cabinet.{VIEWS}.{part}/{}", encode_identity(identity))
+fn cabinet(part: &str, identity: &str) -> Result<String> {
+    let identity = encode_identity(identity)
+        .ok_or_else(|| verdict(format!("cabinet {part} target has an empty identity")))?;
+    Ok(format!("cabinet.{VIEWS}.{part}/{identity}"))
 }
 
 fn verdict(detail: impl Into<String>) -> Error {
