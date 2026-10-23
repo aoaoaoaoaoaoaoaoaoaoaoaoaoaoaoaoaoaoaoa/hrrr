@@ -201,6 +201,10 @@ impl<O: StoryObserver> Choreography for AndroidHrrr<'_, O> {
     fn tempo(&mut self, tempo: egui_tester::StoryTempo) -> Result<()> {
         self.story.tempo(tempo)
     }
+
+    fn still(&mut self, name: &str) -> Result<()> {
+        self.story.still(name)
+    }
 }
 
 impl<O: StoryObserver> AndroidHrrr<'_, O> {

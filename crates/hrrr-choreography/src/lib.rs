@@ -86,6 +86,8 @@ pub enum Beat {
     Chapter(&'static str),
     Act(Act),
     Hold(Duration),
+    /// Name the presented surface as a publishable still, by kebab-case stem.
+    Still(&'static str),
 }
 
 /// Maintained HRRR score selection.
@@ -97,11 +99,24 @@ pub enum Score {
     Inspector,
     Map,
     Panels,
+    Showcase,
     Views,
     Water,
 }
 
 impl Score {
+    pub const ALL: [Self; 9] = [
+        Self::Comprehensive,
+        Self::Fields,
+        Self::Forecast,
+        Self::Inspector,
+        Self::Map,
+        Self::Panels,
+        Self::Showcase,
+        Self::Views,
+        Self::Water,
+    ];
+
     #[must_use]
     pub const fn beats(self) -> &'static [Beat] {
         match self {
@@ -111,27 +126,38 @@ impl Score {
             Self::Inspector => INSPECTOR,
             Self::Map => MAP,
             Self::Panels => PANELS,
+            Self::Showcase => SHOWCASE,
             Self::Views => VIEWS,
             Self::Water => WATER,
         }
     }
 
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "comprehensive" => Ok(Self::Comprehensive),
-            "fields" => Ok(Self::Fields),
-            "forecast" => Ok(Self::Forecast),
-            "inspector" => Ok(Self::Inspector),
-            "map" => Ok(Self::Map),
-            "panels" => Ok(Self::Panels),
-            "views" => Ok(Self::Views),
-            "water" => Ok(Self::Water),
-            _ => Err(egui_tester::Error::Verdict {
-                detail: format!(
-                    "unknown score `{value}`; expected comprehensive, fields, forecast, inspector, map, panels, views, or water"
-                ),
-            }),
+    /// Kebab-case name, as selected on command lines and stamped on artifacts.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Comprehensive => "comprehensive",
+            Self::Fields => "fields",
+            Self::Forecast => "forecast",
+            Self::Inspector => "inspector",
+            Self::Map => "map",
+            Self::Panels => "panels",
+            Self::Showcase => "showcase",
+            Self::Views => "views",
+            Self::Water => "water",
         }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|score| score.name() == value)
+            .ok_or_else(|| egui_tester::Error::Verdict {
+                detail: format!(
+                    "unknown score `{value}`; expected one of {}",
+                    Self::ALL.map(Self::name).join(", ")
+                ),
+            })
     }
 }
 
@@ -142,6 +168,7 @@ pub fn perform(projection: &mut impl HrrrProjection, score: Score) -> Result<()>
             Beat::Chapter(title) => projection.chapter(title)?,
             Beat::Act(act) => projection.enact(act)?,
             Beat::Hold(duration) => projection.hold(duration)?,
+            Beat::Still(name) => projection.still(name)?,
         }
     }
     Ok(())
@@ -158,6 +185,16 @@ pub enum Panel {
 }
 
 impl Panel {
+    /// Every Panel in carousel order.
+    pub const ALL: [Self; 6] = [
+        Self::Application,
+        Self::Field,
+        Self::Forecast,
+        Self::ActiveView,
+        Self::Views,
+        Self::Status,
+    ];
+
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -496,6 +533,46 @@ const COMPREHENSIVE: &[Beat] = &[
     Beat::Act(Act::SelectPanel(Panel::Status)),
     Beat::Chapter("Final surface"),
     Beat::Hold(Duration::from_millis(700)),
+];
+
+/// The presentation take: a tour of the product's defining acts against the
+/// live forecast, ending on the portfolio's frontispiece.
+const SHOWCASE: &[Beat] = &[
+    Beat::Chapter("The live forecast"),
+    Beat::Act(Act::SelectField(Field::Temperature)),
+    Beat::Hold(Duration::from_millis(1_200)),
+    Beat::Act(Act::SelectField(Field::DewPoint)),
+    Beat::Hold(Duration::from_millis(900)),
+    Beat::Act(Act::SelectField(Field::Wind)),
+    Beat::Hold(Duration::from_millis(900)),
+    Beat::Act(Act::SelectField(Field::CloudCover)),
+    Beat::Hold(Duration::from_millis(900)),
+    Beat::Chapter("Valid time"),
+    Beat::Act(Act::SelectField(Field::Temperature)),
+    Beat::Act(Act::StepForecastHour(Direction::Next)),
+    Beat::Act(Act::StepForecastHour(Direction::Next)),
+    Beat::Act(Act::StepForecastHour(Direction::Next)),
+    Beat::Act(Act::DragForecastHour),
+    Beat::Hold(Duration::from_millis(900)),
+    Beat::Chapter("The map"),
+    Beat::Act(Act::LowerInspector),
+    Beat::Act(Act::ZoomMap(Zoom::In)),
+    Beat::Act(Act::PanMap),
+    Beat::Act(Act::PlaceProbe),
+    Beat::Act(Act::MoveProbe),
+    Beat::Act(Act::ClearProbe),
+    Beat::Act(Act::PlacePin),
+    Beat::Act(Act::DragPin),
+    Beat::Act(Act::UndoMapChange),
+    Beat::Act(Act::ZoomMap(Zoom::Out)),
+    Beat::Act(Act::OpenModal(Modal::CommandGuide)),
+    Beat::Hold(Duration::from_millis(1_500)),
+    Beat::Act(Act::CloseModal(Modal::CommandGuide)),
+    Beat::Chapter("Frontispiece"),
+    Beat::Act(Act::RaiseInspector),
+    Beat::Act(Act::PlaceProbe),
+    Beat::Hold(Duration::from_millis(1_500)),
+    Beat::Still("frontispiece"),
 ];
 
 const _: () = assert!(coverage(COMPREHENSIVE) == Feature::ALL_MASK);
