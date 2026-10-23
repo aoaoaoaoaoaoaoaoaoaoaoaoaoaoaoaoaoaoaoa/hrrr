@@ -287,6 +287,11 @@ impl<S: Copy + Eq> ScaleLatch<S> {
         self.contender = None;
     }
 
+    #[cfg(feature = "egui-test")]
+    const fn latched(&self) -> bool {
+        self.contender.is_none()
+    }
+
     fn reset(&mut self)
     where
         S: Default,
@@ -610,6 +615,8 @@ pub struct WeatherApp {
     dirty: DirtyState,
     status: String,
     basemap_status: String,
+    #[cfg(feature = "egui-test")]
+    poise: crate::witness::Poise,
 }
 
 impl WeatherApp {
@@ -740,6 +747,8 @@ impl WeatherApp {
             dirty,
             status: "finding latest forecast…".to_owned(),
             basemap_status: "OPENING MAP".to_owned(),
+            #[cfg(feature = "egui-test")]
+            poise: crate::witness::Poise::default(),
         };
         app.worker.send(Command::Discover)?;
         Ok(app)
@@ -795,6 +804,18 @@ impl WeatherApp {
             self.session_state.inspector_scroll = inspector.scroll_offset;
             self.mark_dirty();
         }
+        #[cfg(feature = "egui-test")]
+        {
+            let berth = if inspector.is_expanded() {
+                eternalist_apps::inspector::WIDTH
+            } else {
+                0.0
+            };
+            self.poise.dock = Some(crate::witness::Dock {
+                raised: inspector.is_expanded(),
+                resting: (inspector.visible_extent() - berth).abs() < 0.01,
+            });
+        }
         inspector.agitate(&mut self.water);
     }
 
@@ -816,6 +837,14 @@ impl WeatherApp {
             self.water.monoglyph(control);
         }
         let shown = DrawerPanel::ALL[response.panel];
+        #[cfg(feature = "egui-test")]
+        {
+            self.poise.drawer = Some(crate::witness::Drawer {
+                raised: response.raised,
+                settled: response.settled,
+                panel: shown.wire(),
+            });
+        }
         if self.session_state.drawer_panel != Some(shown) {
             self.session_state.drawer_panel = Some(shown);
             self.mark_dirty();
@@ -1090,7 +1119,7 @@ impl WeatherApp {
             &self.active_view,
         );
         self.name_edit = edit;
-        self.apply_view_actions(actions);
+        self.apply_view_actions(ui.ctx(), actions);
     }
 
     fn view_library_panel(&mut self, ui: &mut egui::Ui) {
@@ -1107,7 +1136,7 @@ impl WeatherApp {
         );
         self.shelf_edit = shelf_edit;
         self.entry_edit = entry_edit;
-        self.apply_view_actions(actions);
+        self.apply_view_actions(ui.ctx(), actions);
     }
 
     fn forecast_controls(&mut self, ui: &mut egui::Ui) {
@@ -1158,6 +1187,7 @@ impl WeatherApp {
                 })
                 .inner
                 .on_hover_text("Previous valid time");
+            crate::witness::response(ui, hrrr_contract::Target::ValidHourEarlier, &previous);
             self.water.monoglyph(&previous);
             if previous.clicked()
                 && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_sub(1)))
@@ -1172,6 +1202,7 @@ impl WeatherApp {
                 )
                 .inner
                 .on_hover_text("Next valid time");
+            crate::witness::response(ui, hrrr_contract::Target::ValidHourLater, &next);
             self.water.monoglyph(&next);
             if next.clicked()
                 && let Some(lead) = axis.and_then(|axis| axis.at(current.saturating_add(1)))
@@ -1293,6 +1324,7 @@ impl WeatherApp {
         let _step = ui.horizontal(|ui| {
             let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             let older = ui.add_sized([width, step_height], egui::Button::new("OLDER"));
+            crate::witness::response(ui, hrrr_contract::Target::RunOlder, &older);
             if older.clicked() {
                 run_step = run
                     .previous()
@@ -1304,6 +1336,7 @@ impl WeatherApp {
                     ui.add_sized([width, step_height], egui::Button::new("NEWER"))
                 })
                 .inner;
+            crate::witness::response(ui, hrrr_contract::Target::RunNewer, &newer);
             if newer.clicked() {
                 run_step = run.next().ok().and_then(|candidate| {
                     latest_run
@@ -1345,14 +1378,17 @@ impl WeatherApp {
 
         let cover = basemap::cover(self.viewport, rect);
         self.demand_cover(&cover);
-        let coherent = cover.finest_ready(|key| {
+        let finest = cover.finest_ready(|key| {
             self.tiles.contains(key)
                 || self
                     .tile_rejections
                     .get(&key)
                     .is_some_and(|rejection| rejection.resolves())
         });
-        let coherent = coherent.map(|stratum| stratum.keys.clone());
+        #[cfg(feature = "egui-test")]
+        let basemap_painted =
+            finest.is_some_and(|stratum| stratum.intent == basemap::Intent::Required);
+        let coherent = finest.map(|stratum| stratum.keys.clone());
         if let Some(keys) = coherent
             && (keys.len() != self.presented_basemap.len()
                 || keys
@@ -1430,6 +1466,13 @@ impl WeatherApp {
             if key.product == Product::Wind {
                 wind_barb::paint(&painter, &field, self.viewport, rect);
             }
+        }
+        #[cfg(feature = "egui-test")]
+        {
+            self.poise.navigating = navigating;
+            self.poise.painted = basemap_painted
+                && (self.session_state.overlay.active().is_none() || self.active_field().is_some())
+                && self.range_scale.latched();
         }
         self.paint_labels(&painter, rect);
         if let Some(scale) = legend_scale.as_ref() {
@@ -1536,7 +1579,7 @@ impl WeatherApp {
             && response.clicked()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            let persistent = ui.input(|input| input.modifiers.shift);
+            let persistent = ui.input(click_shifted);
             self.strike_point(rect, pointer, persistent);
             self.water.click(egui::Rect::from_center_size(
                 pointer,
@@ -1703,11 +1746,13 @@ impl WeatherApp {
             let crown = hardware.bulb();
             hardware.paint(painter, hot_pin == Some(slot));
             let id = egui::Id::new(("persistent-pin", slot));
-            let size = ctx
-                .memory(|memory| memory.area_rect(id).map(|rect| rect.size()))
-                .unwrap_or_default();
+            let size = Self::plaque_size(ctx, id);
             let berth = phalanx.berth(crown, size, egui::vec2(11.0, 7.0));
-            let response = self.point_popup(ctx, id, berth, pin, key, field.as_ref(), true);
+            let response = self.point_popup(ctx, id, berth, pin, key, field.as_ref(), Some(slot));
+            #[cfg(feature = "egui-test")]
+            {
+                self.poise.painted &= Self::plaque_ripe(ctx, id);
+            }
             phalanx.occupy(response.rect);
             if response.reap {
                 victims.push(slot);
@@ -1729,11 +1774,13 @@ impl WeatherApp {
                     egui::Rect::from_center_size(anchor, egui::Vec2::splat(8.0)),
                 );
                 let id = egui::Id::new("transient-probe");
-                let size = ctx
-                    .memory(|memory| memory.area_rect(id).map(|rect| rect.size()))
-                    .unwrap_or_default();
+                let size = Self::plaque_size(ctx, id);
                 let berth = phalanx.berth(anchor, size, egui::vec2(9.0, 9.0));
-                let popup = self.point_popup(ctx, id, berth, probe, key, field.as_ref(), false);
+                let popup = self.point_popup(ctx, id, berth, probe, key, field.as_ref(), None);
+                #[cfg(feature = "egui-test")]
+                {
+                    self.poise.painted &= Self::plaque_ripe(ctx, id);
+                }
                 phalanx.occupy(popup.rect);
             }
         }
@@ -1777,7 +1824,57 @@ impl WeatherApp {
                 center: self.viewport.center_mercator,
                 zoom: self.viewport.zoom,
             },
+            poise: self.poise,
+            run: self.run.map(|run| crate::witness::Run {
+                cycle: run.id.stamp().unwrap_or_default(),
+                tether: match self.session_state.cycle {
+                    RunSelection::Latest => "latest",
+                    RunSelection::LatestLong => "latest-long",
+                    RunSelection::Fixed(_) => "fixed",
+                },
+            }),
+            cabinet: crate::witness::Cabinet {
+                views: self
+                    .views
+                    .saved
+                    .iter()
+                    .map(|view| eternalist_apps::CabinetEntry::key(view).as_str().to_owned())
+                    .collect(),
+                folders: self
+                    .views
+                    .shelves
+                    .iter()
+                    .map(|shelf| crate::witness::Folder {
+                        name: shelf.name.clone(),
+                        open: shelf.open,
+                        views: shelf
+                            .entries
+                            .iter()
+                            .map(|view| {
+                                eternalist_apps::CabinetEntry::key(view).as_str().to_owned()
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            },
         }
+    }
+
+    /// A plaque's size from its previous pass; unknown during the sizing pass
+    /// in which egui lays it out unseen.
+    fn plaque_size(ctx: &egui::Context, id: egui::Id) -> egui::Vec2 {
+        ctx.memory(|memory| memory.area_rect(id).map(|rect| rect.size()))
+            .unwrap_or_default()
+    }
+
+    /// Whether a plaque this pass showed is sized and past egui's fade-in.
+    #[cfg(feature = "egui-test")]
+    fn plaque_ripe(ctx: &egui::Context, id: egui::Id) -> bool {
+        egui::AreaState::load(ctx, id)
+            .and_then(|area| area.size.and(area.last_became_visible_at))
+            .is_some_and(|born| {
+                ctx.input(|input| input.time - born) >= f64::from(ctx.global_style().animation_time)
+            })
     }
 
     fn point_popup(
@@ -1788,7 +1885,7 @@ impl WeatherApp {
         point: MercatorPoint,
         key: Option<FrameKey>,
         field: Option<&(FrameKey, Arc<FieldGrid>)>,
-        removable: bool,
+        pin: Option<usize>,
     ) -> PlaqueResponse {
         let sample = field.and_then(|(_, field)| sample_point(point, field));
         let mut reap = false;
@@ -1798,7 +1895,8 @@ impl WeatherApp {
             .fixed_pos(berth.position)
             .constrain(false)
             .show(ctx, |ui| {
-                let close = removable
+                let close = pin
+                    .is_some()
                     .then(|| chrome::CornerClose::new().size(chrome::MechanismSize::Small));
                 let margin = egui::Margin::symmetric(8, 6);
                 let pane = egui::Frame::new()
@@ -1846,6 +1944,13 @@ impl WeatherApp {
                     let close = close
                         .show(ui, pane.response.rect, (id, "close"))
                         .on_hover_text("remove pin");
+                    if let Some(slot) = pin {
+                        crate::witness::response(
+                            ui,
+                            hrrr_contract::Target::PinRemove(slot),
+                            &close,
+                        );
+                    }
                     self.water.corner_close(&close);
                     reap = close.clicked();
                 }
@@ -2189,7 +2294,11 @@ impl WeatherApp {
         }
     }
 
-    fn apply_view_actions(&mut self, actions: Vec<ViewAction<SavedView>>) {
+    fn apply_view_actions(&mut self, ctx: &egui::Context, actions: Vec<ViewAction<SavedView>>) {
+        if !actions.is_empty() {
+            // The cabinet laid this pass out before its actions landed.
+            ctx.request_discard("view cabinet changed");
+        }
         for action in actions {
             match action {
                 ViewAction::New => self.new_view(),
@@ -3006,6 +3115,25 @@ fn apportion_product_widths(ui: &egui::Ui, row: &[Product]) -> [f32; Product::AL
             return widths;
         }
     }
+}
+
+/// Whether Shift held when the primary button released: a click's own
+/// modifiers survive a pass that also delivers Shift's release.
+fn click_shifted(input: &egui::InputState) -> bool {
+    input
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+                ..
+            } => Some(modifiers.shift),
+            _ => None,
+        })
+        .unwrap_or(input.modifiers.shift)
 }
 
 fn sample_point(point: MercatorPoint, field: &FieldGrid) -> Option<f32> {

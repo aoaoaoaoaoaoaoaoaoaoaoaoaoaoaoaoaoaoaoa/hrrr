@@ -6,7 +6,7 @@ use std::{borrow::Cow, fmt};
 pub const PRODUCT_IDENTIFIER: &str = "moe.swarm.hrrr";
 /// Product display name.
 pub const PRODUCT_NAME: &str = "HRRR";
-pub const UI_FINGERPRINT: &str = "hrrr.ui/7";
+pub const UI_FINGERPRINT: &str = "hrrr.ui/8";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
@@ -18,7 +18,15 @@ pub enum Target {
     Map,
     Panel(&'static str),
     Pin(usize),
+    PinRemove(usize),
+    RunNewer,
+    RunOlder,
     TransientProbe,
+    ValidHourEarlier,
+    ValidHourLater,
+    ViewCreate,
+    ViewName,
+    ViewRename,
 }
 
 impl Target {
@@ -32,7 +40,15 @@ impl Target {
             Self::Map => Cow::Borrowed("hrrr.map.canvas"),
             Self::Panel(name) => Cow::Owned(format!("hrrr.inspector.panel/{name}")),
             Self::Pin(slot) => Cow::Owned(format!("hrrr.map.pin/{slot}")),
+            Self::PinRemove(slot) => Cow::Owned(format!("hrrr.map.pin.remove/{slot}")),
+            Self::RunNewer => Cow::Borrowed("hrrr.forecast.run.newer"),
+            Self::RunOlder => Cow::Borrowed("hrrr.forecast.run.older"),
             Self::TransientProbe => Cow::Borrowed("hrrr.map.probe.transient"),
+            Self::ValidHourEarlier => Cow::Borrowed("hrrr.forecast.valid-hour.earlier"),
+            Self::ValidHourLater => Cow::Borrowed("hrrr.forecast.valid-hour.later"),
+            Self::ViewCreate => Cow::Borrowed("hrrr.view.create"),
+            Self::ViewName => Cow::Borrowed("hrrr.view.name"),
+            Self::ViewRename => Cow::Borrowed("hrrr.view.rename"),
         }
     }
 }
@@ -60,7 +76,15 @@ mod tests {
             (Target::Panel("forecast"), "hrrr.inspector.panel/forecast"),
             (Target::Pin(0), "hrrr.map.pin/0"),
             (Target::Pin(1), "hrrr.map.pin/1"),
+            (Target::PinRemove(0), "hrrr.map.pin.remove/0"),
+            (Target::RunNewer, "hrrr.forecast.run.newer"),
+            (Target::RunOlder, "hrrr.forecast.run.older"),
             (Target::TransientProbe, "hrrr.map.probe.transient"),
+            (Target::ValidHourEarlier, "hrrr.forecast.valid-hour.earlier"),
+            (Target::ValidHourLater, "hrrr.forecast.valid-hour.later"),
+            (Target::ViewCreate, "hrrr.view.create"),
+            (Target::ViewName, "hrrr.view.name"),
+            (Target::ViewRename, "hrrr.view.rename"),
         ];
         let wires = vocabulary
             .iter()

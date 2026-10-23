@@ -22,6 +22,56 @@ mod active {
         pub close_to_tray: bool,
         pub settings: Settings,
         pub viewport: Viewport,
+        pub poise: Poise,
+        pub run: Option<Run>,
+        pub cabinet: Cabinet,
+    }
+
+    /// Presentation facts settled while a frame is laid out.
+    #[derive(Clone, Copy, Default, Serialize)]
+    pub struct Poise {
+        pub dock: Option<Dock>,
+        pub drawer: Option<Drawer>,
+        /// A pointer, wheel, or touch gesture is still moving the map.
+        pub navigating: bool,
+        /// The active field, its latched scale, the required basemap stratum,
+        /// and every visible plaque, sized and faded in, are on the surface.
+        pub painted: bool,
+    }
+
+    /// The Inspector's Dock: its target state and whether its slide reached it.
+    #[derive(Clone, Copy, Serialize)]
+    pub struct Dock {
+        pub raised: bool,
+        pub resting: bool,
+    }
+
+    /// The handheld Inspector: its height, whether it rests, and its Panel.
+    #[derive(Clone, Copy, Serialize)]
+    pub struct Drawer {
+        pub raised: bool,
+        pub settled: bool,
+        pub panel: &'static str,
+    }
+
+    #[derive(Serialize)]
+    pub struct Run {
+        /// Cycle stamp, `YYYYMMDDHH` in UTC.
+        pub cycle: String,
+        pub tether: &'static str,
+    }
+
+    #[derive(Default, Serialize)]
+    pub struct Cabinet {
+        pub views: Vec<String>,
+        pub folders: Vec<Folder>,
+    }
+
+    #[derive(Serialize)]
+    pub struct Folder {
+        pub name: String,
+        pub open: bool,
+        pub views: Vec<String>,
     }
 
     #[derive(Clone, Copy, Serialize)]
@@ -49,6 +99,9 @@ mod active {
                     center: [0.0; 2],
                     zoom: 0.0,
                 },
+                poise: Poise::default(),
+                run: None,
+                cabinet: Cabinet::default(),
             }
         }
     }

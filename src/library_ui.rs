@@ -58,6 +58,7 @@ pub fn active_card<T>(
             .size(card_mechanism_size(ui.ctx()))
             .show(ui)
             .on_hover_text("Rename");
+        crate::witness::response(ui, hrrr_contract::Target::ViewRename, &rename);
         water.monoglyph(&rename);
         if rename.clicked() {
             actions.push(Action::BeginNameEdit);
@@ -70,6 +71,7 @@ pub fn active_card<T>(
                 [ui.available_width(), 20.0],
                 egui::TextEdit::singleline(name_entry).hint_text(format!("{noun} name")),
             );
+            crate::witness::response(ui, hrrr_contract::Target::ViewName, &entry);
             if let Some(wake) = chrome::text_wake(ui, &entry, &before, name_entry) {
                 water.text(wake);
             }
@@ -90,6 +92,7 @@ pub fn active_card<T>(
             .size(card_mechanism_size(ui.ctx()))
             .show(ui)
             .on_hover_text(format!("New {noun}"));
+        crate::witness::response(ui, hrrr_contract::Target::ViewCreate, &create);
         water.monoglyph(&create);
         if create.clicked() {
             actions.push(Action::New);
