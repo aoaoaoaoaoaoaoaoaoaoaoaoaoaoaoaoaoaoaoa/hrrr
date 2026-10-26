@@ -9,7 +9,7 @@ rust-version = "1.98.1"
 publish = false
 
 [dependencies]
-egui-tester = "0.9.13"
+egui-tester = "0.10.0"
 hrrr-contract = { path = "../hrrr-contract", version = "0.6.0" }
 
 [lints]
